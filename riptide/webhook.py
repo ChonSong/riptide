@@ -10,12 +10,12 @@ Handles GitHub App webhook events from the octopus-selfhost app (ID 4262983):
 
 No `gh` CLI. Pure JWT auth via github_app.py.
 """
-import os, json, logging, traceback
+import os, json, logging, traceback, subprocess, shlex, tempfile
 from pathlib import Path
 from typing import Optional
 from queue import Queue
 from threading import Thread
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from fastapi import FastAPI, Request, Response, HTTPException
 from pydantic import BaseModel
@@ -90,6 +90,8 @@ async def github_webhook(request: Request) -> Response:
             return await handle_pull_request(payload, delivery_id)
         elif event == "issue_comment":
             return await handle_issue_comment(payload, delivery_id)
+        elif event == "pull_request_review":
+            return await handle_pull_request_review(payload, delivery_id)
         elif event in ("installation", "installation_repositories"):
             return await handle_installation(payload, event, delivery_id)
         else:
@@ -242,6 +244,45 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
     return Response(status_code=200)
 
 
+async def handle_pull_request_review(payload: dict, delivery_id: str) -> Response:
+    """Handle pull_request_review events — check for 'Need Action' label → spawn Hermes session."""
+    action = payload.get("action", "")
+    if action != "submitted":
+        return Response(status_code=200)
+
+    review = payload.get("review", {})
+    state = review.get("state", "")  # "approved", "changes_requested", "commented"
+    if state not in ("changes_requested", "commented"):
+        return Response(status_code=200)
+
+    pr = payload.get("pull_request", {})
+    repo = payload.get("repository", {})
+
+    # Check for "Need Action" label (case-insensitive)
+    labels = pr.get("labels", [])
+    action_phrases = ("need action", "needs action", "need-action", "needs-action", "action needed", "action-required")
+    has_need_action = any(
+        label.get("name", "").lower() in action_phrases
+        for label in labels
+    )
+    if not has_need_action:
+        return Response(status_code=200)
+
+    owner = repo.get("owner", {}).get("login", "")
+    repo_name = repo.get("name", "")
+    pr_number = pr.get("number")
+    review_body = review.get("body", "")
+    reviewer = review.get("user", {}).get("login", "unknown")
+
+    log.info(
+        f"[{delivery_id}] Need Action on {owner}/{repo_name}#{pr_number} "
+        f"by {reviewer}: '{review_body[:200]}'"
+    )
+
+    _spawn_hermes_session(owner, repo_name, pr_number, review_body, reviewer)
+    return Response(status_code=200)
+
+
 async def handle_installation(payload: dict, event: str, delivery_id: str) -> Response:
     """Handle installation events — sync repo list."""
     action = payload.get("action", "")
@@ -285,6 +326,81 @@ async def handle_installation(payload: dict, event: str, delivery_id: str) -> Re
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok", "app": "riptide"}
+
+
+# ── Hermes session spawner ───────────────────────────────────────────────────
+
+def _spawn_hermes_session(owner: str, repo: str, pr_number: int, review_body: str, reviewer: str):
+    """
+    Spawn a one-shot Hermes cron session to autonomously address PR review feedback.
+
+    The session runs as a scheduled job ~1 minute in the future with the
+    github-pr-lifecycle skill loaded. The output is delivered to the default
+    delivery target (usually Discord).
+    """
+    hermes_bin = _find_hermes_bin()
+    if not hermes_bin:
+        log.error("hermes binary not found — cannot spawn session")
+        return
+
+    # Schedule 2 minutes from now (use local time — cron parser expects local tz)
+    run_at = (datetime.now() + timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%S")
+
+    prompt = (
+        f"PR #{pr_number} in {owner}/{repo} received a review from {reviewer} "
+        f"requesting changes. The review says: {review_body}. "
+        f"Address this feedback: fetch the PR diff and comments using gh, "
+        f"understand what the reviewer requested, make the necessary code changes, "
+        f"commit with a descriptive message referencing the PR, and push. "
+        f"Reply to the review thread to confirm the changes."
+    )
+
+    cmd = [
+        hermes_bin, "cron", "create", run_at,
+        "--name", f"riptide-pr-{owner}-{repo}-{pr_number}",
+        "--skill", "github-pr-lifecycle",
+    ]
+
+    log.info(f"Spawning Hermes session for {owner}/{repo}#{pr_number}: {' '.join(shlex.quote(c) for c in cmd)}")
+
+    try:
+        result = subprocess.run(
+            cmd,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode != 0:
+            log.error(
+                f"Failed to spawn Hermes session for {owner}/{repo}#{pr_number}: "
+                f"stdout={result.stdout[:300]} stderr={result.stderr[:300]}"
+            )
+        else:
+            log.info(
+                f"Spawned Hermes session for {owner}/{repo}#{pr_number}: "
+                f"{result.stdout[:300]}"
+            )
+    except subprocess.TimeoutExpired:
+        log.warning(f"Timeout spawning Hermes session for {owner}/{repo}#{pr_number}")
+    except Exception as e:
+        log.error(f"Error spawning Hermes session: {e}")
+
+
+def _find_hermes_bin() -> str | None:
+    """Locate the hermes binary. Checks PATH then known install locations."""
+    import shutil
+    path = shutil.which("hermes")
+    if path:
+        return path
+    candidates = [
+        "/home/sc/.hermes/hermes-agent/venv/bin/hermes",
+        "/home/sc/.local/bin/hermes",
+    ]
+    for c in candidates:
+        if os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return None
 
 
 # ── Init DB on startup ─────────────────────────────────────────────────────────
