@@ -13,3 +13,4 @@ This PR is a companion test — verifying that the TLDR companion fires correctl
 - [x] TLDR comment posted
 # sync test
 # another sync
+# trigger companion
