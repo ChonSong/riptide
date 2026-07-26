@@ -12,3 +12,4 @@ This PR is a companion test — verifying that the TLDR companion fires correctl
 - [x] Companion spawned
 - [x] TLDR comment posted
 # sync test
+# another sync
