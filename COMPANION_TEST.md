@@ -22,3 +22,4 @@ This PR is a companion test — verifying that the TLDR companion fires correctl
 # warm up test
 # fallback test
 # issues endpoint fix
+# ELI5 test
