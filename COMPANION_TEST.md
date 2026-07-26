@@ -15,3 +15,4 @@ This PR is a companion test — verifying that the TLDR companion fires correctl
 # another sync
 # trigger companion
 # trigger with 60s timeout
+# real test
