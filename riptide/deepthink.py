@@ -33,7 +33,7 @@ WATCHED_REPOS = [
     r.strip()
     for r in os.environ.get(
         "RIPTIDE_WATCHED_REPOS",
-        "ChonSong/riptide,ChonSong/hermes-webui,ChonSong/hermes-webui-extensions,ChonSong/seans-reporepo,ChonSong/pr-review,ChonSong/everything-claude-code,codeovertcp/gto-wizard-clone-v2",
+        "ChonSong/riptide,ChonSong/hermes-webui,ChonSong/hermes-webui-extensions,ChonSong/seans-reporepo,ChonSong/pr-review,ChonSong/everything-claude-code,codeovertcp/gto-wizard-clone-v2,nesquena/hermes-webui",
     ).split(",")
     if r.strip()
 ]
