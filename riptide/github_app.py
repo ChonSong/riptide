@@ -159,9 +159,9 @@ class GitHubAppClient:
         return resp.json()
 
     def post_pr_comment(self, installation_id: int, owner: str, repo: str, pr_number: int, body: str) -> dict:
-        """Post a PR-level comment."""
+        """Post a PR-level comment (not inline). Uses issues endpoint for top-level comments."""
         resp = requests.post(
-            f"{self.base_url}/repos/{owner}/{repo}/pulls/{pr_number}/comments",
+            f"{self.base_url}/repos/{owner}/{repo}/issues/{pr_number}/comments",
             headers=self._headers(installation_id, {"Content-Type": "application/json"}),
             json={"body": body},
             timeout=15,

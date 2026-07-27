@@ -10,6 +10,7 @@ Handles GitHub App webhook events from the octopus-selfhost app (ID 4262983):
 
 No `gh` CLI. Pure JWT auth via github_app.py.
 """
+
 import os, json, logging, traceback, subprocess, shlex, tempfile
 from pathlib import Path
 from typing import Optional
@@ -23,7 +24,26 @@ from pydantic import BaseModel
 from .github_app import verify_webhook_signature, GitHubAppClient
 from .review_worker import enqueue_review, enqueue_index
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+# Companion is optional — silently unavailable if RIPTIDE_COMPANION_REPOS is unset
+_companion = None
+
+
+def get_companion():
+    global _companion
+    if _companion is None:
+        try:
+            from .companion import Companion
+
+            _companion = Companion(github_client() if GITHUB_PRIVATE_KEY_PATH else None)
+        except Exception as e:
+            log.warning("Companion not available: %s", e)
+            _companion = False  # sentinel — don't retry
+    return _companion if _companion else None
+
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+)
 log = logging.getLogger("riptide.webhook")
 
 app = FastAPI(title="Riptide Webhook Server")
@@ -43,6 +63,7 @@ METADATA_DB = DATA_DIR / "metadata.db"
 
 _github_client: Optional[GitHubAppClient] = None
 
+
 def github_client() -> GitHubAppClient:
     global _github_client
     if _github_client is None:
@@ -52,19 +73,56 @@ def github_client() -> GitHubAppClient:
     return _github_client
 
 
-# ── In-process job queue ────────────────────────────────────────────────────────
+# ── State tracking for Riptide-acted PRs ─────────────────────────────────────
+# Tracks which PRs Riptide has modified, so we can correlate check_run events
+# with our actions and trigger retries on failure.
+_RIPTIDE_ACTED_PRCS: set[str] = set()
+
+
+def _track_acted_pr(owner: str, repo: str, pr_number: int):
+    """Record that Riptide acted on this PR (for check_run correlation)."""
+    key = f"{owner}/{repo}#{pr_number}"
+    _RIPTIDE_ACTED_PRCS.add(key)
+    # Persist to disk so restarts don't lose state
+    try:
+        state_file = DATA_DIR / "riptide_acted_prs.json"
+        state_file.write_text(json.dumps(list(_RIPTIDE_ACTED_PRCS)))
+    except Exception:
+        pass
+
+
+def _has_acted_on_pr(owner: str, repo: str, pr_number: int) -> bool:
+    """Check if Riptide has acted on this PR."""
+    key = f"{owner}/{repo}#{pr_number}"
+    return key in _RIPTIDE_ACTED_PRCS
+
+
+def _load_acted_prs():
+    """Load persisted state on startup."""
+    global _RIPTIDE_ACTED_PRCS
+    try:
+        state_file = DATA_DIR / "riptide_acted_prs.json"
+        if state_file.exists():
+            _RIPTIDE_ACTED_PRCS = set(json.loads(state_file.read_text()))
+    except Exception:
+        pass
 
 job_queue: Queue = Queue(maxsize=1)  # 1 = serialise reviews to avoid rate limits
+
 
 def start_worker():
     """Start the background review worker thread."""
     from .review_worker import process_jobs
-    t = Thread(target=process_jobs, args=(job_queue,), daemon=True, name="review-worker")
+
+    t = Thread(
+        target=process_jobs, args=(job_queue,), daemon=True, name="review-worker"
+    )
     t.start()
     log.info("Review worker started")
 
 
 # ── Webhook handler ────────────────────────────────────────────────────────────
+
 
 @app.post("/webhook/github")
 async def github_webhook(request: Request) -> Response:
@@ -92,13 +150,19 @@ async def github_webhook(request: Request) -> Response:
             return await handle_issue_comment(payload, delivery_id)
         elif event == "pull_request_review":
             return await handle_pull_request_review(payload, delivery_id)
+        elif event == "check_run":
+            return await handle_check_run(payload, delivery_id)
+        elif event == "workflow_run":
+            return await handle_workflow_run(payload, delivery_id)
         elif event in ("installation", "installation_repositories"):
             return await handle_installation(payload, event, delivery_id)
         else:
             log.info(f"[{delivery_id}] Unhandled event: {event}")
             return Response(status_code=200)
     except Exception as e:
-        log.error(f"[{delivery_id}] Error handling {event}: {e}\n{traceback.format_exc()}")
+        log.error(
+            f"[{delivery_id}] Error handling {event}: {e}\n{traceback.format_exc()}"
+        )
         # Return 200 to prevent GitHub retry storms on our errors
         return Response(status_code=200)
 
@@ -122,7 +186,13 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
         log.info(f"[{delivery_id}] No installation ID, skipping")
         return Response(status_code=200)
 
-    log.info(f"[{delivery_id}] PR {action}: {repo_full}#{pr_number} head_sha={head_sha[:7]}")
+    # Clear retry count on new commits (user or agent pushed changes)
+    if action == "synchronize" and pr_number:
+        _clear_retry_count(f"{owner}/{repo_name}#{pr_number}")
+
+    log.info(
+        f"[{delivery_id}] PR {action}: {repo_full}#{pr_number} head_sha={head_sha[:7]}"
+    )
 
     # PR opened/reopened/synchronize → start review
     if action in ("opened", "reopened", "synchronize"):
@@ -144,12 +214,45 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
         except Exception as e:
             log.error(f"[{delivery_id}] Failed to enqueue review: {e}")
 
+        # ── Companion TLDR (opt-in, non-blocking, background thread) ──
+        companion = get_companion()
+        if companion and companion.is_active_for(owner, repo_name):
+            changed = []
+            try:
+                # Fetch changed files for companion context (lightweight)
+                from threading import Thread
+
+                t = Thread(
+                    target=companion.run_for_pr,
+                    args=(
+                        installation_id,
+                        owner,
+                        repo_name,
+                        pr_number,
+                        pr.get("title", f"PR #{pr_number}"),
+                        pr.get("user", {}).get("login", "unknown"),
+                        [],  # changed_files will be fetched inside companion thread
+                    ),
+                    daemon=True,
+                    name=f"companion-{repo_name}-{pr_number}",
+                )
+                t.start()
+                log.info(
+                    f"[{delivery_id}] Companion thread spawned for {repo_full}#{pr_number}"
+                )
+            except Exception as e:
+                log.warning(f"[{delivery_id}] Companion launch failed: {e}")
+
     # PR merged → incremental index
     elif action == "closed" and is_merged:
         # Fetch changed files list via GitHub API
         try:
-            files = github_client().get_pr_files(installation_id, owner, repo_name, pr_number)
-            file_list = [{"filename": f["filename"], "status": f["status"]} for f in files]
+            files = github_client().get_pr_files(
+                installation_id, owner, repo_name, pr_number
+            )
+            file_list = [
+                {"filename": f["filename"], "status": f["status"]} for f in files
+            ]
             job = {
                 "type": "incremental_index",
                 "installation_id": installation_id,
@@ -161,7 +264,9 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
                 "delivery_id": delivery_id,
             }
             enqueue_index(job_queue, job)
-            log.info(f"[{delivery_id}] Incremental index enqueued for {repo_full}#{pr_number}")
+            log.info(
+                f"[{delivery_id}] Incremental index enqueued for {repo_full}#{pr_number}"
+            )
         except Exception as e:
             log.error(f"[{delivery_id}] Failed to enqueue incremental index: {e}")
 
@@ -183,8 +288,7 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
     # Check if this is a PR (not a plain issue)
     is_pr = bool(issue.get("pull_request"))
     mentions_riptide = bool(
-        is_pr and
-        ("@riptide" in body.lower() or "@octopus" in body.lower())
+        is_pr and ("@riptide" in body.lower() or "@octopus" in body.lower())
     )
 
     # Skip own comments (posted by the bot)
@@ -213,11 +317,15 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
     if not installation_id:
         return Response(status_code=200)
 
-    log.info(f"[{delivery_id}] @mention in {repo_full}#{pr_number}, comment_id={comment_id}")
+    log.info(
+        f"[{delivery_id}] @mention in {repo_full}#{pr_number}, comment_id={comment_id}"
+    )
 
     # Add 👀 reaction
     try:
-        github_client().add_comment_reaction(installation_id, owner, repo_name, comment_id, "eyes")
+        github_client().add_comment_reaction(
+            installation_id, owner, repo_name, comment_id, "eyes"
+        )
     except Exception as e:
         log.warning(f"[{delivery_id}] Could not add reaction: {e}")
 
@@ -260,10 +368,16 @@ async def handle_pull_request_review(payload: dict, delivery_id: str) -> Respons
 
     # Check for "Need Action" label (case-insensitive)
     labels = pr.get("labels", [])
-    action_phrases = ("need action", "needs action", "need-action", "needs-action", "action needed", "action-required")
+    action_phrases = (
+        "need action",
+        "needs action",
+        "need-action",
+        "needs-action",
+        "action needed",
+        "action-required",
+    )
     has_need_action = any(
-        label.get("name", "").lower() in action_phrases
-        for label in labels
+        label.get("name", "").lower() in action_phrases for label in labels
     )
     if not has_need_action:
         return Response(status_code=200)
@@ -293,6 +407,7 @@ async def handle_installation(payload: dict, event: str, delivery_id: str) -> Re
         log.info(f"[{delivery_id}] App uninstalled, installation_id={installation_id}")
         # Remove from metadata DB
         import sqlite3
+
         with sqlite3.connect(METADATA_DB) as conn:
             conn.execute("DELETE FROM installations WHERE id = ?", (installation_id,))
         return Response(status_code=200)
@@ -305,32 +420,214 @@ async def handle_installation(payload: dict, event: str, delivery_id: str) -> Re
         client = github_client()
         repos = client.get_installation_repos(installation_id)
         import sqlite3
+
         with sqlite3.connect(METADATA_DB) as conn:
-            conn.execute("""
+            conn.execute(
+                """
                 INSERT OR REPLACE INTO installations (id, account_login, created_at)
                 VALUES (?, ?, ?)
-            """, (installation_id, installation.get("account", {}).get("login", ""), datetime.now(timezone.utc).isoformat()))
+            """,
+                (
+                    installation_id,
+                    installation.get("account", {}).get("login", ""),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
             for r in repos:
-                conn.execute("""
+                conn.execute(
+                    """
                     INSERT OR REPLACE INTO repositories
                     (id, full_name, name, default_branch, installation_id, is_active)
                     VALUES (?, ?, ?, ?, ?, 1)
-                """, (r["id"], r["full_name"], r["name"], r.get("default_branch", "main"), installation_id))
-        log.info(f"[{delivery_id}] Synced {len(repos)} repos for installation {installation_id}")
+                """,
+                    (
+                        r["id"],
+                        r["full_name"],
+                        r["name"],
+                        r.get("default_branch", "main"),
+                        installation_id,
+                    ),
+                )
+        log.info(
+            f"[{delivery_id}] Synced {len(repos)} repos for installation {installation_id}"
+        )
     except Exception as e:
         log.error(f"[{delivery_id}] Installation sync failed: {e}")
 
     return Response(status_code=200)
 
 
-@app.get("/health")
+async def handle_check_run(payload: dict, delivery_id: str) -> Response:
+    """Handle check_run events — detect CI failures on PRs we've acted on."""
+    if payload.get("action") != "completed":
+        return Response(status_code=200)
+
+    check_run = payload.get("check_run", {})
+    conclusion = check_run.get("conclusion", "")
+    if conclusion not in ("failure", "timed_out", "cancelled"):
+        return Response(status_code=200)
+
+    prs = check_run.get("pull_requests", [])
+    if not prs:
+        return Response(status_code=200)
+
+    repo = payload.get("repository", {})
+    owner = repo.get("owner", {}).get("login", "")
+    repo_name = repo.get("name", "")
+
+    for pr_data in prs:
+        pr_number = pr_data.get("number")
+        if not pr_number:
+            continue
+        if not _has_acted_on_pr(owner, repo_name, pr_number):
+            continue
+
+        retry_key = f"{owner}/{repo_name}#{pr_number}"
+        retry_count = _get_retry_count(retry_key)
+        if retry_count >= 3:
+            log.warning(f"[{delivery_id}] Max retries for {retry_key}")
+            continue
+
+        log.info(f"[{delivery_id}] CI failed {retry_key} attempt {retry_count + 1}/3")
+        _spawn_retry_session(
+            owner, repo_name, pr_number,
+            check_run.get("name", "CI"), conclusion,
+            check_run.get("output", {}).get("summary", "No output"),
+        )
+
+    return Response(status_code=200)
+
+
+async def handle_workflow_run(payload: dict, delivery_id: str) -> Response:
+    """
+    Handle workflow_run events — detect GitHub Actions CI failures on PRs
+    we've acted on. This is the primary mechanism for GitHub Actions.
+    """
+    if payload.get("action") != "completed":
+        return Response(status_code=200)
+
+    workflow_run = payload.get("workflow_run", {})
+    conclusion = workflow_run.get("conclusion", "")
+    if conclusion not in ("failure", "timed_out", "cancelled"):
+        return Response(status_code=200)
+
+    prs = workflow_run.get("pull_requests", [])
+    if not prs:
+        return Response(status_code=200)
+
+    repo = payload.get("repository", {})
+    owner = repo.get("owner", {}).get("login", "")
+    repo_name = repo.get("name", "")
+
+    for pr_data in prs:
+        pr_number = pr_data.get("number")
+        if not pr_number:
+            continue
+        if not _has_acted_on_pr(owner, repo_name, pr_number):
+            continue
+
+        retry_key = f"{owner}/{repo_name}#{pr_number}"
+        retry_count = _get_retry_count(retry_key)
+        if retry_count >= 3:
+            log.warning(f"[{delivery_id}] Max retries for {retry_key}")
+            continue
+
+        log.info(f"[{delivery_id}] Workflow failed {retry_key} attempt {retry_count + 1}/3")
+        _spawn_retry_session(
+            owner, repo_name, pr_number,
+            workflow_run.get("name", "CI"), conclusion,
+            workflow_run.get("head_commit", {}).get("message", "No output"),
+        )
+
+    return Response(status_code=200)
+
+
+def _get_retry_count(key: str) -> int:
+    try:
+        f = DATA_DIR / "riptide_retries.json"
+        if f.exists():
+            return json.loads(f.read_text()).get(key, 0)
+    except Exception:
+        pass
+    return 0
+
+def _increment_retry_count(key: str):
+    """Increment the retry count for a PR."""
+    try:
+        f = DATA_DIR / "riptide_retries.json"
+        data = json.loads(f.read_text()) if f.exists() else {}
+        data[key] = data.get(key, 0) + 1
+        f.write_text(json.dumps(data))
+    except Exception:
+        pass
+
+
+def _clear_retry_count(key: str):
+    """Clear retry count for a PR (called on new commits / push events)."""
+    try:
+        f = DATA_DIR / "riptide_retries.json"
+        if f.exists():
+            data = json.loads(f.read_text())
+            if key in data:
+                del data[key]
+                f.write_text(json.dumps(data))
+    except Exception:
+        pass
+
+
+def _spawn_retry_session(owner, repo, pr_number, check_name, conclusion, output_summary):
+    """Spawn a deep-think retry session when CI fails after our changes."""
+    hermes_bin = _find_hermes_bin()
+    if not hermes_bin:
+        return
+
+    retry_key = f"{owner}/{repo}#{pr_number}"
+    retry_count = _get_retry_count(retry_key)
+    delay_minutes = [2, 5, 10][min(retry_count, 2)]
+    run_at = (datetime.now() + timedelta(minutes=delay_minutes)).strftime("%Y-%m-%dT%H:%M:%S")
+
+    prompt = (
+        f"PR #{pr_number} in {owner}/{repo} has FAILING CI after Riptide made changes.\n\n"
+        f"FAILING CHECK: {check_name}\nCONCLUSION: {conclusion}\nOUTPUT: {output_summary}\n"
+        f"RETRY ATTEMPT: {retry_count + 1}/3\n\n"
+        f"ROLE: Senior engineer diagnosing test failures. Use deep-think skill.\n\n"
+        f"DIAGNOSIS LOOP:\n"
+        f"1. IDENTIFY — Which tests failed? Exact error messages?\n"
+        f"   gh pr checks {pr_number} --repo {owner}/{repo}\n"
+        f"2. LOCALIZE — Which files/functions implicated? Use graphify.\n"
+        f"3. ROOT CAUSE — Why did tests fail? Bug in our change? Broken assumption?\n"
+        f"4. FIX — Minimal correct fix. Don't just make tests pass.\n"
+        f"5. VERIFY — Run failing tests locally before pushing.\n"
+        f"6. ESCALATE — If can't fix, comment explaining what you tried.\n\n"
+        f"REPO: ~/workspace/{repo}/\n"
+    )
+
+    cmd = [
+        hermes_bin, "cron", "create", run_at,
+        "--name", f"riptide-retry-{owner}-{repo}-{pr_number}-{retry_count + 1}",
+        "--skill", "github-pr-lifecycle",
+        "--skill", "deep-think",
+    ]
+
+    try:
+        result = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=15)
+        if result.returncode == 0:
+            _increment_retry_count(retry_key)
+            log.info(f"Retry spawned: {result.stdout[:200]}")
+        else:
+            log.error(f"Retry failed: {result.stderr[:200]}")
+    except Exception as e:
+        log.error(f"Retry error: {e}")
 async def health() -> dict:
     return {"status": "ok", "app": "riptide"}
 
 
 # ── Hermes session spawner ───────────────────────────────────────────────────
 
-def _spawn_hermes_session(owner: str, repo: str, pr_number: int, review_body: str, reviewer: str):
+
+def _spawn_hermes_session(
+    owner: str, repo: str, pr_number: int, review_body: str, reviewer: str
+):
     """
     Spawn a one-shot Hermes cron session to autonomously address PR review feedback.
 
@@ -348,20 +645,51 @@ def _spawn_hermes_session(owner: str, repo: str, pr_number: int, review_body: st
 
     prompt = (
         f"PR #{pr_number} in {owner}/{repo} received a review from {reviewer} "
-        f"requesting changes. The review says: {review_body}. "
-        f"Address this feedback: fetch the PR diff and comments using gh, "
-        f"understand what the reviewer requested, make the necessary code changes, "
-        f"commit with a descriptive message referencing the PR, and push. "
-        f"Reply to the review thread to confirm the changes."
+        f"requesting changes. The review says: {review_body}.\n\n"
+        f"ROLE: You are a senior engineer addressing code review feedback. "
+        f"You must use the deep-think skill (load with skill_view('deep-think')) "
+        f"to reason about this feedback before making any code changes.\n\n"
+        f"MANDATORY DEEPTHINK LOOP:\n"
+        f"1. SURFACE — Fetch the PR diff, review comments, and inline comments.\n"
+        f"   Read everything the reviewer said. Restate the feedback in your own words.\n"
+        f"2. EXPLORE — What code paths are affected? What assumptions does the\n"
+        f"   reviewer's feedback reveal? Are there edge cases?\n"
+        f"3. CHALLENGE — Could the proposed fix have unintended side effects?\n"
+        f"   Is there a simpler approach? What tests could break?\n"
+        f"4. SYNTHESIZE — Design the fix. Plan which files to change and why.\n"
+        f"5. EMPIRICAL VALIDATION — After applying changes, run the test suite.\n"
+        f"   Verify the fix actually works before pushing.\n"
+        f"6. VERIFY — Check CI after pushing. If tests fail, diagnose and fix.\n"
+        f"   Then request re-gate by commenting on the PR mentioning the reviewer.\n\n"
+        f"UI CHANGES: If the PR modifies UI files (*.css, *.scss, *.less, *.html, *.jsx,\n"
+        f"*.tsx, *.vue, *.svelte, *.astro, *.svg, *.png, *.jpg, *.gif, *.webp), you MUST run\n"
+        f"ProofShot visual verification BEFORE and AFTER applying fixes:\n"
+        f"  proofshot start → test the UI → proofshot stop → proofshot pr {pr_number}\n\n"
+        f"REPO CONTEXT: The repository is at ~/workspace/{repo}/.\n"
+        f"Use the codebase and git history to understand the full context.\n\n"
+        f"PREFERRED MODEL: If possible, use custom:LongCat with LongCat-2.0 "
+        f"for reasoning. If quota is exceeded, fall back to default model."
     )
 
+    # Track that we acted on this PR (for check_run retry correlation)
+    _track_acted_pr(owner, repo, pr_number)
+
     cmd = [
-        hermes_bin, "cron", "create", run_at,
-        "--name", f"riptide-pr-{owner}-{repo}-{pr_number}",
-        "--skill", "github-pr-lifecycle",
+        hermes_bin,
+        "cron",
+        "create",
+        run_at,
+        "--name",
+        f"riptide-pr-{owner}-{repo}-{pr_number}",
+        "--skill",
+        "github-pr-lifecycle",
+        "--skill",
+        "deep-think",
     ]
 
-    log.info(f"Spawning Hermes session for {owner}/{repo}#{pr_number}: {' '.join(shlex.quote(c) for c in cmd)}")
+    log.info(
+        f"Spawning Hermes session for {owner}/{repo}#{pr_number}: {' '.join(shlex.quote(c) for c in cmd)}"
+    )
 
     try:
         result = subprocess.run(
@@ -390,6 +718,7 @@ def _spawn_hermes_session(owner: str, repo: str, pr_number: int, review_body: st
 def _find_hermes_bin() -> str | None:
     """Locate the hermes binary. Checks PATH then known install locations."""
     import shutil
+
     path = shutil.which("hermes")
     if path:
         return path
@@ -405,9 +734,12 @@ def _find_hermes_bin() -> str | None:
 
 # ── Init DB on startup ─────────────────────────────────────────────────────────
 
+
 @app.on_event("startup")
 def init_db():
+    _load_acted_prs()
     import sqlite3
+
     with sqlite3.connect(METADATA_DB) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS installations (
