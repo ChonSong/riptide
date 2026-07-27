@@ -11,10 +11,7 @@ Environment:
   GITHUB_PRIVATE_KEY_PATH    Path to .pem private key
   GITHUB_WEBHOOK_SECRET      Webhook secret for signature verification
   GITHUB_APP_SLUG            App slug (default: octopus-selfhost)
-  RIPTIDE_DATA_DIR           Where to store metadata.db and vector indices
-  OLLAMA_BASE_URL            Ollama base URL (default: http://localhost:43311)
-  OLLAMA_EMBED_MODEL         Embedding model (default: nomic-embed-text)
-  OLLAMA_REVIEW_MODEL        Review model (default: qwen2.5-coder:7b)
+  RIPTIDE_DATA_DIR           Where to store metadata.db
   HOST                       Bind host (default: 0.0.0.0)
   PORT                       Bind port (default: 8477)
 """
