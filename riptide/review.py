@@ -97,22 +97,34 @@ CORRECTNESS · SECURITY · PERFORMANCE · ERROR_HANDLING · BREAKING_CHANGE · T
 
 {ctx_block}
 
-## Instructions
-1. Review the diff carefully for bugs, security issues, and breaking changes
-2. Check the retrieved context for relevant patterns that apply to this diff
-3. If the change looks good, respond with: "## ✅ LGTM — no issues found"
-4. Format findings as:
+## UI/Visual Changes
+If the PR modifies UI files (*.css, *.scss, *.less, *.html, *.jsx, *.tsx, *.vue, *.svelte, *.astro, *.svg, *.png, *.jpg, *.gif, *.webp), you MUST include a "ProofShot Required" section at the end of your review:
 
 ```
-**Finding**: <one-line description>
+## 📸 ProofShot Verification Required
+This PR contains UI changes. Visual verification is needed.
+Run: proofshot start → test the UI → proofshot stop → proofshot pr <pr-number>
+```
+
+## Instructions
+1. Analyze the diff for: bugs, security vulnerabilities, breaking changes, race conditions, error handling gaps
+2. Check the retrieved context for relevant patterns — does this change violate existing conventions?
+3. Consider edge cases: null inputs, empty collections, concurrent access, resource cleanup, auth bypass
+4. If the change looks good AND no UI files changed, respond with: "## ✅ LGTM — no issues found"
+5. Format findings as:
+
+```
+**Finding**: <one-line description of the issue>
 **Severity**: <Critical/High/Medium/Low>
 **Category**: <one category from the list above>
 **Location**: <file path>:<line or "general">
-**Suggestion**: <specific fix, preferrred>
+**Suggestion**: <specific fix with code example if applicable>
 ```
 
-5. Maximum 10 findings. Prioritise Critical > High > Medium. Skip style nits unless clearly misleading.
-6. Use code block fences in suggestions when showing replacement code.
+6. Maximum 10 findings. Prioritise Critical > High > Medium. Skip style nits unless clearly misleading.
+7. Use code block fences in suggestions when showing replacement code.
+8. For each finding, explain WHY it's a problem, not just WHAT is wrong.
+9. If UI files changed: ALWAYS append the ProofShot Verification section (even if LGTM).
 """
 
 

@@ -1,9 +1,8 @@
 __pycache__/
 *.pyc
 .env
-venv/
-*.db
 *.pem
+*.db
 node_modules/
 *.egg-info/
 .pytest_cache/
@@ -15,7 +14,6 @@ CONTRIBUTING.md
 GOVERNANCE.md
 LICENSE.md
 MAINTAINERS.md
-README.md
 ROADMAP.md
 SECURITY.md
 SUPPORT.md
