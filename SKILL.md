@@ -1,43 +1,82 @@
 ---
 name: riptide
 description: |
-  Self-hosted GitHub App PR reviewer — local Ollama (qwen2.5-coder:7b), numpy vector store,
-  webhook-driven (no polling). Forked from Octopus (2026-07-12) and stripped of Next.js/Docker/Qdrant
-  overhead. Handles: PR open/reopen/sync → full review + inline comments + check run;
-  @mention → review with reference to triggering comment; PR merge → incremental index update.
-  All credentials use GitHub App JWT (octopus-selfhost ID 4262983).
+  Self-hosted GitHub App with two bots: (1) Companion — posts TL;DR comments on PRs
+  with graphify-informed blast radius, triggered by webhook on PR open/sync.
+  (2) Riptide Review — autonomous deep-think code review for large settled PRs
+  (>100 LOC, unchanged 30+ min), triggered by cron polling.
 triggers:
-  - pull_request (opened, reopened, synchronize)
-  - issue_comment (@mention: @riptide or @octopus)
-  - installation / installation_repositories
+  - pull_request (opened, reopened, synchronize) → Companion TLDR
+  - issue_comment (@riptide-bot companion skip/resume) → Companion control
+  - installation / installation_repositories → sync repo list
+  - cron (every 15 min) → Riptide Review deep-think sessions
 entrypoint: server.py
 ---
-# Riptide — Self-Hosted GitHub App PR Reviewer
+# Riptide — Two-Bot GitHub App
 
-## What it is
+## Bot 1: Companion (Webhook-Triggered)
 
-A lightweight Python/FastAPI fork of Octopus that provides AI-powered code review
-via a GitHub App webhook, without heavy infrastructure (no Next.js, no Qdrant, no Docker
-sidecar for every review). Runs as a single container or bare Python process.
+Posts a TL;DR comment on every PR with graphify-informed blast radius analysis.
 
-- **GitHub App**: `octopus-selfhost` (ID 4262983)
-- **Auth**: JWT via App private key (no user `gh` token)
-- **LLM**: Local Ollama — `qwen2.5-coder:7b` (review) + `nomic-embed-text` (embeddings)
-- **Vector store**: NumPy float32 blobs + SQLite metadata (no sqlite-vec extension needed)
-- **Output**: PR summary comment + inline diff comments + GitHub Check Run annotation
+**Trigger:** `pull_request` opened/reopened/synchronize (via GitHub webhook)
+**Model:** `qwen2.5-coder:7b` (via local Ollama)
+**Output:** TL;DR comment with ELI5 + Blast Radius + ProofShot (if UI)
+
+**Skip/Resume Per PR:**
+```
+@riptide-bot companion skip     # Stop commenting on this PR
+@riptide-bot companion resume   # Re-enable
+```
+
+## Bot 2: Riptide Review (Cron-Triggered)
+
+Autonomous deep-think code review for large, settled PRs.
+
+**Trigger:** Cron polling every 15 min. Spawns Hermes session when ALL of:
+  - PR has >100 LOC changes (additions + deletions)
+  - PR unchanged for ≥30 minutes
+  - PR is in a watched repo AND (owned by ChonSong OR authored by ChonSong)
+
+**Model:** Hermes agent with `deep-think` + `github-pr-lifecycle` skills
+**Output:** PR review comment with graphify analysis + deep-think reasoning
+
+**Config (env vars):**
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RIPTIDE_WATCHED_REPOS` | `ChonSong/riptide,...` | Comma-separated repo list |
+| `RIPTIDE_OUR_USERNAME` | `ChonSong` | GitHub username for authorship check |
+| `RIPTIDE_OUR_ORG` | `ChonSong` | GitHub org for ownership check |
+| `RIPTIDE_STALENESS_MINUTES` | `30` | Minutes since last update to qualify |
+| `RIPTIDE_MIN_LOC_CHANGED` | `100` | Minimum LOC changes to trigger |
 
 ## Architecture
 
 ```
-GitHub webhook (pull_request / issue_comment / installation)
-  → FastAPI /webhook/github  (verify sig, enqueue job)
-  → review_worker.py         (background daemon thread, serialised queue)
-      → github_app.py        (JWT → installation token → GitHub API)
-      → github_app.py        (get_pr_diff, get_pr_files, post_*_comment, check_run CRUD)
-      → embed.py             (Ollama /api/embed, chunking with 1500-char cap)
-      → store.py             (NumPy/SQLite vector store, cosine similarity search)
-      → review.py            (prompt builder, LLM call, finding parser)
-  → GitHub API               (inline comments, PR comment, check run)
+GitHub Webhook
+  → FastAPI /webhook/github (verify signature, route event)
+  → Companion thread (TL;DR + graphify blast radius)
+  → GitHub API (post comment)
+
+Cron (every 15 min)
+  → riptide/deepthink.py (poll open PRs, filter, spawn)
+  → Hermes cron session (deep-think + graphify analysis)
+  → GitHub API (post review comment)
+```
+
+## Files
+
+```
+riptide/
+├── github_app.py      # JWT auth, GitHub API client
+├── companion.py       # Bot 1: TL;DR + ELI5 + ProofShot comment generator
+├── deepthink.py       # Bot 2: Cron polling + Hermes session spawner
+├── webhook.py         # FastAPI server (companion trigger, installation sync)
+├── __init__.py
+server.py              # Uvicorn entry point
+requirements.txt       # fastapi, uvicorn, pydantic, cryptography, requests, graphifyy
+Dockerfile
+docker-compose.yml
+SKILL.md
 ```
 
 ## Setup
@@ -48,148 +87,47 @@ GitHub webhook (pull_request / issue_comment / installation)
 # /home/sc/workspace/riptide/.env
 GITHUB_APP_ID=4262983
 GITHUB_PRIVATE_KEY_PATH=/app/github-private-key.pem
-GITHUB_WEBHOOK_SECRET=<your-webhook-secret>   # generate: python -c "import secrets; print(secrets.token_hex(32))"
+GITHUB_WEBHOOK_SECRET=<your-webhook-secret>
 GITHUB_APP_SLUG=octopus-selfhost
-OLLAMA_BASE_URL=http://host.docker.internal:43311
-OLLAMA_EMBED_MODEL=nomic-embed-text
-OLLAMA_REVIEW_MODEL=qwen2.5-coder:7b
 RIPTIDE_DATA_DIR=/data
-RETRIEVE_TOP_K=8
-PORT=8477
+
+# Companion (Bot 1)
+RIPTIDE_COMPANION_REPOS=ChonSong/hermes-webui,ChonSong/riptide
+RIPTIDE_COMPANION_MODEL=qwen2.5-coder:7b
+COMPANION_ENABLE_GRAPHIFY=1
+OLLAMA_BASE_URL=http://host.docker.internal:43311
+
+# Riptide Review (Bot 2)
+RIPTIDE_WATCHED_REPOS=ChonSong/riptide,ChonSong/hermes-webui,ChonSong/hermes-webui-extensions,ChonSong/seans-reporepo,ChonSong/pr-review,ChonSong/everything-claude-code,codeovertcp/gto-wizard-clone-v2
+RIPTIDE_STALENESS_MINUTES=30
+RIPTIDE_MIN_LOC_CHANGED=100
 ```
 
-### 2. Point webhook at this server
+### 2. Start the server
 
-GitHub App webhook URL must be publicly reachable. Options:
-
-**Option A — Cloudflare Tunnel** (preferred, already configured):
-```
-# Add to ~/cloudflared/config.yml (or via cfut):
-- service: https://localhost:8477
-  hostname: riptide.codeovertcp.com
-```
-
-**Option B — Ngrok**:
-```bash
-ngrok http 8477 --domain=your-domain.ngrok-free.app
-```
-
-### 3. Install the GitHub App webhook
-
-The `octopus-selfhost` GitHub App (ID 4262983) is already installed on ChonSong repos.
-Update its webhook URL in GitHub Settings → GitHub Apps → octopus-selfhost → Webhook.
-Set the webhook secret to match `GITHUB_WEBHOOK_SECRET`.
-
-Permissions required:
-- Repository: Read & write for pull request comments, check runs, issue comments
-- Repository: Read for contents, pull request metadata
-
-### 4. Start the server
-
-**Bare Python** (development):
-```bash
-cd /home/sc/workspace/riptide
-pip install -r requirements.txt
-python server.py
-```
-
-**Docker** (production):
 ```bash
 cd /home/sc/workspace/riptide
 docker compose up -d --build
 ```
 
-**Via Hermes cron** (self-healing):
-```yaml
-# ~/.hermes/profiles/default/cron/riptide.yml
-command: cd /home/sc/workspace/riptide && docker compose up -d --build
-when: "0 3 * * *"   # daily at 03:00 UTC
-watchdog: true
-health_url: http://localhost:8477/health
-```
-
-## Usage
-
-### Automatic review
-
-GitHub App events trigger reviews automatically:
-
-| Event | Action |
-|-------|--------|
-| `pull_request` opened/reopened/synchronize | Full diff review + inline comments + check run |
-| `issue_comment` with `@riptide` or `@octopus` | Review referencing the triggering comment |
-| `pull_request` closed + merged | Incremental vector store update |
-| `installation` created/deleted | Sync repo list to local metadata DB |
-
-### @mention
-
-```markdown
-<!-- On any PR, post this comment: -->
-@riptide review this please
-```
-
-The bot adds 👀 reaction and starts the review pipeline.
-
-### Manual trigger (via Hermes CLI)
+### 3. Set up the cron for Bot 2
 
 ```bash
-# Enqueue a manual review (e.g., via cron or manual trigger)
-python -c "
-from riptide.review_worker import job_queue, enqueue_review
-job = {
-    'type': 'review',
-    'installation_id': <id>,
-    'owner': 'ChonSong',
-    'repo': 'some-repo',
-    'repo_full': 'ChonSong/some-repo',
-    'pr_number': 42,
-    'pr_title': 'Fix bug',
-    'pr_author': 'someuser',
-    'head_sha': '<sha>',
-    'delivery_id': 'manual',
-}
-enqueue_review(job_queue, job)
-"
+# Add to Hermes cron (every 15 minutes)
+hermes cron create "*/15 * * * *" \
+  --name "riptide-review-poll" \
+  --script /home/sc/workspace/riptide/riptide/deepthink.py
 ```
 
-## Files
-
-```
-riptide/
-├── github_app.py      # JWT auth, GitHub API client (app-level, no user token)
-├── embed.py           # Ollama /api/embed with 1500-char chunking cap
-├── store.py           # NumPy/SQLite vector store
-├── review.py          # Prompt builder, LLM call, finding parser
-├── webhook.py         # FastAPI webhook server (signature verify, event routing)
-├── review_worker.py   # Background queue worker (serialised, daemon thread)
-server.py              # Uvicorn entry point
-requirements.txt
-Dockerfile
-docker-compose.yml
-SKILL.md
-```
-
-## Key differences from Octopus
+## Key Differences from Octopus
 
 | | Riptide | Octopus |
 |--|---------|---------|
-| Stack | Python/FastAPI | Next.js + tRPC |
-| Vector store | NumPy + SQLite | Qdrant (Docker) |
-| Deployment | Single container | Docker Compose + separate services |
-| Auth | GitHub App JWT only | GitHub App JWT + Prisma (org keys) |
-| Check runs | ✅ | ✅ |
-| Inline comments | ✅ | ✅ |
-| @mention | ✅ | ✅ |
-| Review deduplication | ✅ (finding dedup) | ✅ |
-| Incremental index | ✅ | ✅ |
-
-## Key differences from pr-review (scripts-only)
-
-| | Riptide | pr-review (scripts) |
-|--|---------|---------------------|
-| Trigger | Webhook (push) | Cron polling |
-| @mention | ✅ | ❌ |
-| Inline comments | ✅ | ❌ (PR-level only) |
-| Check runs | ✅ | ❌ |
-| GitHub App auth | ✅ JWT | ❌ (gh CLI token) |
-| Hermes skill | ✅ | ❌ (not compliant) |
+| Stack | Python / FastAPI | Next.js + tRPC |
+| Vector store | None (graphify for blast radius) | Qdrant (Docker) |
+| Deployment | Single container | Docker Compose + services |
+| Auth | GitHub App JWT only | JWT + Prisma (org BYOK) |
+| Review | Bot 2: Hermes deep-think | Built-in LLM review |
+| TLDR Comments | Bot 1: Companion | ❌ |
+| Graphify Blast Radius | ✅ | ❌ |
+| Self-Hosted | ✅ | ✅ |

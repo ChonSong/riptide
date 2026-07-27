@@ -1,18 +1,13 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/Riptide-PR%20Reviewer-1f6feb?style=flat" alt="Riptide" />
+  <img src="https://img.shields.io/badge/Riptide-Two%20Bots-1f6feb?style=flat" alt="Riptide" />
 </p>
 
-# Riptide — Self-Hosted GitHub App PR Reviewer
+# Riptide — Self-Hosted GitHub App (Two Bots)
 
-AI-powered code review that runs in your infrastructure. Reviews PRs, posts TLDRs, explains changes like you're five, and triggers visual verification — all automatically.
+AI-powered code review that runs in your infrastructure. Two bots, zero bloat.
 
-**What makes Riptide different:**
-- Reviews PRs with **real code analysis** (not just filename guessing)
-- Posts **TLDR + ELI5 comments** that humans actually want to read
-- Detects **UI changes** and triggers **ProofShot** visual verification
-- Runs **deep thinking loops** when reviewers request changes
-- Uses **Graphify** to understand cross-file impact (blast radius)
-- **Zero template fallbacks** — if the model is down, no comment (no noise)
+**Bot 1 — Companion:** Posts TL;DR comments on PRs with graphify-informed blast radius.
+**Bot 2 — Riptide Review:** Deep-think autonomous code review for large, settled PRs.
 
 ---
 
@@ -20,37 +15,26 @@ AI-powered code review that runs in your infrastructure. Reviews PRs, posts TLDR
 
 ```
 GitHub Webhook
-  → FastAPI /webhook/github (verify signature, enqueue job)
-  → review_worker.py (background daemon thread, serialized queue)
-      → github_app.py    (JWT → installation token → GitHub API)
-      → embed.py         (Ollama /api/embed, 1500-char chunks)
-      → store.py         (NumPy/SQLite vector store, cosine similarity)
-      → review.py        (prompt builder, LLM call, finding parser)
-      → companion.py     (TLDR + ELI5 + ProofShot comment generator)
-  → GitHub API (inline comments, PR summary, check run, companion comment)
-  → Hermes cron (deep-think reasoning for "Need Action" reviews)
+  → FastAPI /webhook/github (verify signature, route event)
+      → Companion thread (TL;DR + graphify blast radius)
+  → GitHub API (post TL;DR comment)
+
+Cron (every 15 min)
+  → riptide/deepthink.py (poll open PRs, filter by LOC + staleness)
+  → Hermes cron session (deep-think + graphify analysis)
+  → GitHub API (post review comment)
 ```
 
 ---
 
-## Pipeline Overview
+## Bot 1: Companion (Webhook-Triggered)
 
-### 1. Automatic Code Review
-Every PR triggers a full diff analysis with context-aware findings.
-
-```yaml
-Trigger: pull_request (opened, reopened, synchronize)
-Output:  GitHub Check Run + inline comments + PR summary
-Model:  qwen2.5-coder:7b (via local Ollama)
-```
-
-### 2. Companion TLDR
-A friendly comment explaining what changed and why it matters.
+Every PR triggers a friendly TL;DR comment explaining what changed and why it matters.
 
 ```yaml
 Trigger: pull_request (opened, reopened, synchronize)
 Output:  "## ✨ TL;DR" comment with ELI5 + Blast Radius + ProofShot (if UI)
-Model:  qwen2.5-coder:7b (120s timeout, no fallback)
+Model:  qwen2.5-coder:7b (via local Ollama)
 ```
 
 Example output:
@@ -76,32 +60,32 @@ makes it even cooler.
 `@riptide-bot companion skip` to opt out</sub>
 ```
 
-### 3. Deep Thinking for "Need Action"
-When a reviewer requests changes and labels "Need Action", Riptide spawns a Hermes cron session that uses **deep-think reasoning** before making changes.
+### Skip/Resume Per PR
+```
+@riptide-bot companion skip     # Stop commenting on this PR
+@riptide-bot companion resume   # Re-enable
+```
+
+---
+
+## Bot 2: Riptide Review (Cron-Triggered)
+
+Autonomous deep-think code review for large, settled PRs. Runs every 15 minutes.
 
 ```yaml
-Trigger: pull_request_review (changes_requested + "Need Action" label)
-Output:  Hermes cron session with deep-think loop
+Trigger: Cron polling (every 15 min)
+Filter:  >100 LOC changes + unchanged 30+ min + (our repo OR our PR)
+Output:  Hermes cron session with deep-think + graphify analysis
 Skills:  github-pr-lifecycle + deep-think
 Model:  custom:LongCat (LongCat-2.0) preferred
 ```
 
 The deep-think loop:
-1. **SURFACE** — Fetch and restate the reviewer's feedback
-2. **EXPLORE** — What code paths are affected? Edge cases?
-3. **CHALLENGE** — Could the fix have side effects? Simpler approach?
-4. **SYNTHESIZE** — Design the fix with full context
-5. **EMPIRICAL VALIDATION** — Run tests, verify CI
-6. **VERIFY** — Check CI after pushing, request re-gate
-
-### 4. ProofShot Visual Verification
-When UI files are modified, both the review and companion prompt for visual verification.
-
-```yaml
-Trigger: Any PR modifying *.css, *.scss, *.less, *.html, *.jsx, *.tsx, 
-         *.vue, *.svelte, *.astro, *.svg, *.png, *.jpg, *.gif, *.webp
-Output:  "📸 ProofShot Required" section in review/companion comment
-```
+1. **SURFACE** — Fetch and restate what the PR changes
+2. **EXPLORE** — What code paths are affected? Graphify blast radius?
+3. **CHALLENGE** — Could the change have side effects? Simpler approach?
+4. **SYNTHESIZE** — Advise next steps (approve, request changes, follow-ups)
+5. **VALIDATE** — Run tests if claims are testable
 
 ---
 
@@ -111,17 +95,14 @@ Output:  "📸 ProofShot Required" section in review/companion comment
 riptide/
 ├── riptide/
 │   ├── github_app.py      # JWT auth, GitHub API client
-│   ├── embed.py           # Ollama embeddings + chunking
-│   ├── store.py           # NumPy/SQLite vector store
-│   ├── review.py          # Prompt builder + LLM caller + finding parser
-│   ├── review_worker.py   # Background worker thread
-│   ├── webhook.py         # FastAPI server (events, companion trigger, cron spawner)
-│   └── companion.py       # TLDR + ELI5 + ProofShot comment generator
+│   ├── companion.py       # Bot 1: TL;DR + ELI5 + ProofShot comment generator
+│   ├── deepthink.py       # Bot 2: Cron polling + Hermes session spawner
+│   ├── webhook.py         # FastAPI server (companion trigger, installation sync)
+│   └── __init__.py
 ├── server.py              # Uvicorn entry point
-├── riptide_example.py     # Workflow demo
-├── requirements.txt       # Python deps (fastapi, uvicorn, numpy, scipy, graphifyy)
-├── Dockerfile             # Container build
-├── docker-compose.yml     # Compose deployment
+├── requirements.txt       # fastapi, uvicorn, pydantic, cryptography, requests, graphifyy
+├── Dockerfile
+├── docker-compose.yml
 ├── SKILL.md               # AI agent skill definition
 └── start.sh               # Dev start script
 ```
@@ -158,15 +139,18 @@ GITHUB_APP_ID=4262983
 GITHUB_PRIVATE_KEY_PATH=/home/sc/workspace/riptide/github-private-key.pem
 GITHUB_WEBHOOK_SECRET=your_secret
 GITHUB_APP_SLUG=riptide-review
-OLLAMA_BASE_URL=http://localhost:43311
-OLLAMA_EMBED_MODEL=nomic-embed-text
-OLLAMA_REVIEW_MODEL=qwen2.5-coder:7b
 RIPTIDE_DATA_DIR=/tmp/riptide-data
 
-# Companion (TLDR comments)
+# Companion (Bot 1)
 RIPTIDE_COMPANION_REPOS=owner/repo1,owner/repo2
 RIPTIDE_COMPANION_MODEL=qwen2.5-coder:7b
 COMPANION_ENABLE_GRAPHIFY=1
+OLLAMA_BASE_URL=http://localhost:43311
+
+# Riptide Review (Bot 2)
+RIPTIDE_WATCHED_REPOS=ChonSong/riptide,ChonSong/hermes-webui
+RIPTIDE_STALENESS_MINUTES=30
+RIPTIDE_MIN_LOC_CHANGED=100
 ```
 
 ### Run
@@ -181,11 +165,17 @@ docker compose up -d --build
 cloudflared tunnel --config ~/.cloudflared/config.yml run
 ```
 
+### Set Up Bot 2 Cron
+```bash
+# Add to Hermes cron (every 15 minutes)
+hermes cron create "*/15 * * * *" \
+  --name "riptide-review-poll" \
+  --script /home/sc/workspace/riptide/riptide/deepthink.py
+```
+
 ---
 
 ## Companion Configuration
-
-The companion posts TLDR comments on opted-in repos. No template fallbacks — if the model is down, it stays silent.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -193,88 +183,17 @@ The companion posts TLDR comments on opted-in repos. No template fallbacks — i
 | `RIPTIDE_COMPANION_MODEL` | Ollama model for TLDR generation | `qwen2.5-coder:7b` |
 | `COMPANION_ENABLE_GRAPHIFY` | Enable blast radius analysis | `1` |
 
-### Skip/Resume Per PR
-```
-@riptide-bot companion skip     # Stop commenting on this PR
-@riptide-bot companion resume   # Re-enable
-```
-
 ---
 
-## Deep Thinking Configuration
+## Riptide Review Configuration
 
-When a reviewer requests changes with the "Need Action" label, Riptide spawns a Hermes cron session.
-
-**Skills loaded:**
-- `github-pr-lifecycle` — PR manipulation procedures
-- `deep-think` — Structured reasoning loop
-
-**Reasoning flow:**
-1. Fetch PR diff + review comments
-2. Apply deep-think loop (surface → explore → challenge → synthesize → validate → verify)
-3. Run ProofShot if UI files changed
-4. Apply fixes with full understanding
-5. Verify CI passes before requesting re-gate
-
-**Preferred model:** `custom:LongCat` (LongCat-2.0) — configured in `~/.hermes/config.yaml`
-
----
-
-## ProofShot Integration
-
-[ProofShot](https://github.com/AmElmo/proofshot) captures browser sessions, screenshots, and errors for visual verification.
-
-### Install
-```bash
-npm install -g proofshot
-```
-
-### Usage in Reviews
-When UI files are detected, Riptide includes:
-```
-## 📸 ProofShot Verification Required
-This PR contains UI changes. Visual verification is needed.
-Run: proofshot start → test the UI → proofshot stop → proofshot pr <number>
-```
-
-### Manual Usage
-```bash
-# Start recording
-proofshot start
-
-# Test the UI in your browser
-# ... interact with the app ...
-
-# Stop and bundle
-proofshot stop
-
-# Post to PR
-proofshot pr 123
-```
-
----
-
-## Graphify Integration
-
-Graphify builds a queryable knowledge graph from your codebase using tree-sitter AST parsing.
-
-### Build a Graph
-```bash
-cd /path/to/repo
-graphify extract . --code-only    # AST-only, free
-graphify cluster-only . --no-viz  # Cluster communities
-```
-
-### Query
-```bash
-graphify affected "filename.py"   # What touches this file?
-graphify path "A" "B"              # Relationship path between nodes
-graphify explain "function_name"   # Explain a node + neighbors
-graphify god-nodes --top 15        # Most connected nodes (hubs)
-```
-
-### How Riptide Uses It
-The companion runs `graphify affected` on each changed file to determine **blast radius** — how many other code paths are affected by the change.
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `RIPTIDE_WATCHED_REPOS` | Comma-separated `owner/repo` list | (all ChonSong repos) |
+| `RIPTIDE_OUR_USERNAME` | GitHub username for authorship check | `ChonSong` |
+| `RIPTIDE_OUR_ORG` | GitHub org for ownership check | `ChonSong` |
+| `RIPTIDE_STALENESS_MINUTES` | Minutes since last update to qualify | `30` |
+| `RIPTIDE_MIN_LOC_CHANGED` | Minimum LOC changes to trigger | `100` |
 
 ---
 
@@ -298,52 +217,9 @@ GET /health
 ### GitHub Events Handled
 | Event | Action | Output |
 |-------|--------|--------|
-| `pull_request` opened/reopened/synchronize | Review + Companion TLDR | Check run + inline comments + TLDR comment |
-| `issue_comment` (@riptide) | On-demand review | 👀 reaction + review |
-| `pull_request_review` (changes_requested + "Need Action") | Deep-think cron session | Hermes session with reasoning loop |
-| `pull_request` closed + merged | Incremental index update | Vector store updated |
+| `pull_request` opened/reopened/synchronize | Companion TLDR | TL;DR comment |
+| `issue_comment` (@riptide-bot companion skip/resume) | Control companion | Confirmation reply |
 | `installation` created/deleted | Sync repo list | Metadata DB updated |
-
----
-
-## Severity Levels
-
-| Level | Meaning | Example |
-|-------|---------|---------|
-| 🔴 Critical | Security, data loss, crash | Auth bypass, SQL injection |
-| 🟠 High | Bug with clear repro | Race condition, unhandled error |
-| 🟡 Medium | Code smell, missing tests | Missing null-check, unclear naming |
-| 🔵 Low | Style, minor perf | Verbose but correct code |
-
----
-
-## Finding Categories
-
-`CORRECTNESS` · `SECURITY` · `PERFORMANCE` · `ERROR_HANDLING` · `BREAKING_CHANGE` · `TESTING` · `MAINTAINABILITY` · `OTHER`
-
----
-
-## Finding Format Example
-
-```markdown
-**Finding**: Race condition in OrderProcessor where concurrent Stripe webhooks could double-charge
-**Severity**: High
-**Category**: CORRECTNESS
-**Location**: api/orders/handlers.py:42
-**Suggestion**: Use a per-order lock to serialize webhook handling:
-
-```python
-import asyncio
-
-_order_locks = {}
-
-async def process_webhook(order_id: str, payload: dict):
-    if order_id not in _order_locks:
-        _order_locks[order_id] = asyncio.Lock()
-    async with _order_locks[order_id]:
-        await _process_webhook_unlocked(order_id, payload)
-```
-```
 
 ---
 
@@ -352,14 +228,12 @@ async def process_webhook(order_id: str, payload: dict):
 | | **Riptide** | **Octopus** | **CodeRabbit** |
 |---|---|---|---|
 | Stack | Python / FastAPI | Next.js + tRPC | SaaS |
-| Vector store | NumPy + SQLite | Qdrant (Docker) | Proprietary |
-| Deployment | Single process | Multi-service | Cloud-only |
+| Vector store | None (graphify for blast radius) | Qdrant (Docker) | Proprietary |
+| Deployment | Single container | Multi-service | Cloud-only |
 | Auth | GitHub App JWT | JWT + Prisma | OAuth |
-| LLM | Local Ollama | Claude/OpenAI/Google | Proprietary |
-| TLDR Comments | ✅ | ❌ | ✅ |
+| TLDR Comments | ✅ (Companion) | ❌ | ✅ |
 | ELI5 Explanations | ✅ | ❌ | ❌ |
-| ProofShot Integration | ✅ | ❌ | ❌ |
-| Deep Thinking | ✅ | ❌ | ❌ |
+| Deep Thinking | ✅ (Bot 2) | ❌ | ❌ |
 | Graphify Blast Radius | ✅ | ❌ | ❌ |
 | Self-Hosted | ✅ | ✅ | ❌ |
 
@@ -370,16 +244,7 @@ async def process_webhook(order_id: str, payload: dict):
 ### Run Tests
 ```bash
 # Syntax check
-python -m py_compile riptide/companion.py riptide/review.py riptide/webhook.py
-
-# Dry-run companion (no GitHub API)
-python -c "
-from riptide.companion import Companion
-class FakeClient: pass
-c = Companion(FakeClient())
-files = [{'filename': 'api/routes.py', 'status': 'modified', 'patch': '+def foo(): pass', 'additions': 1, 'deletions': 0}]
-print(c._analyze_diffs(files))
-"
+python -m py_compile riptide/companion.py riptide/deepthink.py riptide/webhook.py riptide/github_app.py
 ```
 
 ### Simulate Webhook
