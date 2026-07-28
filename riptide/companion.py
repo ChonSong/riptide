@@ -50,14 +50,14 @@ SKIP_RE = re.compile(r"@riptide-bot\s+companion\s+(skip|resume)", re.IGNORECASE)
 GIFI_MAP = {
     "✨": "https://media.giphy.com/media/26tOZ42Mg6pbTUPHW/giphy.gif",  # sparkles
     "🐛": "https://media.giphy.com/media/l0HlBO7eyXzSZkJri/giphy.gif",  # bug
-    "♻️": "https://media.giphy.com/media/3o7TKSjRrfIPjeiYxW/giphy.gif",  # recycle
-    "🧹": "https://media.giphy.com/media/3o7TKSjRrfIPjeiYxW/giphy.gif",  # cleaning
-    "🔧": "https://media.giphy.com/media/3o7TKSjRrfIPjeiYxW/giphy.gif",  # wrench
-    "📝": "https://media.giphy.com/media/3o7TKSjRrfIPjeiYxW/giphy.gif",  # writing
-    "📦": "https://media.giphy.com/media/3o7TKSjRrfIPjeiYxW/giphy.gif",  # package
+    "♻️": "https://media.giphy.com/media/26tn33aiTi1jkl6H6/giphy.gif",  # recycle/refactor
+    "🧹": "https://media.giphy.com/media/3DnDRfZe2ubQc/giphy.gif",    # cleaning
+    "🔧": "https://media.giphy.com/media/Y3kQOYHyVZcErGeMYF/giphy.gif",  # wrench/config
+    "📝": "https://media.giphy.com/media/13HgwGsXF0aiGY/giphy.gif",    # writing/docs
+    "📦": "https://media.giphy.com/media/3o6Zt6KHwTY5sxJZE/giphy.gif",  # package/deps
     "🧪": "https://media.giphy.com/media/3o7TKSjRrfIPjeiYxW/giphy.gif",  # test
-    "⏪": "https://media.giphy.com/media/3o7TKSjRrfIPjeiYxW/giphy.gif",  # rewind
-    "⚡": "https://media.giphy.com/media/3o7TKSjRrfIPjeiYxW/giphy.gif",  # lightning
+    "⏪": "https://media.giphy.com/media/26tOZ42Mg6pbTUPHW/giphy.gif",  # rewind/revert
+    "⚡": "https://media.giphy.com/media/26tOZ42Mg6pbTUPHW/giphy.gif",  # lightning/perf
 }
 
 

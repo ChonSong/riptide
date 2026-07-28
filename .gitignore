@@ -30,3 +30,5 @@ turbo.json
 .octopusignore
 .github/
 .dockerignore
+# Generated graphify artifacts
+graphify-out/

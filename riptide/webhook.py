@@ -170,7 +170,7 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
     installation = payload.get("installation", {})
 
     # Skip own comments (posted by the bot)
-    via_app = comment.get("performed_via_github_app", {})
+    via_app = comment.get("performed_via_github_app") or {}
     app_slug = os.environ.get("GITHUB_APP_SLUG", "octopus-selfhost")
     own_app_id = str(GITHUB_APP_ID)
     if via_app.get("id") and str(via_app.get("id")) == own_app_id:

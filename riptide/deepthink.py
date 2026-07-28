@@ -48,8 +48,8 @@ STATE_FILE = Path(
 ) / "deepthink_acted_prs.json"
 
 
-def _load_state() -> dict[str, str]:
-    """Load processed PR state: {owner/repo#number: head_sha}"""
+def _load_state() -> dict[str, dict]:
+    """Load processed PR state: {owner/repo#number: {head_sha, reviewed_at}}"""
     if STATE_FILE.exists():
         try:
             return json.loads(STATE_FILE.read_text())
@@ -58,9 +58,24 @@ def _load_state() -> dict[str, str]:
     return {}
 
 
-def _save_state(state: dict[str, str]):
+def _save_state(state: dict[str, dict]):
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(state, indent=2))
+
+
+def _was_reviewed_today(owner: str, repo: str, pr_number: int) -> bool:
+    """Check if this PR was reviewed in the last 24 hours."""
+    pr_key = f"{owner}/{repo}#{pr_number}"
+    state = _load_state()
+    entry = state.get(pr_key, {})
+    reviewed_at = entry.get("reviewed_at", "")
+    if not reviewed_at:
+        return False
+    try:
+        reviewed_time = datetime.fromisoformat(reviewed_at)
+        return (datetime.now(timezone.utc) - reviewed_time) < timedelta(hours=24)
+    except (ValueError, TypeError):
+        return False
 
 
 def _is_cron_available() -> bool:
@@ -108,30 +123,102 @@ def _spawn_deepthink(
         f"3. CHALLENGE — Could this change have side effects? Simpler approach? Missing tests?\n"
         f"4. SYNTHESIZE — Advise next steps (approve, request changes, suggest follow-ups).\n"
         f"5. VALIDATE — If claims are testable, run the test suite.\n\n"
-        f"### Step 3: Post Your Review\n"
-        f"Post a PR review comment with your findings:\n"
+        f"### Step 3: Post Inline Review Comments with Suggestions\n"
+        f"For each substantive issue, post an **inline review comment** with a **GitHub suggestion block** "
+        f"so the author can apply your change with one click.\n\n"
+        f"**Suggestion format** (wrap proposed code in triple backticks with `suggestion` language tag):\n"
+        f"```suggestion\n"
+        f"proposed new code here\n"
+        f"```\n\n"
+        f"**To post an inline comment:**\n"
+        f"```\n"
+        f"gh api repos/{owner}/{repo}/pulls/{pr_number}/comments \\\\\n"
+        f"  --method POST \\\\\n"
+        f"  -f body='**🔴 Critical:** explanation here\\n\\n```suggestion\\nproposed code here\\n```' \\\\\n"
+        f"  -f commit_id='{head_sha}' \\\\\n"
+        f"  -f path='<file_path>' \\\\\n"
+        f"  -F line=<line_number> \\\\\n"
+        f"  -f side='RIGHT'\n"
+        f"```\n\n"
+        f"**How to calculate line numbers:**\n"
+        f"Parse the `@@` hunk headers from `gh pr diff`. Each hunk looks like "
+        f"`@@ -old_start,old_count +new_start,new_count @@`. The `new_start` is the first "
+        f"line number in the modified file. Count forward from there for added/modified lines.\n\n"
+        f"**Comment format:**\n"
+        f"```suggestion\n"
+        f"proposed replacement code\n"
+        f"```\n"
+        f"Prepend a severity marker before the suggestion:\n"
+        f"- `**🔴 Critical:**` — definite bug, security issue, data loss risk\n"
+        f"- `**🟡 Warning:**` — potential issue, performance concern, code smell\n"
+        f"- `**ℹ️ Suggestion:**` — style improvement, minor refactor, nitpick\n\n"
+        f"Post inline comments for substantive findings only (1-3 per PR maximum). "
+        f"Focus on real issues — do not comment on every line or nitpick style.\n\n"
+        f"### Step 4: Generate Excalidraw Diagram with Decision Colors\n"
+        f"After all inline review comments are posted, generate an Excalidraw diagram "
+        f"visualizing your findings. Use this Python script:\n\n"
+        f"```python\n"
+        f"import json\n"
+        f"from pathlib import Path\n\n"
+        f"elements = [\n"
+        f"    # Title\n"
+        f"    dict(type='text', id='t', x=300, y=20, width=600, height=40,\n"
+        f"         text='PR Review: {pr_title[:50]}', fontSize=20, fontFamily=1,\n"
+        f"         strokeColor='#1e1e1e', textAlign='center', originalText='PR Review'),\n"
+        f"]\n\n"
+        f"# Color-code by severity:\n"
+        f"# Critical = #ef4444 (red), Warning = #fbbf24 (amber), Suggestion = #22d3ee (cyan), Approve = #34d399 (green)\n"
+        f"color = '#22d3ee'  # change based on your findings\n"
+        f"elements.append(dict(type='rectangle', id='r1', x=200, y=100, width=400, height=80,\n"
+        f"     roundness=dict(type=3), backgroundColor=color, fillStyle='solid',\n"
+        f"     boundElements=[dict(id='t1', type='text')]))\n"
+        f"elements.append(dict(type='text', id='t1', x=210, y=110, width=380, height=60,\n"
+        f"     text='Your review summary here (ELI5 pseudocode)', fontSize=12, fontFamily=1,\n"
+        f"     strokeColor='#1e1e1e', textAlign='left', verticalAlign='top',\n"
+        f"     originalText='Review summary', containerId='r1', autoResize=True))\n\n"
+        f"data = dict(type='excalidraw', version=2, source='riptide-review', elements=elements,\n"
+        f"            appState=dict(viewBackgroundColor='#ffffff'))\n"
+        f"Path('/tmp/review.excalidraw').write_text(json.dumps(data, indent=2))\n"
+        f"```\n\n"
+        f"Upload the diagram to excalidraw.com using this command:\n"
+        f"```\n"
+        f"python3 ~/workspace/riptide/scripts/upload_excalidraw.py /tmp/review.excalidraw\n"
+        f"```\n"
+        f"This returns a link like `https://excalidraw.com/#json=...` that opens directly in the browser.\n"
+        f"Include this link in your summary — NOT a Gist link.\n\n"
+        f"### Step 5: Post Summary Review\n"
+        f"After posting all inline comments and generating the Excalidraw, post a **summary review**:\n"
         f"`gh pr comment {pr_number} --repo {owner}/{repo} --body '<review>'`\n\n"
         f"Structure your review as:\n"
-        f"- **Summary**: What this PR does (1-2 sentences)\n"
-        f"- **Graphify Analysis**: Cross-file impact, blast radius\n"
-        f"- **Deep-Think Findings**: Issues, risks, or approval reasoning\n"
-        f"- **Next Steps**: Specific actionable advice for the author\n\n"
-        f"If everything looks good, say so with reasoning — don't invent problems.\n\n"
+        f"- **Summary**: What this PR does (1-2 sentences, no filler)\n"
+        f"- **Findings**: Only real issues (not style nits or hypotheticals)\n"
+        f"- **Inline Comments**: N findings posted (see specific lines)\n"
+        f"- **Excalidraw**: Link to visual evidence diagram\n"
+        f"- **Next Steps**: Specific actionable advice (max 3 items)\n\n"
+        f"**Quality gate**: If you have no critical/warning findings, say so briefly — "
+        f"do not invent problems or pad the review.\n\n"
+        f"**Sign-off**: End your summary with:\n"
+        f"```\n"
+        f"---\n"
+        f"<sub>🤖 Riptide Review via Hermes · model: `hermes` (LongCat-2.0)</sub>\n"
+        f"```\n\n"
         f"REPO PATH: ~/workspace/{repo}/\n"
     )
 
     cmd = [
         "hermes", "cron", "create", run_at,
+        prompt,
         "--name", name,
         "--skill", "github-pr-lifecycle",
         "--skill", "deep-think",
+        "--skill", "excalidraw",
         "--deliver", "origin",
     ]
 
-    log.info(f"Spawning: {' '.join(cmd)}")
+    log.info(f"Spawning: hermes cron create {run_at} --name {name} ...")
     try:
         result = subprocess.run(
-            cmd, input=prompt, capture_output=True, text=True, timeout=15
+            cmd, capture_output=True, text=True, timeout=15
         )
         if result.returncode == 0:
             log.info(f"✓ Spawned deep-think for {owner}/{repo}#{pr_number}: {result.stdout[:200]}")
@@ -212,10 +299,15 @@ def run():
                 skipped_stale += 1
                 continue
 
-            # Dedup: same head SHA already processed
+            # Dedup: same head SHA already processed OR reviewed in last 24h
             pr_key = f"{repo_full}#{pr_number}"
-            if state.get(pr_key) == head_sha:
+            if state.get(pr_key, {}).get("head_sha") == head_sha:
                 log.info(f"  #{pr_number} skip — already processed (SHA {head_sha[:12]})")
+                skipped_dedup += 1
+                continue
+            
+            if _was_reviewed_today(owner, repo_name, pr_number):
+                log.info(f"  #{pr_number} skip — reviewed in last 24h")
                 skipped_dedup += 1
                 continue
 
@@ -227,7 +319,7 @@ def run():
             _spawn_deepthink(owner, repo_name, pr_number, pr_title, pr_author, total_loc, head_sha)
 
             # Record dedup immediately to prevent double-spawn
-            state[pr_key] = head_sha
+            state[pr_key] = {"head_sha": head_sha, "reviewed_at": datetime.now(timezone.utc).isoformat()}
             _save_state(state)
             triggered += 1
 
