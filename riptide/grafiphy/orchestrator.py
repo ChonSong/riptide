@@ -3,7 +3,11 @@
 grafiphy/orchestrator.py — Entry point for companion diagram generation.
 
 Uses graphify data and delegates output to excalidraw_renderer for polished,
-graphify-informed Excalidraw diagrams.
+graphify-informed Excalidraw diagrams with connected narrative flow.
+
+Adds:
+    - repo_graph: full module list from graphify (codebase landscape)
+    - suggestions: inline review suggestions from Bot 2
 """
 import json
 import os
@@ -64,6 +68,38 @@ def _parse_query(output: str) -> dict:
     return {"nodes": nodes, "communities": communities}
 
 
+def get_repo_graph(repo_path: str) -> list[dict]:
+    """
+    Collect ALL modules from graphify for the codebase landscape view.
+    Returns list of {name, type, file, why}.
+    """
+    try:
+        stdout, _ = _run_graphify(["list", "--all"], cwd=repo_path, timeout=30)
+        if not stdout:
+            return []
+
+        modules = []
+        # Graphify list format: "name  type  path"
+        for line in stdout.split("\n"):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split(None, 2)
+            if len(parts) >= 2:
+                name = parts[0]
+                rg_type = parts[1] if len(parts) > 1 else "module"
+                file_path = parts[2] if len(parts) > 2 else ""
+                modules.append({
+                    "name": name,
+                    "type": rg_type,
+                    "file": file_path,
+                    "why": f"Part of the {rg_type} layer" if rg_type else "Codebase module",
+                })
+        return modules
+    except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+        return []
+
+
 def get_graphify_graph(repo_path: str, diff: list[dict]) -> dict:
     """Build a code relationship graph from graphify data."""
     graph = {
@@ -106,7 +142,8 @@ def get_graphify_graph(repo_path: str, diff: list[dict]) -> dict:
 
 
 def orchestrate(pr_metadata: dict, diff: list[dict],
-                graphify_context: dict = None) -> list[str]:
+                graphify_context: dict = None,
+                suggestions: list[dict] = None) -> list[str]:
     """
     Generate a graphify-informed Excalidraw diagram for a PR.
 
@@ -114,6 +151,7 @@ def orchestrate(pr_metadata: dict, diff: list[dict],
         pr_metadata: {owner, repo, number, title, author, installation_id}
         diff: List of file dicts from GitHub API [{filename, additions, deletions, status}]
         graphify_context: Optional pre-computed graph data
+        suggestions: [{file, line, old_code, new_code, severity, reasoning}] from Bot 2
 
     Returns:
         List with one Excalidraw URL (uploaded to excalidraw.com)
@@ -138,8 +176,12 @@ def orchestrate(pr_metadata: dict, diff: list[dict],
         print(f"WARNING: Graphify graph failed: {e}")
         graph = {"nodes": [], "communities": {}, "god_nodes": []}
 
+    # Get full repo graph for codebase landscape view
+    repo_graph = get_repo_graph(repo_path)
+
     # Build file tree string
     file_tree_lines = []
+    changed_files_set = set()
     for f in diff:
         fn = f.get("filename", "?")
         add = f.get("additions", 0)
@@ -151,6 +193,7 @@ def orchestrate(pr_metadata: dict, diff: list[dict],
             file_tree_lines.append(f"  - {fn} ({del_} LOC)")
         else:
             file_tree_lines.append(f"  M {fn} (+{add}/-{del_})")
+        changed_files_set.add(fn)
     file_tree = "\n".join(file_tree_lines) if file_tree_lines else None
 
     # Build flow steps from companion pipeline
@@ -180,6 +223,19 @@ def orchestrate(pr_metadata: dict, diff: list[dict],
         "communities": communities_list[:6],
     }
 
+    # Auto-generate human-readable narrative
+    narr_parts = []
+    if title:
+        narr_parts.append(f"PR: {title}")
+    if total_loc:
+        narr_parts.append(f"Changes: {total_loc} LOC in {len(diff)} files.")
+    if communities_list:
+        narr_parts.append(
+            f"Graphify found {len(communities_list)} code communities "
+            f"and {len(god_nodes)} architectural hubs."
+        )
+    human_narrative = " ".join(narr_parts) if narr_parts else None
+
     # Generate diagram
     excalidraw_urls = []
     try:
@@ -195,6 +251,9 @@ def orchestrate(pr_metadata: dict, diff: list[dict],
             graph_data=graph_data,
             flow_steps=flow_steps,
             file_tree=file_tree,
+            repo_graph=repo_graph if repo_graph else None,
+            suggestions=suggestions or None,
+            human_narrative=human_narrative,
             output_path=str(excalidraw_path),
         )
 

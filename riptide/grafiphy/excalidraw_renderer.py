@@ -2,15 +2,15 @@
 """
 excalidraw_renderer.py — Polished Excalidraw review diagram generator.
 
-Produces sectioned, graphify-informed Excalidraw JSON with severity colors,
-code chunks, god nodes, communities, and connections — all with WHY: annotations.
+Produces a flowing narrative diagram from codebase landscape → PR changes →
+graphify analysis → code chunks with WHY → findings → suggestions.
 
-Uses the Excalidraw skill's official color palette (see excalidraw skill
-references/colors.md).
+Eight connected sections, all linked by arrows, using the Excalidraw skill's
+official color palette.
 
 Usage:
     from riptide.grafiphy.excalidraw_renderer import render_review, upload_excalidraw
-    url = render_review(pr_data, findings, graph_data=..., code_chunks=...)
+    url = upload_excalidraw(render_review(pr_data, findings, ...))
 """
 import json
 import subprocess
@@ -45,10 +45,18 @@ DARK_BLUE = "#1e3a5f"
 DARK_AMBER = "#9a5030"
 DARK_PURPLE = "#5b21b6"
 
-# Background zones (opacity ~30 when used as full-section backdrops)
+# Background zones
 ZONE_BLUE = "#dbe4ff"
 ZONE_PURPLE = "#e5dbff"
 ZONE_GREEN = "#d3f9d8"
+ZONE_YELLOW = "#fff9db"
+ZONE_PINK = "#fce4ec"
+ZONE_TEAL = "#c3fae8"
+
+# Highlight for PR-changed files in landscape
+HIGHLIGHT_STROKE = "#ef4444"
+HIGHLIGHT_FILL = "#ffe0e0"
+HIGHLIGHT_GLOW = "#ff6b6b"
 
 # ── Severity Map ───────────────────────────────────────────────────
 SEVERITY = {
@@ -66,6 +74,11 @@ SEVERITY_ICON = {
     "approved":   "OK",
     "info":       "i",
 }
+
+# Canvas constants
+CANVAS_W = 900
+MARGIN = 40
+CONTENT_W = CANVAS_W - 2 * MARGIN  # 820
 
 
 # ── Element Helpers ─────────────────────────────────────────────────
@@ -110,6 +123,7 @@ def make_arrow(eid: str, x: int, y: int, w: int, h: int,
                color: str = "#1e1e1e",
                dashed: bool = False,
                label: str = None) -> list[dict]:
+    """Standalone arrow (no bindings). Returns [arrow_elem, optional_label_elem]."""
     els = [{
         "type": "arrow", "id": eid,
         "x": x, "y": y, "width": w, "height": h,
@@ -134,11 +148,81 @@ def make_arrow(eid: str, x: int, y: int, w: int, h: int,
     return els
 
 
-def _section_title(text: str) -> dict:
+def make_connector(eid: str, src_id: str, tgt_id: str,
+                   src_cx: int, src_cy: int,
+                   tgt_cx: int, tgt_cy: int,
+                   color: str = "#757575", dashed: bool = False,
+                   label: str = None) -> list[dict]:
+    """
+    Draw an arrow with binding from src element to tgt element.
+    src_cx, src_cy, tgt_cx, tgt_cy are absolute canvas coordinates.
+    Returns a list of dicts (arrow + optional label).
+    """
+    # Compute bounding box
+    min_x = min(src_cx, tgt_cx)
+    min_y = min(src_cy, tgt_cy)
+    max_x = max(src_cx, tgt_cx)
+    max_y = max(src_cy, tgt_cy)
+    w = max(max_x - min_x, 1)
+    h = max(max_y - min_y, 1)
+
+    # Points relative to bounding box
+    dx1 = src_cx - min_x
+    dy1 = src_cy - min_y
+    dx2 = tgt_cx - min_x
+    dy2 = tgt_cy - min_y
+
+    els = [{
+        "type": "arrow", "id": eid,
+        "x": min_x, "y": min_y, "width": w, "height": h,
+        "points": [[dx1, dy1], [dx2, dy2]],
+        "endArrowhead": "arrow",
+        "strokeColor": color, "strokeWidth": 2,
+        "startBinding": {
+            "elementId": src_id,
+            "focus": 0,
+            "gap": 5,
+            "fixedPoint": [0.5, 1.0],
+        },
+        "endBinding": {
+            "elementId": tgt_id,
+            "focus": 0,
+            "gap": 5,
+            "fixedPoint": [0.5, 0.0],
+        },
+    }]
+    if dashed:
+        els[0]["strokeStyle"] = "dashed"
+
+    if label:
+        tid = f"tl_{eid}"
+        mid_x = min_x + w // 2
+        mid_y = min_y + h // 2
+        els[0]["boundElements"] = [{"id": tid, "type": "text"}]
+        els.append({
+            "type": "text", "id": tid,
+            "x": mid_x, "y": mid_y - 12,
+            "width": max(len(label) * 6, 60), "height": 14,
+            "text": label, "fontSize": 9, "fontFamily": 1,
+            "strokeColor": color, "textAlign": "center",
+            "verticalAlign": "middle",
+            "containerId": eid, "originalText": label, "autoResize": True,
+        })
+
+    return els
+
+
+def make_zone(eid: str, x: int, y: int, w: int, h: int,
+              bg: str, stroke: str, opacity: int = 25) -> dict:
+    """Background section zone with rounded rect and low opacity."""
+    return make_rect(eid, x, y, w, h, bg, stroke, opacity=opacity)
+
+
+def _section_title(eid: str, text: str, x: int, y: int) -> dict:
     return {
         "type": "text",
-        "id": f"sec_{text[:12].lower().replace(' ', '_')}",
-        "x": 50, "y": 0, "width": 600, "height": 22,
+        "id": eid,
+        "x": x, "y": y, "width": 600, "height": 24,
         "text": text,
         "fontSize": 14, "fontFamily": 1,
         "strokeColor": "#1e1e1e",
@@ -162,10 +246,16 @@ def _chunk_text(text: str, max_w: int, font_size: int) -> list[str]:
     return lines
 
 
+def _compute_text_h(text: str, max_w: int, font_size: int, line_h: int = 14) -> int:
+    """Estimate height for a block of text at given font size."""
+    lines = _chunk_text(text, max_w, font_size)
+    return max(len(lines) * line_h, 20)
+
+
 # ── Main Renderer ──────────────────────────────────────────────────
 
 def render_review(
-    pr_data: dict,
+    pr_data: dict = None,
     findings: list[dict] = None,
     graph_data: dict = None,
     code_chunks: list[dict] = None,
@@ -173,10 +263,13 @@ def render_review(
     flow_steps: list[tuple] = None,
     file_tree: str = None,
     frontend_components: list[dict] = None,
+    repo_graph: list[dict] = None,
+    suggestions: list[dict] = None,
+    human_narrative: str = None,
     output_path: str = "/tmp/review.excalidraw",
 ) -> str:
     """
-    Generate a polished, graphify-informed Excalidraw review diagram.
+    Generate a flowing narrative Excalidraw review diagram.
 
     Args:
         pr_data: {title, number, repo, author, loc, status}
@@ -189,6 +282,9 @@ def render_review(
         flow_steps: [(label, detail, color)]
         file_tree: str (multi-line)
         frontend_components: [{name, desc, file, why}]
+        repo_graph: [{name, type, file, why}] — all modules in repo (new)
+        suggestions: [{file, line, old_code, new_code, severity, reasoning}] (new)
+        human_narrative: str — plain-English summary (optional, auto-generated if not given)
         output_path: where to save .excalidraw file
 
     Returns:
@@ -204,12 +300,46 @@ def render_review(
     connections = connections or []
     flow_steps = flow_steps or []
     frontend_components = frontend_components or []
+    repo_graph = repo_graph or []
+    suggestions = suggestions or []
 
     god_nodes = graph_data.get("god_nodes", [])
     communities = graph_data.get("communities", [])
     blast_radius = graph_data.get("blast_radius", {})
 
-    # ── 1. Title ───────────────────────────────────────────────────
+    # Determine PR file paths for highlighting
+    pr_changed_files = set()
+    if file_tree:
+        for line in file_tree.split("\n"):
+            line = line.strip()
+            if line and line[0] in ("+", "M", "-"):
+                parts = line.split()
+                if len(parts) >= 2:
+                    fname = parts[1] if parts[0] in ("+", "M", "-") else parts[1]
+                    pr_changed_files.add(fname)
+    # Also check code_chunks for file references
+    for cc in code_chunks:
+        cf = cc.get("file", "")
+        if cf and ":" in cf:
+            pr_changed_files.add(cf.split(":")[0])
+
+    # Collect all file paths from repo_graph
+    repo_files = set()
+    for rg in repo_graph:
+        f = rg.get("file", "")
+        if f:
+            repo_files.add(f)
+
+    # Map file -> bool (is_changed)
+    def is_pr_file(path: str) -> bool:
+        for pf in pr_changed_files:
+            if pf.endswith(path) or path.endswith(pf):
+                return True
+        return False
+
+    # ================================================================
+    # SECTION 1: Title
+    # ================================================================
     title = pr_data.get("title", f"PR #{pr_data.get('number', '?')} Review")
     subtitle_parts = []
     if pr_data.get("repo"):
@@ -222,177 +352,201 @@ def render_review(
         subtitle_parts.append(f"by {pr_data['author']}")
 
     elements.append(make_text(
-        "title", 200, y_cursor, 800, 35,
+        "title", 250, y_cursor, 600, 35,
         title, font_size=24, align="center",
     ))
     y_cursor += 35
     if subtitle_parts:
         elements.append(make_text(
-            "subtitle", 200, y_cursor, 800, 18,
-            "  •  ".join(subtitle_parts), font_size=12, color="#757575",
+            "subtitle", 250, y_cursor, 600, 18,
+            "  .  ".join(subtitle_parts), font_size=12, color="#757575",
             align="center",
         ))
         y_cursor += 25
     y_cursor += 10
 
-    # ── 2. Scope / File Tree ───────────────────────────────────────
+    # ================================================================
+    # SECTION 2: Codebase Landscape
+    # ================================================================
+    landscape_top = y_cursor
+    zone_id = "zone_landscape"
+
+    # Estimate landscape height
+    if repo_graph:
+        n_modules = min(len(repo_graph), 30)
+        module_h = max(40, n_modules * 22 + 10)
+        landscape_h = module_h + 50
+    else:
+        landscape_h = 60
+
+    elements.append(make_zone(
+        zone_id, MARGIN, y_cursor, CONTENT_W, landscape_h,
+        ZONE_TEAL, CYAN, opacity=20,
+    ))
+    y_cursor += 10
+
+    st = _section_title("sec_landscape", "CODEBASE LANDSCAPE  (all modules; PR files highlighted in red)",
+                        MARGIN + 8, y_cursor)
+    elements.append(st)
+    y_cursor += 28
+
+    if repo_graph:
+        # Layout modules in rows of 3 columns
+        col_w = CONTENT_W // 3 - 6  # ~265
+        col_x = [MARGIN + 10 + i * (col_w + 8) for i in range(3)]
+        row_y = y_cursor
+        col_idx = 0
+
+        for gi, rg in enumerate(repo_graph[:30]):
+            cx = col_x[col_idx]
+            name = rg.get("name", "?")
+            rg_type = rg.get("type", "module")
+            rg_file = rg.get("file", "")
+            changed = is_pr_file(rg_file)
+
+            mid = f"lm{gi}"
+            mtid = f"tlm{gi}"
+            label = f"{name}  ({rg_type})"
+            if rg_file:
+                label += f"  [{rg_file.split('/')[-1]}]"
+
+            if changed:
+                fill = HIGHLIGHT_FILL
+                stroke = HIGHLIGHT_STROKE
+                stroke_w = 3
+            else:
+                fill = LIGHT_TEAL
+                stroke = CYAN
+                stroke_w = 1
+
+            el = make_rect(mid, cx, row_y, col_w, 20,
+                           fill, stroke, roundness=True)
+            el["strokeWidth"] = stroke_w
+            if changed:
+                el["strokeStyle"] = "solid"
+            elements.append(el)
+            elements.append(make_text(
+                mtid, cx + 3, row_y + 2, col_w - 6, 16,
+                label, font_size=9,
+                align="left", valign="middle", container_id=mid,
+            ))
+
+            col_idx += 1
+            if col_idx >= 3:
+                col_idx = 0
+                row_y += 22
+
+        # Adjust actual height
+        actual_landscape_h = max(landscape_h, row_y - landscape_top + 10)
+        # Update zone height
+        for el in elements:
+            if el.get("id") == zone_id:
+                el["height"] = actual_landscape_h
+                break
+
+        y_cursor = landscape_top + actual_landscape_h + 5
+    else:
+        elements.append(make_text(
+            "landscape_empty", MARGIN + 10, y_cursor, CONTENT_W - 20, 30,
+            "(No repo_graph data provided — install graphify for full landscape view)",
+            font_size=11, color="#757575",
+        ))
+        y_cursor = landscape_top + landscape_h + 5
+
+    # Arrow from landscape to PR scope
+    pr_scope_top = y_cursor + 25
+
+    # ================================================================
+    # SECTION 3: PR Scope
+    # ================================================================
+    scope_top = y_cursor
+
     if file_tree:
         tree_lines = file_tree.strip().split("\n")
-        tree_h = max(60, min(280, len(tree_lines) * 16 + 40))
-        zone_y = y_cursor
-        elements.append(make_rect(
-            "bg_tree", 50, y_cursor, 700, tree_h,
-            ZONE_BLUE, BLUE, opacity=30,
-        ))
-        y_cursor += 8
-        t = _section_title("SCOPE / FILES CHANGED")
-        t["y"] = y_cursor
-        elements.append(t)
-        y_cursor += 28
+        tree_h = max(50, min(280, len(tree_lines) * 18 + 50))
+    else:
+        tree_h = 50
+
+    scope_h = tree_h
+    elements.append(make_zone(
+        "zone_scope", MARGIN, y_cursor, CONTENT_W, scope_h,
+        ZONE_BLUE, BLUE, opacity=20,
+    ))
+    y_cursor += 10
+    st = _section_title("sec_scope", "PR SCOPE  (files changed, LOC, status)",
+                        MARGIN + 8, y_cursor)
+    elements.append(st)
+    y_cursor += 28
+
+    if file_tree:
         elements.append(make_text(
-            "file_tree_txt", 60, y_cursor, 680, tree_h - 50,
-            file_tree, font_size=10, color="#1e1e1e",
+            "file_tree_txt", MARGIN + 10, y_cursor, CONTENT_W - 20, tree_h - 40,
+            file_tree, font_size=11, color="#1e1e1e",
         ))
-        y_cursor = zone_y + tree_h + 5
 
-    # ── 3. Flow Diagram ────────────────────────────────────────────
-    if flow_steps:
-        f_cnt = len(flow_steps)
-        box_w = min(140, int(600 / max(f_cnt, 1)))
-        box_h = 50
-        gap = 12
-        total_w = f_cnt * box_w + (f_cnt - 1) * gap
-        start_x = 50 + (700 - total_w) // 2 if total_w < 700 else 50
+    y_cursor = scope_top + scope_h + 5
 
-        zone_y = y_cursor
-        zone_h = 100
-        elements.append(make_rect(
-            "bg_flow", 50, y_cursor, 700, zone_h,
-            ZONE_GREEN, GREEN, opacity=30,
-        ))
-        y_cursor += 8
-        t = _section_title("FLOW")
-        t["y"] = y_cursor
-        elements.append(t)
-        y_cursor += 32
+    # Arrow from scope to graphify analysis
+    # ================================================================
+    # SECTION 4: Graphify Analysis (god nodes + communities)
+    # ================================================================
+    graph_top = y_cursor
 
-        for i, (label, detail, color) in enumerate(flow_steps):
-            bx = start_x + i * (box_w + gap)
-            bid = f"f{i}"
-            tid = f"tf{i}"
-            elements.append(make_rect(
-                bid, bx, y_cursor, box_w, box_h,
-                color, stroke="#1e1e1e",
-                text_id=tid,
-            ))
-            elements.append(make_text(
-                tid, bx + 3, y_cursor + 4, box_w - 6, box_h - 8,
-                f"{label}\n{detail}", font_size=9,
-                align="center", valign="middle", container_id=bid,
-            ))
-            if i < f_cnt - 1:
-                ax = bx + box_w
-                ay = y_cursor + box_h // 2
-                elements.extend(make_arrow(f"fa{i}", ax, ay, gap, 0, color="#666"))
+    # Estimate height
+    gn_cnt = min(len(god_nodes), 6)
+    cm_cnt = min(len(communities), 4)
+    graph_h = max(80, (gn_cnt + cm_cnt) * 36 + 60)
 
-        y_cursor = zone_y + zone_h + 5
+    elements.append(make_zone(
+        "zone_graph", MARGIN, y_cursor, CONTENT_W, graph_h,
+        ZONE_PURPLE, PURPLE, opacity=20,
+    ))
+    y_cursor += 10
+    st = _section_title("sec_graph", "GRAPHIFY ANALYSIS  (architectural hubs and code communities)",
+                        MARGIN + 8, y_cursor)
+    elements.append(st)
+    y_cursor += 28
 
-    # ── 4. Code Chunks with WHY annotations ────────────────────────
-    if code_chunks:
-        chunk_h = sum(max(50, len(_chunk_text(
-            f"{c.get('code','')[:200]}", 620, 10)) * 14 + 40)
-            for c in code_chunks) + 35
-        chunk_h = min(chunk_h, 350)
-
-        zone_y = y_cursor
-        elements.append(make_rect(
-            "bg_code", 50, y_cursor, 700, chunk_h,
-            LIGHT_TEAL, CYAN, opacity=25,
-        ))
-        y_cursor += 8
-        t = _section_title("CODE CHUNKS  // WHY:")
-        t["y"] = y_cursor
-        elements.append(t)
-        y_cursor += 28
-
-        for ci, chunk in enumerate(code_chunks):
-            code = chunk.get("code", "")
-            why = chunk.get("why", "")
-            cfile = chunk.get("file", "")
-            cid = f"code{ci}"
-            ctid = f"tcode{ci}"
-
-            label = f"// {cfile}\n{code[:200]}"
-            if why:
-                label += f"\n// WHY: {why[:150]}"
-
-            el_h = max(40, min(80, len(label.split("\n")) * 14 + 10))
-            elements.append(make_rect(
-                cid, 65, y_cursor, 670, el_h,
-                LIGHT_YELLOW, "#1e1e1e",
-            ))
-            elements.append(make_text(
-                ctid, 70, y_cursor + 3, 660, el_h - 6,
-                label, font_size=9,
-                align="left", valign="top", container_id=cid,
-            ))
-            y_cursor += el_h + 6
-
-        y_cursor = zone_y + chunk_h + 5
-
-    # ── 5. God Nodes ───────────────────────────────────────────────
+    # God nodes section inside zone
     if god_nodes:
-        gn_cnt = min(len(god_nodes), 8)
-        gn_h = max(60, gn_cnt * 32 + 35)
-        zone_y = y_cursor
-        elements.append(make_rect(
-            "bg_god", 50, y_cursor, 700, gn_h,
-            ZONE_PURPLE, PURPLE, opacity=30,
+        elements.append(make_text(
+            "god_label", MARGIN + 10, y_cursor, 200, 16,
+            "God Nodes (architectural hubs):", font_size=11,
+            color=DARK_PURPLE,
         ))
-        y_cursor += 8
-        t = _section_title("GOD NODES  (graphify architectural hubs)")
-        t["y"] = y_cursor
-        elements.append(t)
-        y_cursor += 28
-
+        y_cursor += 18
         for gi, gn in enumerate(god_nodes[:gn_cnt]):
             name = gn.get("name", "?")
             edges = gn.get("edges", 0)
             why = gn.get("why", "")
             gid = f"god{gi}"
             gtid = f"tgod{gi}"
-            label = f"`{name}` — {edges} connections"
+            label = f"{name}  ({edges} connections)"
             if why:
-                label += f"\n  WHY: {why[:100]}"
+                label += f"\nWHY: {why}"
 
+            h = max(28, _compute_text_h(label, CONTENT_W - 40, 9, 13) + 6)
             elements.append(make_rect(
-                gid, 65, y_cursor, 670, 28,
+                gid, MARGIN + 15, y_cursor, CONTENT_W - 30, h,
                 LIGHT_PURPLE, PURPLE,
             ))
             elements.append(make_text(
-                gtid, 70, y_cursor + 3, 660, 22,
+                gtid, MARGIN + 20, y_cursor + 3, CONTENT_W - 40, h - 6,
                 label, font_size=9,
-                align="left", valign="middle", container_id=gid,
+                align="left", valign="top", container_id=gid,
             ))
-            y_cursor += 30
+            y_cursor += h + 4
 
-        y_cursor = zone_y + gn_h + 5
+        y_cursor += 4
 
-    # ── 6. Communities ─────────────────────────────────────────────
+    # Communities section inside zone
     if communities:
-        cm_cnt = min(len(communities), 6)
-        cm_h = max(60, cm_cnt * 50 + 35)
-        zone_y = y_cursor
-        elements.append(make_rect(
-            "bg_comm", 50, y_cursor, 700, cm_h,
-            ZONE_BLUE, BLUE, opacity=30,
+        elements.append(make_text(
+            "comm_label", MARGIN + 10, y_cursor, 200, 16,
+            "Communities (code groups):", font_size=11,
+            color=DARK_BLUE,
         ))
-        y_cursor += 8
-        t = _section_title("COMMUNITIES  (graphify code communities)")
-        t["y"] = y_cursor
-        elements.append(t)
-        y_cursor += 28
-
+        y_cursor += 18
         for ci, cm in enumerate(communities[:cm_cnt]):
             name = cm.get("name", "?")
             members = cm.get("members", [])
@@ -400,126 +554,164 @@ def render_review(
             cid = f"comm{ci}"
             ctid = f"tcomm{ci}"
 
-            member_list = ", ".join(f"`{m}`" for m in members[:5])
+            member_list = ", ".join(f"'{m}'" for m in members[:5])
             if len(members) > 5:
-                member_list += f" +{len(members)-5} more"
-            label = f"Community: {name}\n  Members: {member_list}"
+                member_list += f" +{len(members) - 5} more"
+            label = f"{name}: {member_list}"
             if why:
-                label += f"\n  WHY: {why[:100]}"
+                label += f"\nWHY: {why}"
 
-            el_h = max(40, min(60, len(label.split("\n")) * 14 + 10))
+            h = max(28, _compute_text_h(label, CONTENT_W - 40, 9, 13) + 6)
             elements.append(make_rect(
-                cid, 65, y_cursor, 670, el_h,
+                cid, MARGIN + 15, y_cursor, CONTENT_W - 30, h,
                 LIGHT_BLUE, BLUE,
             ))
             elements.append(make_text(
-                ctid, 70, y_cursor + 3, 660, el_h - 6,
+                ctid, MARGIN + 20, y_cursor + 3, CONTENT_W - 40, h - 6,
                 label, font_size=9,
                 align="left", valign="top", container_id=cid,
             ))
-            y_cursor += el_h + 4
+            y_cursor += h + 4
 
-        y_cursor = zone_y + cm_h + 5
+    actual_graph_h = y_cursor - graph_top + 5
+    # Update zone height
+    for el in elements:
+        if el.get("id") == "zone_graph":
+            el["height"] = actual_graph_h
+            break
 
-    # ── 7. Connections with WHY ────────────────────────────────────
-    if connections:
-        cn_cnt = min(len(connections), 10)
-        cn_h = max(60, cn_cnt * 32 + 35)
-        zone_y = y_cursor
-        elements.append(make_rect(
-            "bg_conn", 50, y_cursor, 700, cn_h,
-            ZONE_GREEN, GREEN, opacity=30,
-        ))
-        y_cursor += 8
-        t = _section_title("CROSS-MODULE CONNECTIONS")
-        t["y"] = y_cursor
-        elements.append(t)
-        y_cursor += 28
+    # ================================================================
+    # SECTION 5: Code Chunks with WHY
+    # ================================================================
+    code_top = y_cursor
 
-        for ci, conn in enumerate(connections[:cn_cnt]):
-            src = conn.get("source", "?")
-            tgt = conn.get("target", "?")
-            rel = conn.get("relation", "related")
-            why = conn.get("why", "")
-            cnid = f"conn{ci}"
-            cntid = f"tconn{ci}"
+    if code_chunks:
+        chunk_h = sum(
+            max(50, _compute_text_h(
+                cc.get("code", "") + "\nWHY: " + cc.get("why", ""),
+                CONTENT_W - 40, 10, 14,
+            ) + 16)
+            for cc in code_chunks
+        ) + 40
+        chunk_h = min(chunk_h, 450)
+    else:
+        chunk_h = 60
 
-            label = f"`{src}` {rel} `{tgt}`"
+    elements.append(make_zone(
+        "zone_code", MARGIN, y_cursor, CONTENT_W, chunk_h,
+        ZONE_YELLOW, AMBER, opacity=20,
+    ))
+    y_cursor += 10
+    st = _section_title("sec_code", "CODE CHUNKS  //  WHY: architectural reasoning",
+                        MARGIN + 8, y_cursor)
+    elements.append(st)
+    y_cursor += 28
+
+    if code_chunks:
+        for ci, chunk in enumerate(code_chunks):
+            code = chunk.get("code", "")
+            why = chunk.get("why", "")
+            cfile = chunk.get("file", "")
+            cid = f"code{ci}"
+            ctid = f"tcode{ci}"
+
+            label = f"// File: {cfile}\n{code}"
             if why:
-                label += f"\n  WHY: {why[:100]}"
+                label += f"\n\n// WHY: {why}"
 
+            el_h = max(40, _compute_text_h(label, CONTENT_W - 40, 10, 14) + 12)
             elements.append(make_rect(
-                cnid, 65, y_cursor, 670, 28,
-                LIGHT_GREEN, GREEN,
+                cid, MARGIN + 10, y_cursor, CONTENT_W - 20, el_h,
+                LIGHT_YELLOW, "#1e1e1e",
             ))
             elements.append(make_text(
-                cntid, 70, y_cursor + 3, 660, 22,
-                label, font_size=9,
-                align="left", valign="middle", container_id=cnid,
+                ctid, MARGIN + 15, y_cursor + 4, CONTENT_W - 30, el_h - 8,
+                label, font_size=10,
+                align="left", valign="top", container_id=cid,
             ))
-            y_cursor += 30
+            y_cursor += el_h + 6
 
-        y_cursor = zone_y + cn_h + 5
+    actual_code_h = y_cursor - code_top + 5
+    for el in elements:
+        if el.get("id") == "zone_code":
+            el["height"] = actual_code_h
+            break
 
-    # ── 8. Frontend Components ─────────────────────────────────────
-    if frontend_components:
-        fc_cnt = min(len(frontend_components), 8)
-        fc_h = max(60, fc_cnt * 40 + 35)
-        zone_y = y_cursor
-        elements.append(make_rect(
-            "bg_fe", 50, y_cursor, 700, fc_h,
-            ZONE_BLUE, BLUE, opacity=30,
+    # ================================================================
+    # SECTION 6: Human-Readable Narrative
+    # ================================================================
+    narr_top = y_cursor
+
+    if not human_narrative and (code_chunks or findings):
+        # Auto-generate a simple narrative
+        parts = []
+        title_t = pr_data.get("title", "")
+        if title_t:
+            parts.append(title_t)
+        if code_chunks:
+            files = ", ".join(set(c.get("file", "").split(":")[0] for c in code_chunks if c.get("file")))
+            parts.append(f"Changes affect {files}.")
+        if findings:
+            sev_counts = {}
+            for f in findings:
+                s = f.get("severity", "info")
+                sev_counts[s] = sev_counts.get(s, 0) + 1
+            sev_str = ", ".join(f"{n} {s}" for s, n in sev_counts.items())
+            parts.append(f"Review found: {sev_str}.")
+        human_narrative = " ".join(parts)
+
+    if human_narrative:
+        narr_h = max(60, _compute_text_h(human_narrative, CONTENT_W - 40, 11, 15) + 40)
+    else:
+        narr_h = 60
+
+    elements.append(make_zone(
+        "zone_narr", MARGIN, y_cursor, CONTENT_W, narr_h,
+        ZONE_GREEN, GREEN, opacity=20,
+    ))
+    y_cursor += 10
+    st = _section_title("sec_narr", "HUMAN-READABLE NARRATIVE  (what this PR does and why)",
+                        MARGIN + 8, y_cursor)
+    elements.append(st)
+    y_cursor += 28
+
+    if human_narrative:
+        elements.append(make_text(
+            "narrative_txt", MARGIN + 12, y_cursor, CONTENT_W - 24, narr_h - 40,
+            human_narrative, font_size=11, color="#1e1e1e",
         ))
-        y_cursor += 8
-        t = _section_title("FRONTEND COMPONENTS")
-        t["y"] = y_cursor
-        elements.append(t)
-        y_cursor += 28
 
-        for fi, fc in enumerate(frontend_components[:fc_cnt]):
-            name = fc.get("name", "?")
-            desc = fc.get("desc", "")
-            ffile = fc.get("file", "")
-            why = fc.get("why", "")
-            fid = f"fe{fi}"
-            ftid = f"tfe{fi}"
+    y_cursor = narr_top + narr_h + 5
 
-            label = f"{name}"
-            if ffile:
-                label += f"  ({ffile})"
-            if desc:
-                label += f"\n  {desc[:120]}"
-            if why:
-                label += f"\n  WHY: {why[:80]}"
+    # ================================================================
+    # SECTION 7: Findings with Severity
+    # ================================================================
+    find_top = y_cursor
 
-            el_h = max(36, min(55, len(label.split("\n")) * 14 + 10))
-            elements.append(make_rect(
-                fid, 65, y_cursor, 670, el_h,
-                LIGHT_BLUE, BLUE,
-            ))
-            elements.append(make_text(
-                ftid, 70, y_cursor + 3, 660, el_h - 6,
-                label, font_size=9,
-                align="left", valign="top", container_id=fid,
-            ))
-            y_cursor += el_h + 4
-
-        y_cursor = zone_y + fc_h + 5
-
-    # ── 9. Findings ────────────────────────────────────────────────
     if findings:
-        fh = max(50, len(findings) * 52 + 35)
-        zone_y = y_cursor
-        elements.append(make_rect(
-            "bg_findings", 50, y_cursor, 700, fh,
-            LIGHT_YELLOW, AMBER, opacity=25,
-        ))
-        y_cursor += 8
-        t = _section_title("FINDINGS")
-        t["y"] = y_cursor
-        elements.append(t)
-        y_cursor += 28
+        find_h = sum(
+            max(46, _compute_text_h(
+                SEVERITY_ICON.get(f.get("severity", "info"), " ") + " " +
+                f.get("title", "") + " " + f.get("detail", ""),
+                CONTENT_W - 40, 10, 14,
+            ) + 12)
+            for f in findings
+        ) + 40
+        find_h = min(find_h, 400)
+    else:
+        find_h = 60
 
+    elements.append(make_zone(
+        "zone_find", MARGIN, y_cursor, CONTENT_W, find_h,
+        ZONE_PINK, RED, opacity=20,
+    ))
+    y_cursor += 10
+    st = _section_title("sec_find", "FINDINGS  (severity-coded issues)",
+                        MARGIN + 8, y_cursor)
+    elements.append(st)
+    y_cursor += 28
+
+    if findings:
         for fi, finding in enumerate(findings):
             sev = finding.get("severity", "info").lower()
             fill, stroke, text_c = SEVERITY.get(sev, SEVERITY["info"])
@@ -531,27 +723,105 @@ def render_review(
             fid = f"find{fi}"
             ftid = f"tfind{fi}"
             icon = SEVERITY_ICON.get(sev, " ")
-            loc = f"  {ffile}:{fline}" if ffile else ""
+            loc = f"  [{ffile}:{fline}]" if ffile else ""
 
-            label = f"[{icon}] {title_t}{loc}\n  {detail[:150]}"
-            if fline:
-                label += f" (line {fline})"
+            label = f"[{icon}] {title_t}{loc}\n{detail}"
 
+            el_h = max(40, _compute_text_h(label, CONTENT_W - 40, 10, 14) + 10)
             elements.append(make_rect(
-                fid, 65, y_cursor, 670, 46,
+                fid, MARGIN + 10, y_cursor, CONTENT_W - 20, el_h,
                 fill, stroke,
             ))
             elements.append(make_text(
-                ftid, 70, y_cursor + 3, 660, 40,
+                ftid, MARGIN + 15, y_cursor + 3, CONTENT_W - 30, el_h - 6,
                 label, font_size=10,
                 align="left", valign="top", container_id=fid,
                 color=text_c,
             ))
-            y_cursor += 48
+            y_cursor += el_h + 6
 
-        y_cursor = zone_y + fh + 5
+    actual_find_h = y_cursor - find_top + 5
+    for el in elements:
+        if el.get("id") == "zone_find":
+            el["height"] = actual_find_h
+            break
 
-    # ── 10. Legend ─────────────────────────────────────────────────
+    # ================================================================
+    # SECTION 8: Suggested Changes
+    # ================================================================
+    sug_top = y_cursor
+
+    if suggestions:
+        sug_h = sum(
+            max(50, _compute_text_h(
+                s.get("reasoning", "") + "\n---\nOLD: " + s.get("old_code", "") +
+                "\nNEW: " + s.get("new_code", ""),
+                CONTENT_W - 40, 10, 14,
+            ) + 16)
+            for s in suggestions
+        ) + 40
+        sug_h = min(sug_h, 400)
+    else:
+        sug_h = 60
+
+    elements.append(make_zone(
+        "zone_sug", MARGIN, y_cursor, CONTENT_W, sug_h,
+        ZONE_BLUE, BLUE, opacity=20,
+    ))
+    y_cursor += 10
+    st = _section_title("sec_sug", "SUGGESTED CHANGES  (actionable code diffs from Bot 2 review)",
+                        MARGIN + 8, y_cursor)
+    elements.append(st)
+    y_cursor += 28
+
+    if suggestions:
+        for si, sug in enumerate(suggestions):
+            sfile = sug.get("file", "")
+            sline = sug.get("line", "")
+            old_code = sug.get("old_code", "")
+            new_code = sug.get("new_code", "")
+            reasoning = sug.get("reasoning", "")
+            sev = sug.get("severity", "suggestion").lower()
+            fill, stroke, text_c = SEVERITY.get(sev, SEVERITY["suggestion"])
+
+            sid = f"sug{si}"
+            stid = f"tsug{si}"
+
+            label = f"[{sfile}:{sline}] {reasoning}"
+            if old_code:
+                label += f"\nOLD: {old_code}"
+            if new_code:
+                label += f"\nNEW: {new_code}"
+
+            el_h = max(50, _compute_text_h(label, CONTENT_W - 40, 10, 14) + 12)
+            elements.append(make_rect(
+                sid, MARGIN + 10, y_cursor, CONTENT_W - 20, el_h,
+                fill, stroke,
+            ))
+            elements.append(make_text(
+                stid, MARGIN + 15, y_cursor + 4, CONTENT_W - 30, el_h - 8,
+                label, font_size=10,
+                align="left", valign="top", container_id=sid,
+                color=text_c,
+            ))
+            y_cursor += el_h + 6
+
+    actual_sug_h = y_cursor - sug_top + 5
+    for el in elements:
+        if el.get("id") == "zone_sug":
+            el["height"] = actual_sug_h
+            break
+
+    # ================================================================
+    # SECTION 9: Legend
+    # ================================================================
+    legend_y = y_cursor + 10
+    elements.append(make_text(
+        "leg_title", MARGIN, legend_y, 200, 18,
+        "Legend:", font_size=12,
+    ))
+    legend_y += 22
+
     legend_data = [
         (LIGHT_RED,    RED,    "Critical"),
         (LIGHT_ORANGE, AMBER,  "Warning"),
@@ -559,23 +829,174 @@ def render_review(
         (LIGHT_GREEN,  GREEN,  "Approved"),
         (LIGHT_BLUE,   BLUE,   "Info"),
     ]
-    legend_y = y_cursor + 8
-    elements.append(make_text(
-        "leg_title", 50, legend_y, 200, 18,
-        "Legend:", font_size=12,
-    ))
-    legend_y += 22
+    # Also add landscape highlight legend
+    legend_extras = [
+        (HIGHLIGHT_FILL, HIGHLIGHT_STROKE, "PR-changed file"),
+        (ZONE_TEAL, CYAN, "Unchanged module"),
+    ]
+    all_legend = legend_data + legend_extras
 
-    for i, (fill, stroke, label) in enumerate(legend_data):
-        lx = 110 + i * 115
+    for i, (fill, stroke, label) in enumerate(all_legend):
+        lx = MARGIN + 10 + i * 115
         lid = f"leg{i}"
         ltid = f"tleg{i}"
-        elements.append(make_rect(lid, lx, legend_y, 95, 26, fill, stroke))
+        elements.append(make_rect(lid, lx, legend_y, 100, 26, fill, stroke))
         elements.append(make_text(
-            ltid, lx + 3, legend_y + 3, 89, 20,
+            ltid, lx + 3, legend_y + 3, 94, 20,
             label, font_size=10, align="center", valign="middle",
             container_id=lid,
         ))
+
+    # ================================================================
+    # CONNECTORS: Cross-section arrows
+    # ================================================================
+    # We add connectors AFTER all regular elements so we know final positions.
+    conn_elements = []
+
+    # Arrow: landscape -> PR scope (down arrow)
+    landscape_zone = _find_elem(elements, "zone_landscape")
+    scope_zone = _find_elem(elements, "zone_scope")
+    if landscape_zone and scope_zone:
+        cx = landscape_zone["x"] + landscape_zone["width"] // 2
+        sy = landscape_zone["y"] + landscape_zone["height"]
+        ey = scope_zone["y"]
+        conn_elements.extend(make_connector(
+            "conn_land_scope", "zone_landscape", "zone_scope",
+            cx, sy, cx, ey,
+            color=CYAN,
+        ))
+
+    # Arrow: PR scope -> Graphify
+    scope_zone = _find_elem(elements, "zone_scope")
+    graph_zone = _find_elem(elements, "zone_graph")
+    if scope_zone and graph_zone:
+        cx = scope_zone["x"] + scope_zone["width"] // 2
+        sy = scope_zone["y"] + scope_zone["height"]
+        ey = graph_zone["y"]
+        conn_elements.extend(make_connector(
+            "conn_scope_graph", "zone_scope", "zone_graph",
+            cx, sy, cx, ey,
+            color=PURPLE,
+        ))
+
+    # Arrow: Graphify -> Code Chunks
+    graph_zone = _find_elem(elements, "zone_graph")
+    code_zone = _find_elem(elements, "zone_code")
+    if graph_zone and code_zone:
+        cx = graph_zone["x"] + graph_zone["width"] // 2
+        sy = graph_zone["y"] + graph_zone["height"]
+        ey = code_zone["y"]
+        conn_elements.extend(make_connector(
+            "conn_graph_code", "zone_graph", "zone_code",
+            cx, sy, cx, ey,
+            color=AMBER,
+        ))
+
+    # Arrow: Code Chunks -> Narrative
+    code_zone = _find_elem(elements, "zone_code")
+    narr_zone = _find_elem(elements, "zone_narr")
+    if code_zone and narr_zone:
+        cx = code_zone["x"] + code_zone["width"] // 2
+        sy = code_zone["y"] + code_zone["height"]
+        ey = narr_zone["y"]
+        conn_elements.extend(make_connector(
+            "conn_code_narr", "zone_code", "zone_narr",
+            cx, sy, cx, ey,
+            color=GREEN,
+        ))
+
+    # Arrow: Narrative -> Findings
+    narr_zone = _find_elem(elements, "zone_narr")
+    find_zone = _find_elem(elements, "zone_find")
+    if narr_zone and find_zone:
+        cx = narr_zone["x"] + narr_zone["width"] // 2
+        sy = narr_zone["y"] + narr_zone["height"]
+        ey = find_zone["y"]
+        conn_elements.extend(make_connector(
+            "conn_narr_find", "zone_narr", "zone_find",
+            cx, sy, cx, ey,
+            color=RED,
+        ))
+
+    # Arrow: Findings -> Suggested Changes
+    find_zone = _find_elem(elements, "zone_find")
+    sug_zone = _find_elem(elements, "zone_sug")
+    if find_zone and sug_zone:
+        cx = find_zone["x"] + find_zone["width"] // 2
+        sy = find_zone["y"] + find_zone["height"]
+        ey = sug_zone["y"]
+        conn_elements.extend(make_connector(
+            "conn_find_sug", "zone_find", "zone_sug",
+            cx, sy, cx, ey,
+            color=BLUE,
+        ))
+
+    # Arrow: PR-changed files in landscape <-> God nodes
+    # (if we have god nodes and a landscape, link them)
+    if repo_graph and god_nodes:
+        # Find last PR-changed landscape module
+        pr_module_ids = []
+        for gi, rg in enumerate(repo_graph[:30]):
+            if is_pr_file(rg.get("file", "")):
+                pr_module_ids.append(f"lm{gi}")
+        if pr_module_ids and god_nodes:
+            # Link first god node to last PR module
+            src_id = pr_module_ids[-1]
+            god_id = "god0"
+            src_el = _find_elem(elements, src_id)
+            god_el = _find_elem(elements, god_id)
+            if src_el and god_el:
+                sx = src_el["x"] + src_el["width"]
+                sy = src_el["y"] + src_el["height"] // 2
+                gx = god_el["x"]
+                gy = god_el["y"] + god_el["height"] // 2
+                conn_elements.extend(make_connector(
+                    "conn_land_god", src_id, god_id,
+                    sx, sy, gx, gy,
+                    color=PURPLE, dashed=True,
+                    label="connected via graphify",
+                ))
+
+    # Arrow: Findings -> Code Chunks
+    if findings and code_chunks:
+        for fi, finding in enumerate(findings[:3]):  # Max 3 to keep diagram clean
+            fid = f"find{fi}"
+            code_id = f"code{fi}" if fi < len(code_chunks) else f"code{len(code_chunks) - 1}"
+            f_el = _find_elem(elements, fid)
+            c_el = _find_elem(elements, code_id)
+            if f_el and c_el:
+                fx = f_el["x"]
+                fy = f_el["y"] + f_el["height"] // 2
+                cx_2 = c_el["x"] + c_el["width"]
+                cy_2 = c_el["y"] + c_el["height"] // 2
+                conn_elements.extend(make_connector(
+                    f"conn_find_code{fi}", fid, code_id,
+                    fx, fy, cx_2, cy_2,
+                    color=AMBER, dashed=True,
+                    label="originates from",
+                ))
+
+    # Arrow: Suggestions -> Findings
+    if suggestions and findings:
+        for si, sug in enumerate(suggestions[:3]):  # Max 3
+            sid = f"sug{si}"
+            fid = f"find{si}" if si < len(findings) else f"find{len(findings) - 1}"
+            s_el = _find_elem(elements, sid)
+            f_el = _find_elem(elements, fid)
+            if s_el and f_el:
+                sx2 = s_el["x"]
+                sy2 = s_el["y"] + s_el["height"] // 2
+                fx2 = f_el["x"] + f_el["width"]
+                fy2 = f_el["y"] + f_el["height"] // 2
+                conn_elements.extend(make_connector(
+                    f"conn_sug_find{si}", sid, fid,
+                    sx2, sy2, fx2, fy2,
+                    color=GREEN, dashed=True,
+                    label="addresses",
+                ))
+
+    # Prepend connector elements so they render behind section content
+    elements[0:0] = conn_elements
 
     # ── Assemble JSON ──────────────────────────────────────────────
     data = {
@@ -588,6 +1009,14 @@ def render_review(
 
     Path(output_path).write_text(json.dumps(data, indent=2))
     return output_path
+
+
+def _find_elem(elements: list[dict], eid: str) -> Optional[dict]:
+    """Find an element by ID from the elements list."""
+    for el in elements:
+        if el.get("id") == eid:
+            return el
+    return None
 
 
 # ── Upload ──────────────────────────────────────────────────────────
@@ -619,36 +1048,89 @@ def upload_excalidraw(file_path: str) -> Optional[str]:
 
 if __name__ == "__main__":
     import sys
-    # Test mode: generate a sample diagram
+    # Test mode: generate a sample diagram with all new features
     output = render_review(
-        pr_data={"title": "feat: sample PR", "number": 42, "repo": "test/repo",
+        pr_data={"title": "feat: sample PR with full connected narrative",
+                 "number": 42, "repo": "test/repo",
                  "author": "test", "loc": 250, "status": "OPEN"},
+        repo_graph=[
+            {"name": "routes.py", "type": "module", "file": "api/routes.py",
+             "why": "HTTP routing and middleware"},
+            {"name": "models.py", "type": "module", "file": "api/models.py",
+             "why": "Core data models and ORM mappings"},
+            {"name": "auth.py", "type": "module", "file": "api/auth.py",
+             "why": "Authentication and authorization"},
+            {"name": "helpers.py", "type": "module", "file": "api/helpers.py",
+             "why": "Utility functions used across modules"},
+            {"name": "draft_optimization.py", "type": "module",
+             "file": "api/draft_optimization.py",
+             "why": "Per-session draft overlay optimization"},
+            {"name": "recovery_manager.py", "type": "module",
+             "file": "api/recovery_manager.py",
+             "why": "Session recovery and rollback"},
+            {"name": "mcp_server.py", "type": "module", "file": "api/mcp_server.py",
+             "why": "MCP protocol server for tool integration"},
+            {"name": "store.py", "type": "module", "file": "api/store.py",
+             "why": "Session read/write persistence layer"},
+            {"name": "Session", "type": "class", "file": "api/models.py",
+             "why": "Core domain object for user sessions"},
+            {"name": "DraftOverlay", "type": "class", "file": "api/models.py",
+             "why": "Per-session draft state management"},
+        ],
         findings=[
             {"severity": "critical", "title": "Bad API call",
-             "detail": "Calls deprecated endpoint without auth", "file": "api.py", "line": 42},
+             "detail": "Calls deprecated endpoint without authentication. "
+                       "This will fail once the legacy endpoint is removed in the next release.",
+             "file": "api/draft_optimization.py", "line": 42},
             {"severity": "warning", "title": "Missing error handling",
-             "detail": "No try/except around network call", "file": "client.py", "line": 88},
-            {"severity": "suggestion", "title": "Use f-strings",
-             "detail": "String concatenation can be simplified", "file": "utils.py", "line": 12},
+             "detail": "No try/except around network call in draft save path. "
+                       "A network failure would silently lose the draft.",
+             "file": "api/models.py", "line": 88},
+            {"severity": "suggestion", "title": "Use f-strings for clarity",
+             "detail": "String concatenation with + operator makes the log messages "
+                       "harder to read. Use f-strings for consistency with rest of codebase.",
+             "file": "api/helpers.py", "line": 12},
         ],
         graph_data={
             "god_nodes": [
-                {"name": "routes.py", "edges": 42, "why": "Central routing hub"},
-                {"name": "Session", "edges": 38, "why": "Core domain object"},
+                {"name": "routes.py", "edges": 42,
+                 "why": "Central routing hub that dispatches all HTTP requests to handlers"},
+                {"name": "Session", "edges": 38,
+                 "why": "Core domain object referenced by persistence, auth, and overlay modules"},
+                {"name": "models.py", "edges": 29,
+                 "why": "ORM definitions that every data-access path depends on"},
             ],
             "communities": [
-                {"name": "API Layer", "members": ["routes.py", "auth.py", "helpers.py"],
-                 "why": "HTTP request handling path"},
-                {"name": "Persistence", "members": ["models.py", "store.py", "mcp_server.py"],
-                 "why": "Session read/write lifecycle"},
+                {"name": "API Layer",
+                 "members": ["routes.py", "auth.py", "helpers.py"],
+                 "why": "HTTP request handling path: routes dispatch through auth middleware"},
+                {"name": "Persistence",
+                 "members": ["models.py", "store.py", "mcp_server.py"],
+                 "why": "Session read/write lifecycle: models define the schema"},
+                {"name": "Draft System",
+                 "members": ["draft_optimization.py", "recovery_manager.py", "models.py"],
+                 "why": "Draft overlay on session load; recovery ensures rollback consistency"},
             ],
             "blast_radius": {},
         },
         code_chunks=[
-            {"code": "session_data.update(draft)", "why": "Leaks keys to top level",
-             "file": "draft_optimization.py:63"},
-            {"code": "except Exception: pass", "why": "Silently hides ImportError",
-             "file": "models.py:1421"},
+            {"code": "session_data.update(draft)\n# This merges draft keys into session top-level\n"
+                     "return session_data",
+             "why": "This line merges draft overlay data into the session dictionary at the top "
+                    "level, which can leak draft-specific keys into the main session namespace. "
+                    "A safer approach would use a separate 'draft' sub-key to avoid key collision "
+                    "with existing session fields like 'user_id' or 'expires_at'.",
+             "file": "api/draft_optimization.py:63"},
+            {"code": "@app.route('/session/<id>', methods=['GET'])\n"
+                     "def get_session(id):\n"
+                     "    session = Session.query.get(id)\n"
+                     "    if not session:\n"
+                     "        abort(404)\n"
+                     "    return jsonify(session.to_dict())",
+             "why": "This single route handles both web and API consumers of session data. "
+                    "As the system grows, separating these concerns into versioned API endpoints "
+                    "would prevent breaking web consumers when the session schema evolves.",
+             "file": "api/routes.py:15"},
         ],
         connections=[
             {"source": "draft_optimization.py", "target": "models.py",
@@ -656,16 +1138,45 @@ if __name__ == "__main__":
             {"source": "routes.py", "target": "draft_optimization.py",
              "relation": "calls", "why": "Saves draft before session rewrite"},
         ],
+        suggestions=[
+            {"file": "api/draft_optimization.py", "line": 63,
+             "old_code": "session_data.update(draft)",
+             "new_code": "session_data['draft'] = draft",
+             "severity": "critical",
+             "reasoning": "Using update() leaks draft keys into the session namespace. "
+                         "Store draft under a dedicated 'draft' sub-key to isolate it. "
+                         "This prevents key collision with fields like 'user_id'."},
+            {"file": "api/models.py", "line": 88,
+             "old_code": "response = requests.post(url, json=data)",
+             "new_code": "try:\n    response = requests.post(url, json=data, timeout=5)\n"
+                         "except requests.RequestException as e:\n    log.error('save failed: %s', e)\n    raise",
+             "severity": "warning",
+             "reasoning": "The network call is unprotected. A transient failure would silently "
+                         "swallow the exception and the caller would never know the save failed."},
+        ],
+        human_narrative=(
+            "This PR introduces a draft overlay feature for user sessions. "
+            "The draft_optimization.py module caches in-progress draft data and applies it on "
+            "session load, reducing latency for large sessions. "
+            "Changes affect the API routing layer (routes.py), the persistence layer (models.py, "
+            "store.py), and the new draft module. "
+            "The main concern is that draft keys currently merge into the top-level session dict, "
+            "which risks collision with existing fields. "
+            "Reviewers should focus on the merge strategy in draft_optimization.py and verify "
+            "that the error handling in models.py covers network failures during save."
+        ),
+        file_tree=(
+            "  M api/draft_optimization.py  (+83 / -12)\n"
+            "  M api/models.py  (+7 / -3)\n"
+            "  M api/routes.py  (+6 / -6)\n"
+            "  M api/store.py  (+4 / -0)\n"
+            "  + api/draft.py  (+47 / -0)"
+        ),
         flow_steps=[
             ("Webhook", "PR event", LIGHT_BLUE),
             ("Graphify", "code analysis", LIGHT_PURPLE),
             ("DeepThink", "review loop", LIGHT_ORANGE),
             ("Excalidraw", "diagram out", LIGHT_GREEN),
-        ],
-        file_tree="api/draft_optimization.py  (83 LOC)\napi/models.py (+7 LOC)\napi/routes.py (+6 / -6)\napi/recovery_manager.py  (177 LOC, dead code)",
-        frontend_components=[
-            {"name": "Draft Overlay", "desc": "Applies per-session draft on load",
-             "file": "models.py", "why": "Reduces large-session latency"},
         ],
         output_path=sys.argv[1] if len(sys.argv) > 1 else "/tmp/review.excalidraw",
     )
