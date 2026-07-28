@@ -1,0 +1,87 @@
+{
+  "riptide/__init__.py": {
+    "mtime": 1784733644.817256,
+    "ast_hash": "45ef72c0f4e47d8f3fec0c4de72af216",
+    "semantic_hash": "45ef72c0f4e47d8f3fec0c4de72af216"
+  },
+  "riptide/embed.py": {
+    "mtime": 1783857231.914257,
+    "ast_hash": "a33017b8862147836d9d587ede93ccfc",
+    "semantic_hash": "a33017b8862147836d9d587ede93ccfc"
+  },
+  "riptide/github_app.py": {
+    "mtime": 1785069418.6970415,
+    "ast_hash": "d26b1b7129a737b1d591bce3a2dd9cf6",
+    "semantic_hash": ""
+  },
+  "riptide/review.py": {
+    "mtime": 1785108758.58252,
+    "ast_hash": "25c17fe2f632cb4f4ae7ae7026c7b54d",
+    "semantic_hash": ""
+  },
+  "riptide/review_worker.py": {
+    "mtime": 1783857742.750267,
+    "ast_hash": "2fa03c962db9b2c923aea2a65374911e",
+    "semantic_hash": "2fa03c962db9b2c923aea2a65374911e"
+  },
+  "riptide/store.py": {
+    "mtime": 1783857260.7622576,
+    "ast_hash": "183521699d1d00ad60cd152b185d87dc",
+    "semantic_hash": "183521699d1d00ad60cd152b185d87dc"
+  },
+  "riptide/webhook.py": {
+    "mtime": 1785110302.6481774,
+    "ast_hash": "b17434985c25c5b28be93eab23511429",
+    "semantic_hash": ""
+  },
+  "riptide_example.py": {
+    "mtime": 1784733631.4249082,
+    "ast_hash": "349c366e70cf4870009b9a54361d2c22",
+    "semantic_hash": "349c366e70cf4870009b9a54361d2c22"
+  },
+  "server.py": {
+    "mtime": 1783857344.8062594,
+    "ast_hash": "6b2f4906be3a1728e0afe90c5d4e9b78",
+    "semantic_hash": "6b2f4906be3a1728e0afe90c5d4e9b78"
+  },
+  "riptide/companion.py": {
+    "mtime": 1785108722.670409,
+    "ast_hash": "25e0a033e653634f31f6c029d8b2f251",
+    "semantic_hash": ""
+  },
+  "start.sh": {
+    "mtime": 1785036152.6242442,
+    "ast_hash": "674286b49b79eecac8a247aa2e2914d2",
+    "semantic_hash": ""
+  },
+  "COMPANION_TEST.md": {
+    "mtime": 1785071173.5306635,
+    "ast_hash": "34c364161c710a742bc361defd674b15",
+    "semantic_hash": ""
+  },
+  "README.md": {
+    "mtime": 1785109022.643508,
+    "ast_hash": "e702e8b0a9a7f4b9447f808bf56c54e3",
+    "semantic_hash": ""
+  },
+  "SKILL.md": {
+    "mtime": 1783857440.6782613,
+    "ast_hash": "5b7dae303648fe9a7f6890c326af4289",
+    "semantic_hash": ""
+  },
+  "docker-compose.yml": {
+    "mtime": 1783857397.4742603,
+    "ast_hash": "b53c1bde857c37a94cab81af89098e44",
+    "semantic_hash": ""
+  },
+  "requirements.txt": {
+    "mtime": 1785063284.6355522,
+    "ast_hash": "122cf2863e76d965c48290a5b2989694",
+    "semantic_hash": ""
+  },
+  "test_pr_file.txt": {
+    "mtime": 1785050572.8067038,
+    "ast_hash": "e27cc56d4bc4e2c90b98b7968032b8f1",
+    "semantic_hash": ""
+  }
+}

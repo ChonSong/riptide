@@ -48,8 +48,8 @@ STATE_FILE = Path(
 ) / "deepthink_acted_prs.json"
 
 
-def _load_state() -> dict[str, str]:
-    """Load processed PR state: {owner/repo#number: head_sha}"""
+def _load_state() -> dict[str, dict]:
+    """Load processed PR state: {owner/repo#number: {head_sha, reviewed_at}}"""
     if STATE_FILE.exists():
         try:
             return json.loads(STATE_FILE.read_text())
@@ -58,9 +58,24 @@ def _load_state() -> dict[str, str]:
     return {}
 
 
-def _save_state(state: dict[str, str]):
+def _save_state(state: dict[str, dict]):
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(state, indent=2))
+
+
+def _was_reviewed_today(owner: str, repo: str, pr_number: int) -> bool:
+    """Check if this PR was reviewed in the last 24 hours."""
+    pr_key = f"{owner}/{repo}#{pr_number}"
+    state = _load_state()
+    entry = state.get(pr_key, {})
+    reviewed_at = entry.get("reviewed_at", "")
+    if not reviewed_at:
+        return False
+    try:
+        reviewed_time = datetime.fromisoformat(reviewed_at)
+        return (datetime.now(timezone.utc) - reviewed_time) < timedelta(hours=24)
+    except (ValueError, TypeError):
+        return False
 
 
 def _is_cron_available() -> bool:
@@ -137,8 +152,8 @@ def _spawn_deepthink(
         f"- `**🔴 Critical:**` — definite bug, security issue, data loss risk\n"
         f"- `**🟡 Warning:**` — potential issue, performance concern, code smell\n"
         f"- `**ℹ️ Suggestion:**` — style improvement, minor refactor, nitpick\n\n"
-        f"Post inline comments for substantive findings only (2-5 per PR is normal). "
-        f"Don't comment on every line — focus on real issues.\n\n"
+        f"Post inline comments for substantive findings only (1-3 per PR maximum). "
+        f"Focus on real issues — do not comment on every line or nitpick style.\n\n"
         f"### Step 4: Generate Excalidraw Diagram with Decision Colors\n"
         f"After all inline review comments are posted, generate an Excalidraw diagram "
         f"visualizing your findings. Use this Python script:\n\n"
@@ -175,12 +190,18 @@ def _spawn_deepthink(
         f"After posting all inline comments and generating the Excalidraw, post a **summary review**:\n"
         f"`gh pr comment {pr_number} --repo {owner}/{repo} --body '<review>'`\n\n"
         f"Structure your review as:\n"
-        f"- **Summary**: What this PR does (1-2 sentences)\n"
-        f"- **Deep-Think Findings**: Issues, risks, or approval reasoning\n"
-        f"- **Inline Comments**: N findings posted (see specific lines for suggestions)\n"
+        f"- **Summary**: What this PR does (1-2 sentences, no filler)\n"
+        f"- **Findings**: Only real issues (not style nits or hypotheticals)\n"
+        f"- **Inline Comments**: N findings posted (see specific lines)\n"
         f"- **Excalidraw**: Link to visual evidence diagram\n"
-        f"- **Next Steps**: Specific actionable advice\n\n"
-        f"If everything looks good, say so with reasoning — don't invent problems.\n\n"
+        f"- **Next Steps**: Specific actionable advice (max 3 items)\n\n"
+        f"**Quality gate**: If you have no critical/warning findings, say so briefly — "
+        f"do not invent problems or pad the review.\n\n"
+        f"**Sign-off**: End your summary with:\n"
+        f"```\n"
+        f"---\n"
+        f"<sub>🤖 Riptide Review via Hermes · model: `hermes` (LongCat-2.0)</sub>\n"
+        f"```\n\n"
         f"REPO PATH: ~/workspace/{repo}/\n"
     )
 
@@ -278,10 +299,15 @@ def run():
                 skipped_stale += 1
                 continue
 
-            # Dedup: same head SHA already processed
+            # Dedup: same head SHA already processed OR reviewed in last 24h
             pr_key = f"{repo_full}#{pr_number}"
-            if state.get(pr_key) == head_sha:
+            if state.get(pr_key, {}).get("head_sha") == head_sha:
                 log.info(f"  #{pr_number} skip — already processed (SHA {head_sha[:12]})")
+                skipped_dedup += 1
+                continue
+            
+            if _was_reviewed_today(owner, repo_name, pr_number):
+                log.info(f"  #{pr_number} skip — reviewed in last 24h")
                 skipped_dedup += 1
                 continue
 
@@ -293,7 +319,7 @@ def run():
             _spawn_deepthink(owner, repo_name, pr_number, pr_title, pr_author, total_loc, head_sha)
 
             # Record dedup immediately to prevent double-spawn
-            state[pr_key] = head_sha
+            state[pr_key] = {"head_sha": head_sha, "reviewed_at": datetime.now(timezone.utc).isoformat()}
             _save_state(state)
             triggered += 1
 
