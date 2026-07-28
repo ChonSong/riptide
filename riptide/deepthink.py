@@ -190,6 +190,7 @@ def _spawn_deepthink(
         "--name", name,
         "--skill", "github-pr-lifecycle",
         "--skill", "deep-think",
+        "--skill", "excalidraw",
         "--deliver", "origin",
     ]
 
