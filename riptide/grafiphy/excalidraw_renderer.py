@@ -264,6 +264,7 @@ def render_review(
     file_tree: str = None,
     frontend_components: list[dict] = None,
     repo_graph: list[dict] = None,
+    repo_tree: str = None,
     suggestions: list[dict] = None,
     human_narrative: str = None,
     output_path: str = "/tmp/review.excalidraw",
@@ -366,94 +367,120 @@ def render_review(
     y_cursor += 10
 
     # ================================================================
-    # SECTION 2: Codebase Landscape
+    # SECTION 2: Codebase Directory Tree
     # ================================================================
     landscape_top = y_cursor
-    zone_id = "zone_landscape"
+    zone_id = "zone_tree"
 
-    # Estimate landscape height
-    if repo_graph:
-        n_modules = min(len(repo_graph), 30)
-        module_h = max(40, n_modules * 22 + 10)
-        landscape_h = module_h + 50
+    # Parse the repo_tree string
+    parsed_lines = []
+    has_tree = bool(repo_tree)
+    if repo_tree:
+        for line in repo_tree.strip().split("\n"):
+            raw = line.rstrip()
+            # Count leading spaces to determine depth (every 4 spaces = 1 level)
+            stripped = raw.lstrip()
+            indent = (len(raw) - len(stripped)) // 4
+            # Remove tree-drawing chars (├── └── │)
+            clean = stripped.lstrip("├└│").lstrip("──").strip()
+            # Split off annotation after #
+            annotation = ""
+            if "#" in clean:
+                parts = clean.split("#", 1)
+                clean = parts[0].strip()
+                annotation = parts[1].strip()
+            is_dir = clean.endswith("/")
+            if is_dir:
+                clean = clean.rstrip("/")
+            parsed_lines.append({
+                "indent": indent,
+                "name": clean,
+                "annotation": annotation,
+                "is_dir": is_dir,
+                "raw": raw,
+            })
+
+    tree_h = 0
+    if has_tree:
+        # Estimate height: ~20px per line, capped
+        n_lines = len(parsed_lines)
+        tree_h = max(60, min(500, n_lines * 20 + 50))
     else:
-        landscape_h = 60
+        tree_h = 60
 
     elements.append(make_zone(
-        zone_id, MARGIN, y_cursor, CONTENT_W, landscape_h,
+        zone_id, MARGIN, y_cursor, CONTENT_W, tree_h,
         ZONE_TEAL, CYAN, opacity=20,
     ))
     y_cursor += 10
 
-    st = _section_title("sec_landscape", "CODEBASE LANDSCAPE  (all modules; PR files highlighted in red)",
+    st = _section_title("sec_tree", "CODEBASE DIRECTORY TREE  (PR files highlighted in red)",
                         MARGIN + 8, y_cursor)
     elements.append(st)
     y_cursor += 28
 
-    if repo_graph:
-        # Layout modules in rows of 3 columns
-        col_w = CONTENT_W // 3 - 6  # ~265
-        col_x = [MARGIN + 10 + i * (col_w + 8) for i in range(3)]
-        row_y = y_cursor
-        col_idx = 0
+    if has_tree:
+        for ti, pl in enumerate(parsed_lines):
+            indent_px = pl["indent"] * 16 + MARGIN + 10
+            line_w = CONTENT_W - (indent_px - MARGIN) - 20
+            name = pl["name"]
+            annotation = pl["annotation"]
+            is_dir = pl["is_dir"]
 
-        for gi, rg in enumerate(repo_graph[:30]):
-            cx = col_x[col_idx]
-            name = rg.get("name", "?")
-            rg_type = rg.get("type", "module")
-            rg_file = rg.get("file", "")
-            changed = is_pr_file(rg_file)
+            # Check if this file path matches a PR-changed file
+            is_pr = is_pr_file(name)
 
-            mid = f"lm{gi}"
-            mtid = f"tlm{gi}"
-            label = f"{name}  ({rg_type})"
-            if rg_file:
-                label += f"  [{rg_file.split('/')[-1]}]"
-
-            if changed:
-                fill = HIGHLIGHT_FILL
-                stroke = HIGHLIGHT_STROKE
-                stroke_w = 3
-            else:
-                fill = LIGHT_TEAL
+            tid = f"tree{ti}"
+            if is_dir:
+                label = f"{name}/"
+                if annotation:
+                    label += f"  # {annotation}"
+                el_h = 18
+                fill = ZONE_TEAL
                 stroke = CYAN
                 stroke_w = 1
+            else:
+                label = name
+                if annotation:
+                    label += f"  # {annotation}"
+                el_h = 18
+                if is_pr:
+                    fill = HIGHLIGHT_FILL
+                    stroke = HIGHLIGHT_STROKE
+                    stroke_w = 3
+                else:
+                    fill = LIGHT_TEAL
+                    stroke = CYAN
+                    stroke_w = 1
 
-            el = make_rect(mid, cx, row_y, col_w, 20,
-                           fill, stroke, roundness=True)
-            el["strokeWidth"] = stroke_w
-            if changed:
-                el["strokeStyle"] = "solid"
-            elements.append(el)
-            elements.append(make_text(
-                mtid, cx + 3, row_y + 2, col_w - 6, 16,
-                label, font_size=9,
-                align="left", valign="middle", container_id=mid,
+            rid = f"r_tree{ti}"
+            elements.append(make_rect(
+                rid, indent_px, y_cursor, line_w, el_h,
+                fill, stroke, roundness=True,
             ))
+            # Set stroke width on the element
+            elements[-1]["strokeWidth"] = stroke_w
+            elements.append(make_text(
+                tid, indent_px + 3, y_cursor + 1, line_w - 6, el_h - 2,
+                label, font_size=9,
+                align="left", valign="middle", container_id=rid,
+                color=DARK_BLUE if is_dir else "#1e1e1e",
+            ))
+            y_cursor += 20
 
-            col_idx += 1
-            if col_idx >= 3:
-                col_idx = 0
-                row_y += 22
-
-        # Adjust actual height
-        actual_landscape_h = max(landscape_h, row_y - landscape_top + 10)
-        # Update zone height
+        actual_h = max(tree_h, y_cursor - landscape_top + 10)
         for el in elements:
             if el.get("id") == zone_id:
-                el["height"] = actual_landscape_h
+                el["height"] = actual_h
                 break
-
-        y_cursor = landscape_top + actual_landscape_h + 5
+        y_cursor = landscape_top + actual_h + 5
     else:
         elements.append(make_text(
-            "landscape_empty", MARGIN + 10, y_cursor, CONTENT_W - 20, 30,
-            "(No repo_graph data provided — install graphify for full landscape view)",
+            "tree_empty", MARGIN + 10, y_cursor, CONTENT_W - 20, 30,
+            "(No repo_tree provided — pass repo_tree for a directory tree overview)",
             font_size=11, color="#757575",
         ))
-        y_cursor = landscape_top + landscape_h + 5
-
-    # Arrow from landscape to PR scope
+        y_cursor = landscape_top + tree_h + 5
     pr_scope_top = y_cursor + 25
 
     # ================================================================
