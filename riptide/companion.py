@@ -137,15 +137,34 @@ class Companion:
             return "🤖 Companion **resumed** for this PR."
         return None
 
+    def _load_data(self) -> dict:
+        """Load companion data file (structured per-PR dict)."""
+        if not self._skip_file.exists():
+            return {}
+        raw = self._skip_file.read_text().strip()
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+
+    def _migrate_entry(self, entry):
+        """Normalize legacy boolean skip values to structured dicts."""
+        if isinstance(entry, bool):
+            return {"skip": entry, "last_sha": None}
+        if isinstance(entry, dict):
+            return {"skip": entry.get("skip", False), "last_sha": entry.get("last_sha", None)}
+        return {"skip": False, "last_sha": None}
+
     def set_skip(self, owner, repo, pr_number, skip):
         key = f"{owner}/{repo}#{pr_number}"
         try:
             with self._skip_lock:
-                data = {}
-                if self._skip_file.exists():
-                    data = json.loads(self._skip_file.read_text()) if self._skip_file.read_text().strip() else {}
+                data = self._load_data()
+                entry = self._migrate_entry(data.get(key, {}))
                 if skip:
-                    data[key] = True
+                    data[key] = {"skip": True, "last_sha": entry.get("last_sha")}
                 else:
                     data.pop(key, None)
                 self._skip_file.write_text(json.dumps(data, indent=2, sort_keys=True))
@@ -158,12 +177,37 @@ class Companion:
         key = f"{owner}/{repo}#{pr_number}"
         try:
             with self._skip_lock:
-                if self._skip_file.exists():
-                    data = json.loads(self._skip_file.read_text()) if self._skip_file.read_text().strip() else {}
-                    return data.get(key, False)
+                data = self._load_data()
+                entry = self._migrate_entry(data.get(key, {}))
+                return entry["skip"]
         except Exception:
             pass
         return False
+
+    def _get_last_sha(self, owner, repo, pr_number) -> Optional[str]:
+        """Get the last commented commit SHA for a PR, or None if first time."""
+        key = f"{owner}/{repo}#{pr_number}"
+        try:
+            with self._skip_lock:
+                data = self._load_data()
+                entry = self._migrate_entry(data.get(key, {}))
+                return entry.get("last_sha")
+        except Exception:
+            return None
+
+    def _set_last_sha(self, owner, repo, pr_number, sha: str):
+        """Record the commit SHA this PR was last commented on."""
+        key = f"{owner}/{repo}#{pr_number}"
+        try:
+            with self._skip_lock:
+                data = self._load_data()
+                entry = self._migrate_entry(data.get(key, {}))
+                data[key] = {"skip": entry["skip"], "last_sha": sha}
+                self._skip_file.write_text(json.dumps(data, indent=2, sort_keys=True))
+                return True
+        except Exception as e:
+            logger.error("SHA update failed: %s", e)
+            return False
 
     def _execute(self, installation_id, owner, repo, pr_number, title, author, changed_files):
         full_name = f"{owner}/{repo}"
@@ -172,9 +216,45 @@ class Companion:
             logger.info("Skipped (user) %s#%d", full_name, pr_number)
             return
 
-        # Fetch diffs if not provided
-        files = changed_files
-        if not any("patch" in f for f in changed_files[:3]):
+        # Get PR head SHA for change tracking
+        pr_details = None
+        current_sha = None
+        try:
+            pr_details = self.client.get_pr_details(installation_id, owner, repo, pr_number)
+            current_sha = pr_details.get("head", {}).get("sha")
+        except Exception as e:
+            logger.warning("Failed to fetch PR details: %s", e)
+
+        last_sha = self._get_last_sha(owner, repo, pr_number) if current_sha else None
+
+        # If same SHA as last comment, skip (no new changes)
+        if last_sha and current_sha and last_sha == current_sha:
+            logger.info("No new commits since last comment for %s#%d — skipping", full_name, pr_number)
+            return
+
+        # Fetch files to analyze
+        files = changed_files or []
+        is_delta = bool(last_sha) and bool(current_sha)
+
+        if is_delta:
+            # Get only the diff between last SHA and current HEAD
+            try:
+                compare = self.client.compare_commits(installation_id, owner, repo, last_sha, current_sha)
+                files = compare.get("files", files)
+                delta_commits = compare.get("total_commits", 0)
+                logger.info(
+                    "Delta for %s#%d: %d new commit(s), %d file(s) changed",
+                    full_name, pr_number, delta_commits, len(files),
+                )
+            except Exception as e:
+                logger.warning("Failed to compare commits: %s, falling back to full PR diff", e)
+                is_delta = False
+                try:
+                    files = self.client.get_pr_files(installation_id, owner, repo, pr_number)
+                except Exception as e2:
+                    logger.warning("Failed to fetch files: %s", e2)
+
+        if not files:
             try:
                 files = self.client.get_pr_files(installation_id, owner, repo, pr_number)
             except Exception as e:
@@ -183,8 +263,8 @@ class Companion:
         emoji = classify_pr_mood(title, files)
         graph_context = self._get_graph_context(files) if self.enable_graphify else None
 
-        # Generate TLDR — if model fails, skip the PR (no fallback)
-        tldr = self._generate_tldr(title, author, files, graph_context)
+        # Generate TL;DR — pass is_delta flag for focus
+        tldr = self._generate_tldr(title, author, files, graph_context, is_delta=is_delta)
         if not tldr:
             logger.warning("TLDR failed %s#%d — no comment posted", full_name, pr_number)
             return
@@ -194,13 +274,16 @@ class Companion:
         ui_files = [f for f in files if any(f.get("filename", "").endswith(ext) for ext in ui_extensions)]
 
         # Generate ELI5 (optional — skip if model fails)
-        eli5 = self._generate_eli5(title, files)
+        eli5 = self._generate_eli5(title, files, is_delta=is_delta)
 
-        body = self._format_comment(emoji, author, tldr, graph_context, eli5, ui_files)
+        body = self._format_comment(emoji, author, tldr, graph_context, eli5, ui_files, is_delta=is_delta)
 
         try:
             self.client.post_pr_comment(installation_id, owner, repo, pr_number, body)
             logger.info("Posted TLDR for %s#%d", full_name, pr_number)
+            # Record the SHA we just commented on
+            if current_sha:
+                self._set_last_sha(owner, repo, pr_number, current_sha)
         except Exception as e:
             logger.error("Failed to post: %s", e)
 
@@ -280,7 +363,7 @@ class Companion:
         parts.append(f"+{total_add}/-{total_del}")
         return ". ".join(parts) + ".", ui_files
 
-    def _generate_tldr(self, title, author, files, graph_context):
+    def _generate_tldr(self, title, author, files, graph_context, is_delta=False):
         diff_analysis, ui_files = self._analyze_diffs(files)
         impact = f"Blast radius: {graph_context['nodes']} code paths. " if graph_context and graph_context.get("nodes", 0) > 0 else ""
 
@@ -289,12 +372,32 @@ class Companion:
         if ui_files:
             ui_list = ", ".join(f.get("filename", "").split("/")[-1] for f in ui_files[:5])
             proofshot_section = f"""
-
 ## 📸 ProofShot Required
 UI files changed: {ui_list}
 After applying fixes, run: proofshot start → verify UI → proofshot stop → proofshot pr <number>"""
 
-        prompt = f"""Write a 2-3 sentence TLDR for this PR. Be specific about what changed and what the author should double-check.
+        if is_delta:
+            prompt = f"""Write a 2-3 sentence TL;DR focusing on what CHANGED in this latest push to the PR.
+
+PR: {title}
+By: {author}
+
+## New changes in this push:
+{diff_analysis}
+
+## Impact:
+{impact or "No significant cross-file impact detected."}
+
+Instructions:
+- This is an UPDATE to an existing PR. Focus ONLY on the new changes in this push.
+- Sentence 1: What files/functions/patterns were added or modified in this push
+- Sentence 2: How these new changes affect the codebase
+- Sentence 3: What to double-check before merging
+- If UI files changed: ProofShot visual verification required{proofshot_section}
+
+TLDR:"""
+        else:
+            prompt = f"""Write a 2-3 sentence TLDR for this PR. Be specific about what changed and what the author should double-check.
 
 PR: {title}
 By: {author}
@@ -315,9 +418,10 @@ TLDR:"""
 
         return self._ollama_call(prompt)
 
-    def _generate_eli5(self, title, files):
+    def _generate_eli5(self, title, files, is_delta=False):
         file_list = ", ".join(f.get("filename", "?") for f in files[:5])
-        prompt = f"""Explain this PR like I'm 5. One analogy, 1-2 sentences.
+        context = "new changes in this push of " if is_delta else ""
+        prompt = f"""Explain {context}this PR like I'm 5. One analogy, 1-2 sentences.
 
 PR: {title}
 Files: {file_list}
@@ -352,13 +456,14 @@ ELI5:"""
         bad = ["private message", "cannot provide", "can't provide", "cannot summarize", "can't summarize", "i cannot", "i can't", "as an ai", "i'm sorry", "i am sorry", "unable to"]
         return not any(p in text.lower() for p in bad)
 
-    def _format_comment(self, emoji, author, tldr, graph_context, eli5=None, ui_files=None):
+    def _format_comment(self, emoji, author, tldr, graph_context, eli5=None, ui_files=None, is_delta=False):
         """
         Build the Markdown comment body using the Phase 4 TLDR spec.
         Includes optional ELI5 (Explain Like I'm 5) section.
         Includes ProofShot section if UI files changed.
         """
-        parts = [f"## {emoji} TL;DR\n\n@{author} — {tldr}"]
+        prefix = "🔄 " if is_delta else ""
+        parts = [f"## {prefix}{emoji} TL;DR\n\n@{author} — {tldr}"]
 
         if graph_context and graph_context.get("nodes", 0) > 0:
             raw = graph_context["raw"]
