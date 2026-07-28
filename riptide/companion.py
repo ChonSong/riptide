@@ -183,25 +183,6 @@ class Companion:
         emoji = classify_pr_mood(title, files)
         graph_context = self._get_graph_context(files) if self.enable_graphify else None
 
-        # ── Grafiphy: generate Excalidraw diagram ──
-        excalidraw_urls = []
-        grafiphy_enabled = os.environ.get("COMPANION_ENABLE_DIAGRAM", "0") == "1"
-        if grafiphy_enabled:
-            try:
-                from grafiphy.orchestrator import orchestrate
-                pr_metadata = {
-                    "owner": owner,
-                    "repo": repo,
-                    "number": pr_number,
-                    "title": title,
-                    "author": author,
-                    "installation_id": installation_id,
-                }
-                excalidraw_urls = orchestrate(pr_metadata, files, graph_context)
-                logger.info("Grafiphy: %d Excalidraw diagram generated for %s#%d", len(excalidraw_urls), full_name, pr_number)
-            except Exception as e:
-                logger.warning("Grafiphy failed for %s#%d: %s", full_name, pr_number, e)
-
         # Generate TLDR — if model fails, skip the PR (no fallback)
         tldr = self._generate_tldr(title, author, files, graph_context)
         if not tldr:
@@ -215,7 +196,7 @@ class Companion:
         # Generate ELI5 (optional — skip if model fails)
         eli5 = self._generate_eli5(title, files)
 
-        body = self._format_comment(emoji, author, tldr, graph_context, eli5, ui_files, excalidraw_urls)
+        body = self._format_comment(emoji, author, tldr, graph_context, eli5, ui_files)
 
         try:
             self.client.post_pr_comment(installation_id, owner, repo, pr_number, body)
@@ -371,12 +352,11 @@ ELI5:"""
         bad = ["private message", "cannot provide", "can't provide", "cannot summarize", "can't summarize", "i cannot", "i can't", "as an ai", "i'm sorry", "i am sorry", "unable to"]
         return not any(p in text.lower() for p in bad)
 
-    def _format_comment(self, emoji, author, tldr, graph_context, eli5=None, ui_files=None, excalidraw_urls=None):
+    def _format_comment(self, emoji, author, tldr, graph_context, eli5=None, ui_files=None):
         """
         Build the Markdown comment body using the Phase 4 TLDR spec.
         Includes optional ELI5 (Explain Like I'm 5) section.
         Includes ProofShot section if UI files changed.
-        Includes Excalidraw diagram link if generated.
         """
         parts = [f"## {emoji} TL;DR\n\n@{author} — {tldr}"]
 
@@ -395,10 +375,6 @@ ELI5:"""
         if ui_files:
             ui_names = ", ".join(f.get("filename", "").split("/")[-1] for f in ui_files[:5])
             parts.append(f"\n**📸 ProofShot Required**\nUI files changed: {ui_names}\nPlease run ProofShot visual verification before merging.")
-
-        # Grafiphy Excalidraw diagram
-        if excalidraw_urls:
-            parts.append("\n**📈 Visual Evidence**\n[Excalidraw diagram]({}) (open in [excalidraw.com](https://excalidraw.com))".format(excalidraw_urls[0]))
 
         # GIF reaction
         gif_url = GIFI_MAP.get(emoji, GIFI_MAP["✨"])

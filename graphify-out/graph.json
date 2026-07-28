@@ -268,10 +268,21 @@
       "norm_label": "_save_state()"
     },
     {
-      "label": "_is_cron_available()",
+      "label": "_was_reviewed_today()",
       "file_type": "code",
       "source_file": "riptide/deepthink.py",
       "source_location": "L66",
+      "_origin": "ast",
+      "id": "riptide_deepthink_was_reviewed_today",
+      "community": 4,
+      "community_name": "review_worker.py",
+      "norm_label": "_was_reviewed_today()"
+    },
+    {
+      "label": "_is_cron_available()",
+      "file_type": "code",
+      "source_file": "riptide/deepthink.py",
+      "source_location": "L81",
       "_origin": "ast",
       "id": "riptide_deepthink_is_cron_available",
       "community": 4,
@@ -282,7 +293,7 @@
       "label": "_spawn_deepthink()",
       "file_type": "code",
       "source_file": "riptide/deepthink.py",
-      "source_location": "L74",
+      "source_location": "L89",
       "_origin": "ast",
       "id": "riptide_deepthink_spawn_deepthink",
       "community": 4,
@@ -293,7 +304,7 @@
       "label": "run()",
       "file_type": "code",
       "source_file": "riptide/deepthink.py",
-      "source_location": "L211",
+      "source_location": "L233",
       "_origin": "ast",
       "id": "riptide_deepthink_run",
       "community": 4,
@@ -301,7 +312,7 @@
       "norm_label": "run()"
     },
     {
-      "label": "Load processed PR state: {owner/repo#number: head_sha}",
+      "label": "Load processed PR state: {owner/repo#number: {head_sha, reviewed_at}}",
       "file_type": "rationale",
       "source_file": "riptide/deepthink.py",
       "source_location": "L52",
@@ -309,15 +320,26 @@
       "id": "riptide_deepthink_rationale_52",
       "community": 4,
       "community_name": "review_worker.py",
-      "norm_label": "load processed pr state: {owner/repo#number: head_sha}"
+      "norm_label": "load processed pr state: {owner/repo#number: {head_sha, reviewed_at}}"
     },
     {
-      "label": "Check that `hermes cron create` works.",
+      "label": "Check if this PR was reviewed in the last 24 hours.",
       "file_type": "rationale",
       "source_file": "riptide/deepthink.py",
       "source_location": "L67",
       "_origin": "ast",
       "id": "riptide_deepthink_rationale_67",
+      "community": 4,
+      "community_name": "review_worker.py",
+      "norm_label": "check if this pr was reviewed in the last 24 hours."
+    },
+    {
+      "label": "Check that `hermes cron create` works.",
+      "file_type": "rationale",
+      "source_file": "riptide/deepthink.py",
+      "source_location": "L82",
+      "_origin": "ast",
+      "id": "riptide_deepthink_rationale_82",
       "community": 4,
       "community_name": "review_worker.py",
       "norm_label": "check that `hermes cron create` works."
@@ -326,9 +348,9 @@
       "label": "Spawn a Hermes cron session for deep-think review on this PR.",
       "file_type": "rationale",
       "source_file": "riptide/deepthink.py",
-      "source_location": "L83",
+      "source_location": "L98",
       "_origin": "ast",
-      "id": "riptide_deepthink_rationale_83",
+      "id": "riptide_deepthink_rationale_98",
       "community": 4,
       "community_name": "review_worker.py",
       "norm_label": "spawn a hermes cron session for deep-think review on this pr."
@@ -337,9 +359,9 @@
       "label": "Poll watched repos and spawn deep-think sessions on qualifying PRs.",
       "file_type": "rationale",
       "source_file": "riptide/deepthink.py",
-      "source_location": "L212",
+      "source_location": "L234",
       "_origin": "ast",
-      "id": "riptide_deepthink_rationale_212",
+      "id": "riptide_deepthink_rationale_234",
       "community": 4,
       "community_name": "review_worker.py",
       "norm_label": "poll watched repos and spawn deep-think sessions on qualifying prs."
@@ -2023,7 +2045,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "riptide/deepthink.py",
-      "source_location": "L66",
+      "source_location": "L81",
       "weight": 1.0,
       "_origin": "ast",
       "source": "riptide_deepthink",
@@ -2045,7 +2067,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "riptide/deepthink.py",
-      "source_location": "L211",
+      "source_location": "L233",
       "weight": 1.0,
       "_origin": "ast",
       "source": "riptide_deepthink",
@@ -2067,11 +2089,22 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "riptide/deepthink.py",
-      "source_location": "L74",
+      "source_location": "L89",
       "weight": 1.0,
       "_origin": "ast",
       "source": "riptide_deepthink",
       "target": "riptide_deepthink_spawn_deepthink",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "riptide/deepthink.py",
+      "source_location": "L66",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "riptide_deepthink",
+      "target": "riptide_deepthink_was_reviewed_today",
       "confidence_score": 1.0
     },
     {
@@ -2090,7 +2123,7 @@
       "context": "call",
       "confidence": "EXTRACTED",
       "source_file": "riptide/deepthink.py",
-      "source_location": "L217",
+      "source_location": "L239",
       "weight": 1.0,
       "_origin": "ast",
       "source": "riptide_deepthink_run",
@@ -2102,11 +2135,11 @@
       "context": "call",
       "confidence": "EXTRACTED",
       "source_file": "riptide/deepthink.py",
-      "source_location": "L296",
+      "source_location": "L69",
       "weight": 1.0,
       "_origin": "ast",
-      "source": "riptide_deepthink_run",
-      "target": "riptide_deepthink_save_state",
+      "source": "riptide_deepthink_was_reviewed_today",
+      "target": "riptide_deepthink_load_state",
       "confidence_score": 1.0
     },
     {
@@ -2114,11 +2147,11 @@
       "context": "call",
       "confidence": "EXTRACTED",
       "source_file": "riptide/deepthink.py",
-      "source_location": "L68",
+      "source_location": "L323",
       "weight": 1.0,
       "_origin": "ast",
-      "source": "riptide_deepthink_is_cron_available",
-      "target": "riptide_deepthink_run",
+      "source": "riptide_deepthink_run",
+      "target": "riptide_deepthink_save_state",
       "confidence_score": 1.0
     },
     {
@@ -2129,6 +2162,41 @@
       "weight": 1.0,
       "_origin": "ast",
       "source": "riptide_deepthink_rationale_67",
+      "target": "riptide_deepthink_was_reviewed_today",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "riptide/deepthink.py",
+      "source_location": "L309",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "riptide_deepthink_run",
+      "target": "riptide_deepthink_was_reviewed_today",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "context": "call",
+      "confidence": "EXTRACTED",
+      "source_file": "riptide/deepthink.py",
+      "source_location": "L83",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "riptide_deepthink_is_cron_available",
+      "target": "riptide_deepthink_run",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "rationale_for",
+      "confidence": "EXTRACTED",
+      "source_file": "riptide/deepthink.py",
+      "source_location": "L82",
+      "weight": 1.0,
+      "_origin": "ast",
+      "source": "riptide_deepthink_rationale_82",
       "target": "riptide_deepthink_is_cron_available",
       "confidence_score": 1.0
     },
@@ -2136,10 +2204,10 @@
       "relation": "rationale_for",
       "confidence": "EXTRACTED",
       "source_file": "riptide/deepthink.py",
-      "source_location": "L83",
+      "source_location": "L98",
       "weight": 1.0,
       "_origin": "ast",
-      "source": "riptide_deepthink_rationale_83",
+      "source": "riptide_deepthink_rationale_98",
       "target": "riptide_deepthink_spawn_deepthink",
       "confidence_score": 1.0
     },
@@ -2148,7 +2216,7 @@
       "context": "call",
       "confidence": "EXTRACTED",
       "source_file": "riptide/deepthink.py",
-      "source_location": "L292",
+      "source_location": "L319",
       "weight": 1.0,
       "_origin": "ast",
       "source": "riptide_deepthink_run",
@@ -2159,10 +2227,10 @@
       "relation": "rationale_for",
       "confidence": "EXTRACTED",
       "source_file": "riptide/deepthink.py",
-      "source_location": "L212",
+      "source_location": "L234",
       "weight": 1.0,
       "_origin": "ast",
-      "source": "riptide_deepthink_rationale_212",
+      "source": "riptide_deepthink_rationale_234",
       "target": "riptide_deepthink_run",
       "confidence_score": 1.0
     },
@@ -3792,5 +3860,5 @@
     }
   ],
   "hyperedges": [],
-  "built_at_commit": "b1f0e0c68b0ad03032e005247eabfc61e6bdec3b"
+  "built_at_commit": "0e457a04b892a26c65dd9d95324dd6711ae67330"
 }

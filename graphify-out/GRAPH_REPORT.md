@@ -1,16 +1,16 @@
 # Graph Report - riptide  (2026-07-28)
 
 ## Corpus Check
-- 13 files · ~8,732 words
+- 13 files · ~8,848 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 147 nodes · 191 edges · 13 communities (12 shown, 1 thin omitted)
+- 149 nodes · 195 edges · 13 communities (12 shown, 1 thin omitted)
 - Extraction: 99% EXTRACTED · 1% INFERRED · 0% AMBIGUOUS · INFERRED: 1 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `b1f0e0c6`
+- Built from commit: `0e457a04`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -33,9 +33,9 @@
 3. `Riptide — Self-Hosted GitHub App (Two Bots)` - 12 edges
 4. `github_webhook()` - 8 edges
 5. `Grafiphy — ELI5 Pseudocode Diagram Generation` - 8 edges
-6. `orchestrate()` - 7 edges
-7. `Riptide — Two-Bot GitHub App` - 7 edges
-8. `run()` - 6 edges
+6. `run()` - 7 edges
+7. `orchestrate()` - 7 edges
+8. `Riptide — Two-Bot GitHub App` - 7 edges
 9. `get_graphify_graph()` - 6 edges
 10. `handle_issue_comment()` - 6 edges
 
@@ -69,8 +69,8 @@ Cohesion: 0.08
 Nodes (23): API Reference, Architecture, Bot 1: Companion (Webhook-Triggered), Bot 2: Riptide Review (Cron-Triggered), Companion Configuration, Comparison with Alternatives, Configure, Development (+15 more)
 
 ### Community 4 - "review_worker.py"
-Cohesion: 0.29
-Nodes (9): _is_cron_available(), _load_state(), Poll watched repos and spawn deep-think sessions on qualifying PRs., Load processed PR state: {owner/repo#number: head_sha}, Check that `hermes cron create` works., Spawn a Hermes cron session for deep-think review on this PR., run(), _save_state() (+1 more)
+Cohesion: 0.26
+Nodes (11): _is_cron_available(), _load_state(), Poll watched repos and spawn deep-think sessions on qualifying PRs., Load processed PR state: {owner/repo#number: {head_sha, reviewed_at}}, Check if this PR was reviewed in the last 24 hours., Check that `hermes cron create` works., Spawn a Hermes cron session for deep-think review on this PR., run() (+3 more)
 
 ### Community 5 - "embed_texts"
 Cohesion: 0.16
@@ -101,11 +101,11 @@ Nodes (6): _generate_edge_label(), generate_labels(), _generate_node_label(), Ge
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `Companion` connect `embed_texts` to `github_webhook`?**
-  _High betweenness centrality (0.178) - this node is a cross-community bridge._
+  _High betweenness centrality (0.173) - this node is a cross-community bridge._
 - **Why does `GitHubAppClient` connect `GitHubAppClient` to `github_webhook`, `review.py`?**
-  _High betweenness centrality (0.112) - this node is a cross-community bridge._
+  _High betweenness centrality (0.109) - this node is a cross-community bridge._
 - **Why does `orchestrate()` connect `store.py` to `embed_texts`?**
-  _High betweenness centrality (0.101) - this node is a cross-community bridge._
+  _High betweenness centrality (0.098) - this node is a cross-community bridge._
 - **What connects `start.sh script`, `Architecture`, `Skip/Resume Per PR` to the rest of the system?**
   _34 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `github_app.py` be split into smaller, more focused modules?**
