@@ -122,7 +122,7 @@ def _spawn_deepthink(
         f"  -f body='**🔴 Critical:** explanation here\\n\\n```suggestion\\nproposed code here\\n```' \\\\\n"
         f"  -f commit_id='{head_sha}' \\\\\n"
         f"  -f path='<file_path>' \\\\\n"
-        f"  -f line=<line_number> \\\\\n"
+        f"  -F line=<line_number> \\\\\n"
         f"  -f side='RIGHT'\n"
         f"```\n\n"
         f"**How to calculate line numbers:**\n"
@@ -165,7 +165,12 @@ def _spawn_deepthink(
         f"            appState=dict(viewBackgroundColor='#ffffff'))\n"
         f"Path('/tmp/review.excalidraw').write_text(json.dumps(data, indent=2))\n"
         f"```\n\n"
-        f"Upload the diagram to GitHub Gist or release assets, then include the link in your summary.\n\n"
+        f"Upload the diagram to excalidraw.com using this command:\n"
+        f"```\n"
+        f"python3 ~/workspace/riptide/scripts/upload_excalidraw.py /tmp/review.excalidraw\n"
+        f"```\n"
+        f"This returns a link like `https://excalidraw.com/#json=...` that opens directly in the browser.\n"
+        f"Include this link in your summary — NOT a Gist link.\n\n"
         f"### Step 5: Post Summary Review\n"
         f"After posting all inline comments and generating the Excalidraw, post a **summary review**:\n"
         f"`gh pr comment {pr_number} --repo {owner}/{repo} --body '<review>'`\n\n"
@@ -181,17 +186,17 @@ def _spawn_deepthink(
 
     cmd = [
         "hermes", "cron", "create", run_at,
+        prompt,
         "--name", name,
         "--skill", "github-pr-lifecycle",
         "--skill", "deep-think",
-        "--model", "custom:LongCat-2.0",
         "--deliver", "origin",
     ]
 
-    log.info(f"Spawning: {' '.join(cmd)}")
+    log.info(f"Spawning: hermes cron create {run_at} --name {name} ...")
     try:
         result = subprocess.run(
-            cmd, input=prompt, capture_output=True, text=True, timeout=15
+            cmd, capture_output=True, text=True, timeout=15
         )
         if result.returncode == 0:
             log.info(f"✓ Spawned deep-think for {owner}/{repo}#{pr_number}: {result.stdout[:200]}")
