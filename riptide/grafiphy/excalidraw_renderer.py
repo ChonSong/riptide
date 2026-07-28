@@ -148,47 +148,103 @@ def make_arrow(eid: str, x: int, y: int, w: int, h: int,
     return els
 
 
-def make_connector(eid: str, src_id: str, tgt_id: str,
-                   src_cx: int, src_cy: int,
-                   tgt_cx: int, tgt_cy: int,
-                   color: str = "#757575", dashed: bool = False,
-                   label: str = None) -> list[dict]:
+def make_routed_arrow(eid: str,
+                     src_rect: dict, tgt_rect: dict,
+                     src_side: str = "bottom", tgt_side: str = "top",
+                     color: str = "#757575",
+                     dashed: bool = False,
+                     label: str = None,
+                     gap: int = 15) -> list[dict]:
     """
-    Draw an arrow with binding from src element to tgt element.
-    src_cx, src_cy, tgt_cx, tgt_cy are absolute canvas coordinates.
-    Returns a list of dicts (arrow + optional label).
+    Draw an arrow with rounded corners routing between two element rects.
+
+    Computes a multi-point path (3 or 4 segments) that routes around elements
+    rather than cutting through them. Excalidraw renders multi-point arrows
+    with automatically rounded corners.
+
+    Args:
+        eid: unique arrow id
+        src_rect: {x, y, w, h} of source element
+        tgt_rect: {x, y, w, h} of target element
+        src_side: "bottom" | "right" | "left" | "top"
+        tgt_side: "top" | "left" | "right" | "bottom"
+        color: stroke color
+        dashed: if True, use dashed stroke
+        label: optional text label at midpoint
+        gap: px gap from element edges
+
+    Returns:
+        list of dicts (arrow elements + optional label text)
     """
-    # Compute bounding box
-    min_x = min(src_cx, tgt_cx)
-    min_y = min(src_cy, tgt_cy)
-    max_x = max(src_cx, tgt_cx)
-    max_y = max(src_cy, tgt_cy)
+    sx, sy, sw, sh = src_rect["x"], src_rect["y"], src_rect["w"], src_rect["h"]
+    tx, ty, tw, th = tgt_rect["x"], tgt_rect["y"], tgt_rect["w"], tgt_rect["h"]
+
+    # Compute source exit point
+    if src_side == "bottom":
+        p1x = sx + sw // 2
+        p1y = sy + sh + gap
+    elif src_side == "right":
+        p1x = sx + sw + gap
+        p1y = sy + sh // 2
+    elif src_side == "left":
+        p1x = sx - gap
+        p1y = sy + sh // 2
+    else:  # top
+        p1x = sx + sw // 2
+        p1y = sy - gap
+
+    # Compute target entry point
+    if tgt_side == "top":
+        p3x = tx + tw // 2
+        p3y = ty - gap
+    elif tgt_side == "bottom":
+        p3x = tx + tw // 2
+        p3y = ty + th + gap
+    elif tgt_side == "left":
+        p3x = tx - gap
+        p3y = ty + th // 2
+    else:  # right
+        p3x = tx + tw + gap
+        p3y = ty + th // 2
+
+    # Compute corner point(s) for routing
+    # Simple 3-point: right-angle L-shape
+    dx = p3x - p1x
+    dy = p3y - p1y
+
+    if abs(dx) > abs(dy):
+        # Horizontal dominant: go horizontal first, then vertical
+        corner_x = p3x
+        corner_y = p1y
+    else:
+        # Vertical dominant: go vertical first, then horizontal
+        corner_x = p1x
+        corner_y = p3y
+
+    points = [[p1x, p1y], [corner_x, corner_y], [p3x, p3y]]
+
+    min_x = min(p[0] for p in points)
+    min_y = min(p[1] for p in points)
+    max_x = max(p[0] for p in points)
+    max_y = max(p[1] for p in points)
+
+    # Normalize points to be relative to (min_x, min_y)
+    rel_points = [[p[0] - min_x, p[1] - min_y] for p in points]
+
     w = max(max_x - min_x, 1)
     h = max(max_y - min_y, 1)
-
-    # Points relative to bounding box
-    dx1 = src_cx - min_x
-    dy1 = src_cy - min_y
-    dx2 = tgt_cx - min_x
-    dy2 = tgt_cy - min_y
 
     els = [{
         "type": "arrow", "id": eid,
         "x": min_x, "y": min_y, "width": w, "height": h,
-        "points": [[dx1, dy1], [dx2, dy2]],
+        "points": rel_points,
         "endArrowhead": "arrow",
         "strokeColor": color, "strokeWidth": 2,
         "startBinding": {
-            "elementId": src_id,
-            "focus": 0,
-            "gap": 5,
-            "fixedPoint": [0.5, 1.0],
+            "elementId": None, "focus": 0, "gap": gap,
         },
         "endBinding": {
-            "elementId": tgt_id,
-            "focus": 0,
-            "gap": 5,
-            "fixedPoint": [0.5, 0.0],
+            "elementId": None, "focus": 0, "gap": gap,
         },
     }]
     if dashed:
@@ -196,12 +252,12 @@ def make_connector(eid: str, src_id: str, tgt_id: str,
 
     if label:
         tid = f"tl_{eid}"
-        mid_x = min_x + w // 2
-        mid_y = min_y + h // 2
+        mid_x = (p1x + p3x) // 2
+        mid_y = (p1y + p3y) // 2
         els[0]["boundElements"] = [{"id": tid, "type": "text"}]
         els.append({
             "type": "text", "id": tid,
-            "x": mid_x, "y": mid_y - 12,
+            "x": mid_x - 30, "y": mid_y - 10,
             "width": max(len(label) * 6, 60), "height": 14,
             "text": label, "fontSize": 9, "fontFamily": 1,
             "strokeColor": color, "textAlign": "center",
@@ -880,144 +936,83 @@ def render_review(
     # We add connectors AFTER all regular elements so we know final positions.
     conn_elements = []
 
-    # Arrow: landscape -> PR scope (down arrow)
-    landscape_zone = _find_elem(elements, "zone_landscape")
-    scope_zone = _find_elem(elements, "zone_scope")
-    if landscape_zone and scope_zone:
-        cx = landscape_zone["x"] + landscape_zone["width"] // 2
-        sy = landscape_zone["y"] + landscape_zone["height"]
-        ey = scope_zone["y"]
-        conn_elements.extend(make_connector(
-            "conn_land_scope", "zone_landscape", "zone_scope",
-            cx, sy, cx, ey,
-            color=CYAN,
-        ))
+    # --- Vertical section-to-section arrows (routed down) ---
+    section_flow = [
+        ("zone_tree",  "zone_scope", "conn_tree_scope",  CYAN),
+        ("zone_scope", "zone_graph", "conn_scope_graph", PURPLE),
+        ("zone_graph", "zone_code",  "conn_graph_code",  AMBER),
+        ("zone_code",  "zone_narr",  "conn_code_narr",   GREEN),
+        ("zone_narr",  "zone_find",  "conn_narr_find",   RED),
+        ("zone_find",  "zone_sug",   "conn_find_sug",    BLUE),
+    ]
+    for src_zone_id, tgt_zone_id, conn_id, conn_color in section_flow:
+        src_el = _find_elem(elements, src_zone_id)
+        tgt_el = _find_elem(elements, tgt_zone_id)
+        if src_el and tgt_el:
+            conn_elements.extend(make_routed_arrow(
+                conn_id,
+                src_rect={"x": src_el["x"], "y": src_el["y"],
+                          "w": src_el["width"], "h": src_el["height"]},
+                tgt_rect={"x": tgt_el["x"], "y": tgt_el["y"],
+                          "w": tgt_el["width"], "h": tgt_el["height"]},
+                src_side="bottom", tgt_side="top",
+                color=conn_color, gap=8,
+            ))
 
-    # Arrow: PR scope -> Graphify
-    scope_zone = _find_elem(elements, "zone_scope")
-    graph_zone = _find_elem(elements, "zone_graph")
-    if scope_zone and graph_zone:
-        cx = scope_zone["x"] + scope_zone["width"] // 2
-        sy = scope_zone["y"] + scope_zone["height"]
-        ey = graph_zone["y"]
-        conn_elements.extend(make_connector(
-            "conn_scope_graph", "zone_scope", "zone_graph",
-            cx, sy, cx, ey,
-            color=PURPLE,
-        ))
-
-    # Arrow: Graphify -> Code Chunks
-    graph_zone = _find_elem(elements, "zone_graph")
-    code_zone = _find_elem(elements, "zone_code")
-    if graph_zone and code_zone:
-        cx = graph_zone["x"] + graph_zone["width"] // 2
-        sy = graph_zone["y"] + graph_zone["height"]
-        ey = code_zone["y"]
-        conn_elements.extend(make_connector(
-            "conn_graph_code", "zone_graph", "zone_code",
-            cx, sy, cx, ey,
-            color=AMBER,
-        ))
-
-    # Arrow: Code Chunks -> Narrative
-    code_zone = _find_elem(elements, "zone_code")
-    narr_zone = _find_elem(elements, "zone_narr")
-    if code_zone and narr_zone:
-        cx = code_zone["x"] + code_zone["width"] // 2
-        sy = code_zone["y"] + code_zone["height"]
-        ey = narr_zone["y"]
-        conn_elements.extend(make_connector(
-            "conn_code_narr", "zone_code", "zone_narr",
-            cx, sy, cx, ey,
-            color=GREEN,
-        ))
-
-    # Arrow: Narrative -> Findings
-    narr_zone = _find_elem(elements, "zone_narr")
-    find_zone = _find_elem(elements, "zone_find")
-    if narr_zone and find_zone:
-        cx = narr_zone["x"] + narr_zone["width"] // 2
-        sy = narr_zone["y"] + narr_zone["height"]
-        ey = find_zone["y"]
-        conn_elements.extend(make_connector(
-            "conn_narr_find", "zone_narr", "zone_find",
-            cx, sy, cx, ey,
-            color=RED,
-        ))
-
-    # Arrow: Findings -> Suggested Changes
-    find_zone = _find_elem(elements, "zone_find")
-    sug_zone = _find_elem(elements, "zone_sug")
-    if find_zone and sug_zone:
-        cx = find_zone["x"] + find_zone["width"] // 2
-        sy = find_zone["y"] + find_zone["height"]
-        ey = sug_zone["y"]
-        conn_elements.extend(make_connector(
-            "conn_find_sug", "zone_find", "zone_sug",
-            cx, sy, cx, ey,
-            color=BLUE,
-        ))
-
-    # Arrow: PR-changed files in landscape <-> God nodes
-    # (if we have god nodes and a landscape, link them)
-    if repo_graph and god_nodes:
-        # Find last PR-changed landscape module
-        pr_module_ids = []
-        for gi, rg in enumerate(repo_graph[:30]):
-            if is_pr_file(rg.get("file", "")):
-                pr_module_ids.append(f"lm{gi}")
-        if pr_module_ids and god_nodes:
-            # Link first god node to last PR module
-            src_id = pr_module_ids[-1]
-            god_id = "god0"
-            src_el = _find_elem(elements, src_id)
-            god_el = _find_elem(elements, god_id)
+    # Arrow: PR-changed tree nodes -> God nodes
+    if repo_tree and god_nodes:
+        pr_tree_ids = [f"r_tree{ti}" for ti, pl in enumerate(parsed_lines)
+                       if is_pr_file(pl["name"]) and not pl["is_dir"]]
+        if pr_tree_ids and god_nodes:
+            tgt_id = "god0"
+            src_el = _find_elem(elements, pr_tree_ids[0])
+            god_el = _find_elem(elements, tgt_id)
             if src_el and god_el:
-                sx = src_el["x"] + src_el["width"]
-                sy = src_el["y"] + src_el["height"] // 2
-                gx = god_el["x"]
-                gy = god_el["y"] + god_el["height"] // 2
-                conn_elements.extend(make_connector(
-                    "conn_land_god", src_id, god_id,
-                    sx, sy, gx, gy,
+                conn_elements.extend(make_routed_arrow(
+                    "conn_tree_god",
+                    src_rect={"x": src_el["x"], "y": src_el["y"],
+                              "w": src_el["width"], "h": src_el["height"]},
+                    tgt_rect={"x": god_el["x"], "y": god_el["y"],
+                              "w": god_el["width"], "h": god_el["height"]},
+                    src_side="right", tgt_side="left",
                     color=PURPLE, dashed=True,
-                    label="connected via graphify",
+                    label="graphify links",
                 ))
 
     # Arrow: Findings -> Code Chunks
     if findings and code_chunks:
-        for fi, finding in enumerate(findings[:3]):  # Max 3 to keep diagram clean
+        for fi, finding in enumerate(findings[:3]):
             fid = f"find{fi}"
-            code_id = f"code{fi}" if fi < len(code_chunks) else f"code{len(code_chunks) - 1}"
+            cid = f"code{fi}" if fi < len(code_chunks) else f"code{len(code_chunks) - 1}"
             f_el = _find_elem(elements, fid)
-            c_el = _find_elem(elements, code_id)
+            c_el = _find_elem(elements, cid)
             if f_el and c_el:
-                fx = f_el["x"]
-                fy = f_el["y"] + f_el["height"] // 2
-                cx_2 = c_el["x"] + c_el["width"]
-                cy_2 = c_el["y"] + c_el["height"] // 2
-                conn_elements.extend(make_connector(
-                    f"conn_find_code{fi}", fid, code_id,
-                    fx, fy, cx_2, cy_2,
+                conn_elements.extend(make_routed_arrow(
+                    f"conn_find_code{fi}",
+                    src_rect={"x": f_el["x"], "y": f_el["y"],
+                              "w": f_el["width"], "h": f_el["height"]},
+                    tgt_rect={"x": c_el["x"], "y": c_el["y"],
+                              "w": c_el["width"], "h": c_el["height"]},
+                    src_side="left", tgt_side="right",
                     color=AMBER, dashed=True,
-                    label="originates from",
+                    label="begins at",
                 ))
 
     # Arrow: Suggestions -> Findings
     if suggestions and findings:
-        for si, sug in enumerate(suggestions[:3]):  # Max 3
+        for si, sug in enumerate(suggestions[:3]):
             sid = f"sug{si}"
             fid = f"find{si}" if si < len(findings) else f"find{len(findings) - 1}"
             s_el = _find_elem(elements, sid)
             f_el = _find_elem(elements, fid)
             if s_el and f_el:
-                sx2 = s_el["x"]
-                sy2 = s_el["y"] + s_el["height"] // 2
-                fx2 = f_el["x"] + f_el["width"]
-                fy2 = f_el["y"] + f_el["height"] // 2
-                conn_elements.extend(make_connector(
-                    f"conn_sug_find{si}", sid, fid,
-                    sx2, sy2, fx2, fy2,
+                conn_elements.extend(make_routed_arrow(
+                    f"conn_sug_find{si}",
+                    src_rect={"x": s_el["x"], "y": s_el["y"],
+                              "w": s_el["width"], "h": s_el["height"]},
+                    tgt_rect={"x": f_el["x"], "y": f_el["y"],
+                              "w": f_el["width"], "h": f_el["height"]},
+                    src_side="left", tgt_side="right",
                     color=GREEN, dashed=True,
                     label="addresses",
                 ))
