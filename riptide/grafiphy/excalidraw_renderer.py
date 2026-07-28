@@ -37,6 +37,7 @@ PURPLE = "#8b5cf6"
 PINK = "#ec4899"
 CYAN = "#06b6d4"
 LIME = "#84cc16"
+GOLD = "#fbbf24"
 
 # Dark text variants (for readability on light fills)
 DARK_RED = "#b91c1c"
@@ -74,6 +75,16 @@ SEVERITY_ICON = {
     "approved":   "OK",
     "info":       "i",
 }
+
+# ── Distance Map Ring Colors ────────────────────────────────────
+# (fill, stroke, text_color, label)
+RING_COLORS = {
+    0: (HIGHLIGHT_FILL, RED, DARK_RED, "PR CHANGED FILE"),
+    1: (LIGHT_ORANGE,  AMBER, DARK_AMBER, "Direct blast radius"),
+    2: (LIGHT_YELLOW,  GOLD,  DARK_AMBER, "Same community"),
+    3: (LIGHT_GREEN,   GREEN, DARK_GREEN, "Adjacent community"),
+}
+DEFAULT_RING = (LIGHT_BLUE, BLUE, DARK_BLUE, "Distant / Unrelated")
 
 # Canvas constants
 CANVAS_W = 900
@@ -323,6 +334,7 @@ def render_review(
     repo_tree: str = None,
     suggestions: list[dict] = None,
     human_narrative: str = None,
+    distance_map: dict = None,
     output_path: str = "/tmp/review.excalidraw",
 ) -> str:
     """
@@ -359,6 +371,7 @@ def render_review(
     frontend_components = frontend_components or []
     repo_graph = repo_graph or []
     suggestions = suggestions or []
+    distance_map = distance_map or {}
 
     god_nodes = graph_data.get("god_nodes", [])
     communities = graph_data.get("communities", [])
@@ -423,7 +436,97 @@ def render_review(
     y_cursor += 10
 
     # ================================================================
-    # SECTION 2: Codebase Directory Tree
+    # SECTION 2: Distance-Radius Network Map
+    # ================================================================
+    distance_top = y_cursor
+
+    if distance_map:
+        # Group nodes by hop distance
+        rings = {}
+        for name, info in distance_map.items():
+            h = info.get("hops", 4)
+            if h not in rings:
+                rings[h] = []
+            rings[h].append((name, info))
+
+        n_items = len(distance_map)
+        n_groups = len(rings)
+        dist_h = max(80, n_items * 34 + n_groups * 30 + 50)
+
+        elements.append(make_zone(
+            "zone_dist", MARGIN, y_cursor, CONTENT_W, dist_h,
+            ZONE_PURPLE, PURPLE, opacity=10,
+        ))
+        y_cursor += 10
+        st = _section_title(
+            "sec_dist",
+            "DISTANCE-RADIUS NETWORK MAP  "
+            "(nodes arranged by network distance from PR changed files)",
+            MARGIN + 8, y_cursor,
+        )
+        elements.append(st)
+        y_cursor += 28
+
+        for hop in sorted(rings.keys()):
+            items = rings[hop]
+            fill, stroke, text_c, ring_label = RING_COLORS.get(
+                hop, DEFAULT_RING
+            )
+
+            # Ring header
+            if hop == 0:
+                header_label = f"[CENTER] {ring_label}"
+            else:
+                header_label = f"[Ring {hop}] {ring_label}"
+            elements.append(make_text(
+                f"rh_{hop}", MARGIN + 10, y_cursor, 400, 16,
+                header_label, font_size=10, color=DARK_PURPLE,
+            ))
+            y_cursor += 18
+
+            # Each node in this ring
+            for idx, (name, info) in enumerate(items):
+                community = info.get("community", "")
+                relation = info.get("relation", "")
+                degree = info.get("degree", 0)
+
+                # Build label
+                label = f"{name}"
+                if relation and relation != "epicenter":
+                    label += f"  <- {relation}"
+                if community:
+                    label += f"  [community: {community}]"
+
+                nid = f"dist_{hop}_{idx}"
+                ntid = f"tdist_{hop}_{idx}"
+                el_h = 26
+
+                elements.append(make_rect(
+                    nid, MARGIN + 15, y_cursor, CONTENT_W - 30, el_h,
+                    fill, stroke,
+                ))
+                elements.append(make_text(
+                    ntid, MARGIN + 20, y_cursor + 3, CONTENT_W - 40, el_h - 6,
+                    label, font_size=9,
+                    align="left", valign="middle", container_id=nid,
+                    color=text_c,
+                ))
+                y_cursor += el_h + 4
+
+            y_cursor += 8
+
+        actual_dist_h = y_cursor - distance_top + 5
+        for el in elements:
+            if el.get("id") == "zone_dist":
+                el["height"] = actual_dist_h
+                break
+        y_cursor = distance_top + actual_dist_h + 5
+    else:
+        # No distance_map — skip this section
+        y_cursor = distance_top
+
+    # ================================================================
+    # SECTION 3: Codebase Directory Tree
     # ================================================================
     landscape_top = y_cursor
     zone_id = "zone_tree"
@@ -938,6 +1041,7 @@ def render_review(
 
     # --- Vertical section-to-section arrows (routed down) ---
     section_flow = [
+        ("zone_dist",  "zone_tree", "conn_dist_tree",  PURPLE),
         ("zone_tree",  "zone_scope", "conn_tree_scope",  CYAN),
         ("zone_scope", "zone_graph", "conn_scope_graph", PURPLE),
         ("zone_graph", "zone_code",  "conn_graph_code",  AMBER),
