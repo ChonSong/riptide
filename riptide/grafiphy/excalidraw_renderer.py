@@ -674,9 +674,13 @@ def render_review(
 
     # Arrow from scope to graphify analysis
     # ================================================================
-    # SECTION 4: Graphify Analysis (god nodes + communities)
-    # ================================================================
-    graph_top = y_cursor
+    if not distance_map:
+        # SECTION 4: Graphify Analysis (god nodes + communities) — fallback
+        # when distance_map is not provided.
+        # ================================================================
+        graph_top = y_cursor
+    else:
+        graph_top = None
 
     # Estimate height
     gn_cnt = min(len(god_nodes), 6)
@@ -759,12 +763,13 @@ def render_review(
             ))
             y_cursor += h + 4
 
-    actual_graph_h = y_cursor - graph_top + 5
-    # Update zone height
-    for el in elements:
-        if el.get("id") == "zone_graph":
-            el["height"] = actual_graph_h
-            break
+    if graph_top is not None:
+        actual_graph_h = y_cursor - graph_top + 5
+        # Update zone height
+        for el in elements:
+            if el.get("id") == "zone_graph":
+                el["height"] = actual_graph_h
+                break
 
     # ================================================================
     # SECTION 5: Code Chunks with WHY
