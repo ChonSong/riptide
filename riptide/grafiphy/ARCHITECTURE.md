@@ -1,174 +1,74 @@
-# Grafiphy — Visual Evidence Engine for PR Companions
+# Grafiphy — ELI5 Pseudocode Diagram Generation
 
-## Architecture Overview
+Visual evidence engine for PR reviews. Generates Excalidraw diagrams with simplified pseudocode labels using real graphify data.
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         GRAFIPHY ORCHESTRATOR                               │
-│                                                                             │
-│  Input: PR metadata + diff + graphify context                               │
-│  Output: PNG diagrams embedded in TL;DR comments                            │
-│                                                                             │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐       │
-│  │   Sankey    │  │  Mermaid    │  │ Architecture│  │ Graphify    │       │
-│  │  Renderer   │  │  Renderer   │  │  Renderer   │  │ Tree        │       │
-│  │  (matplotlib│  │  (D3.js)    │  │  (SVG→PNG)  │  │ (screenshot)│       │
-│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘       │
-│         │                │                │                │               │
-│         └────────────────┴────────────────┴────────────────┘               │
-│                                   │                                         │
-│                           ┌───────▼───────┐                                 │
-│                           │  PNG Upload   │                                 │
-│                           │  (GitHub      │                                 │
-│                           │   release)    │                                 │
-│                           └───────┬───────┘                                 │
-│                                   │                                         │
-│                           ┌───────▼───────┐                                 │
-│                           │  Embed in     │                                 │
-│                           │  TL;DR        │                                 │
-│                           └───────────────┘                                 │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-## Component Map
-
-| Component | File | Input | Output |
-|-----------|------|-------|--------|
-| **Proofshot CLI** | `proofshot/cli.py` | URL, selectors, seed data | WebM, PNG, GIF |
-| **Grafiphy Orchestrator** | `grafiphy/orchestrator.py` | PR metadata + diff | List of PNG URLs |
-| **Sankey Renderer** | `grafiphy/renderers/sankey.py` | Flow data (JSON) | PNG |
-| **Mermaid Renderer** | `grafiphy/renderers/mermaid.py` | Mermaid spec (mmd) | PNG |
-| **Architecture Renderer** | `grafiphy/renderers/architecture.py` | System topology (JSON) | PNG |
-| **Graphify Tree Renderer** | `grafiphy/renderers/graphify_tree.py` | graphify-out/ path | PNG |
-| **Companion Bridge** | `riptide/companion.py` (modified) | PR event | TL;DR + PNGs |
-
-## Data Flow
+## Architecture
 
 ```
-PR Event (webhook)
-  │
-  ├─→ companion.py:_execute()
-  │     │
-  │     ├─→ graphify affected → blast radius text (existing)
-  │     │
-  │     ├─→ grafiphy.orchestrate(pr_metadata, diff)
-  │     │     │
-  │     │     ├─→ sankey.render(flow_data) → blast-radius.png
-  │     │     ├─→ mermaid.render(call_sequence) → call-flow.png
-  │     │     ├─→ architecture.render(topology) → system-map.png
-  │     │     └─→ graphify_tree.render(graphify-out/) → dependency-tree.png
-  │     │           │
-  │     │           └─→ upload_pngs_to_release() → [urls]
-  │     │
-  │     ├─→ proofshot.capture(ui_files) → proofshot.gif
-  │     │     └─→ upload to release → url
-  │     │
-  │     └─→ format_comment(tldr, png_urls, proofshot_url) → post
-  │
-  └─→ GitHub comment with embedded PNGs
+PR Event → webhook.py → companion.py → grafiphy.orchestrate() → Excalidraw JSON → GitHub Release
 ```
 
-## Renderer Specifications
+## Files
 
-### 1. Sankey Renderer (matplotlib)
-- **Use for**: Blast radius flow, pipeline stages, data flow
-- **Input**: `{nodes: [{name, color}], links: [{source, target, value}]}`
-- **Output**: 1600x900 PNG, dark theme (#020617 bg)
-- **Library**: matplotlib 3.11+ (already installed)
+| File | Purpose |
+|------|---------|
+| `orchestrator.py` | Main entry: queries graphify, generates labels, creates Excalidraw, uploads |
+| `labeler.py` | Template-based ELI5 label generation (no LLM, strict format rules) |
+| `companion.py` | Integration point — calls grafiphy when `COMPANION_ENABLE_DIAGRAM=1` |
 
-### 2. Mermaid Renderer (D3.js + Playwright)
-- **Use for**: Sequence diagrams, call flows, state machines
-- **Input**: Mermaid syntax string
-- **Output**: 1200x800 PNG, transparent bg
-- **Library**: Playwright headless → render mermaid.live or local mermaid.js
+## Label Format (Strict)
 
-### 3. Architecture Renderer (SVG → PNG)
-- **Use for**: System topology, component maps, deployment diagrams
-- **Input**: `{components: [{name, type, x, y}], connections: [{from, to, label}]}`
-- **Output**: 1920x1080 PNG, dark theme
-- **Library**: SVG write → Playwright screenshot
+1. **Every label MUST include exact code names in backticks**: `` `loadCfg()` ``
+2. **"(not Z)" ONLY for real decisions visible in code**
+3. **Edges**: `"sends X to Y"` (payload + target)
+4. **Length**: 5-8 words per label
+5. **Format**: `"Does X via \`functionName()\`"`
 
-### 4. Graphify Tree Renderer (Playwright screenshot)
-- **Use for**: Dependency trees, community maps, god-node visualization
-- **Input**: Path to graphify-out/ directory
-- **Output**: Full-page PNG of interactive tree
-- **Library**: Playwright screenshot of graphify tree HTML
+## Excalidraw JSON Structure
 
-## Proofshot CLI Commands
-
-```bash
-# Start a proofshot session
-proofshot start --url http://localhost:8788 --seed seed.js --output ./proofshot-out/
-
-# Capture a specific state
-proofshot capture --selector "#app" --output step.png
-
-# Stop session and generate GIF
-proofshot stop --output final.gif
-
-# Full PR workflow: start → capture → stop → upload → comment
-proofshot pr 73 --url http://localhost:8788 --seed seed.js --comment "UI verification"
+```json
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "hermes-agent",
+  "elements": [
+    {"type": "text", "id": "title", ...},
+    {"type": "rectangle", "id": "node1", "boundElements": [{"id": "t_node1"}]},
+    {"type": "text", "id": "t_node1", "containerId": "node1", ...},
+    {"type": "arrow", "id": "a1", ...}
+  ]
+}
 ```
 
-## File Structure
+## ELI5 Pseudocode in Nodes
+
+Each node contains simplified pseudocode explaining WHAT the function does:
 
 ```
-proofshot/
-├── cli.py                    # New: CLI entry point
-├── record-demo-*.py          # Existing: demo scripts
-├── demo-*/                   # Existing: demo artifacts
-└── artifacts/                # Existing: session recordings
-
-grafiphy/
-├── __init__.py
-├── orchestrator.py           # Main orchestrator
-├── upload.py                 # GitHub release upload
-└── renderers/
-    ├── __init__.py
-    ├── sankey.py             # Sankey diagrams
-    ├── mermaid.py            # Mermaid diagrams
-    ├── architecture.py       # Architecture diagrams
-    └── graphify_tree.py      # Graphify tree screenshots
-
-riptide/
-├── riptide/
-│   ├── companion.py          # Modified: grafiphy + proofshot bridge
-│   └── webhook.py            # Modified: auto-proofshot on UI changes
+for each changed file:
+  ask graphify: who depends on this?
+for each relationship:
+  make a label explaining WHY
+generate Excalidraw JSON
+upload to GitHub release
 ```
 
-## Integration Points
+NOT raw code — plain English logic summary.
 
-### Companion Bridge (companion.py modifications)
-1. Import grafiphy orchestrator
-2. After graphify context fetched, call `grafiphy.orchestrate()`
-3. Upload returned PNGs to GitHub release
-4. Embed PNG URLs in TL;DR comment body
-5. If UI files changed, spawn proofshot thread
+## Integration
 
-### Webhook Modifications (webhook.py)
-1. On `pull_request` sync/opened, check for UI file changes
-2. If UI files present, spawn proofshot thread alongside companion
-3. Proofshot thread: start → capture → stop → upload → store URL in shared state
-4. Companion reads proofshot URL from shared state
+Companion calls `grafiphy.orchestrator.orchestrate()` on PR events.
 
-## Upload Strategy
+Environment variable: `COMPANION_ENABLE_DIAGRAM=1`
 
-PNGs are uploaded to GitHub release assets on a dedicated "grafiphy" release:
-- Release tag: `grafiphy-assets` (pre-created, reused)
-- Assets named: `{pr_number}-{diagram_type}-{timestamp}.png`
-- URLs: `https://github.com/{owner}/{repo}/releases/download/grafiphy-assets/{name}.png`
-- Embedded in comments as Markdown images
+Returns: List of Excalidraw URLs (uploaded to GitHub release assets).
 
-## Phased Rollout
+Comment embeds link: `[Excalidraw diagram](URL)`
 
-| Phase | Component | Dependency | ETA |
-|-------|-----------|------------|-----|
-| 1 | Proofshot CLI | None | 1h |
-| 2 | Sankey Renderer | None | 1h |
-| 3 | Mermaid Renderer | None | 1h |
-| 4 | Architecture Renderer | None | 1h |
-| 5 | Graphify Tree Renderer | None | 1h |
-| 6 | Orchestrator | 1-5 | 1h |
-| 7 | Companion Bridge | 6 | 1h |
-| 8 | Webhook Auto-Proofshot | 1 | 30m |
-| 9 | End-to-End Test | 7,8 | 30m |
+## Server Status
+
+```
+● riptide.service — active (running)
+● COMPANION_ENABLE_DIAGRAM=1
+● Webhook: https://riptide.codeovertcp.com/webhook/github
+```

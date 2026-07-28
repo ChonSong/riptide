@@ -50,14 +50,14 @@ SKIP_RE = re.compile(r"@riptide-bot\s+companion\s+(skip|resume)", re.IGNORECASE)
 GIFI_MAP = {
     "✨": "https://media.giphy.com/media/26tOZ42Mg6pbTUPHW/giphy.gif",  # sparkles
     "🐛": "https://media.giphy.com/media/l0HlBO7eyXzSZkJri/giphy.gif",  # bug
-    "♻️": "https://media.giphy.com/media/3o7TKSjRrfIPjeiYxW/giphy.gif",  # recycle
-    "🧹": "https://media.giphy.com/media/3o7TKSjRrfIPjeiYxW/giphy.gif",  # cleaning
-    "🔧": "https://media.giphy.com/media/3o7TKSjRrfIPjeiYxW/giphy.gif",  # wrench
-    "📝": "https://media.giphy.com/media/3o7TKSjRrfIPjeiYxW/giphy.gif",  # writing
-    "📦": "https://media.giphy.com/media/3o7TKSjRrfIPjeiYxW/giphy.gif",  # package
+    "♻️": "https://media.giphy.com/media/26tn33aiTi1jkl6H6/giphy.gif",  # recycle/refactor
+    "🧹": "https://media.giphy.com/media/3DnDRfZe2ubQc/giphy.gif",    # cleaning
+    "🔧": "https://media.giphy.com/media/Y3kQOYHyVZcErGeMYF/giphy.gif",  # wrench/config
+    "📝": "https://media.giphy.com/media/13HgwGsXF0aiGY/giphy.gif",    # writing/docs
+    "📦": "https://media.giphy.com/media/3o6Zt6KHwTY5sxJZE/giphy.gif",  # package/deps
     "🧪": "https://media.giphy.com/media/3o7TKSjRrfIPjeiYxW/giphy.gif",  # test
-    "⏪": "https://media.giphy.com/media/3o7TKSjRrfIPjeiYxW/giphy.gif",  # rewind
-    "⚡": "https://media.giphy.com/media/3o7TKSjRrfIPjeiYxW/giphy.gif",  # lightning
+    "⏪": "https://media.giphy.com/media/26tOZ42Mg6pbTUPHW/giphy.gif",  # rewind/revert
+    "⚡": "https://media.giphy.com/media/26tOZ42Mg6pbTUPHW/giphy.gif",  # lightning/perf
 }
 
 
@@ -183,8 +183,8 @@ class Companion:
         emoji = classify_pr_mood(title, files)
         graph_context = self._get_graph_context(files) if self.enable_graphify else None
 
-        # ── Grafiphy: generate PNG diagrams ──
-        png_urls = []
+        # ── Grafiphy: generate Excalidraw diagram ──
+        excalidraw_urls = []
         grafiphy_enabled = os.environ.get("COMPANION_ENABLE_DIAGRAM", "0") == "1"
         if grafiphy_enabled:
             try:
@@ -197,8 +197,8 @@ class Companion:
                     "author": author,
                     "installation_id": installation_id,
                 }
-                png_urls = orchestrate(pr_metadata, files, graph_context)
-                logger.info("Grafiphy: %d PNGs generated for %s#%d", len(png_urls), full_name, pr_number)
+                excalidraw_urls = orchestrate(pr_metadata, files, graph_context)
+                logger.info("Grafiphy: %d Excalidraw diagram generated for %s#%d", len(excalidraw_urls), full_name, pr_number)
             except Exception as e:
                 logger.warning("Grafiphy failed for %s#%d: %s", full_name, pr_number, e)
 
@@ -215,7 +215,7 @@ class Companion:
         # Generate ELI5 (optional — skip if model fails)
         eli5 = self._generate_eli5(title, files)
 
-        body = self._format_comment(emoji, author, tldr, graph_context, eli5, ui_files, png_urls)
+        body = self._format_comment(emoji, author, tldr, graph_context, eli5, ui_files, excalidraw_urls)
 
         try:
             self.client.post_pr_comment(installation_id, owner, repo, pr_number, body)
@@ -371,12 +371,12 @@ ELI5:"""
         bad = ["private message", "cannot provide", "can't provide", "cannot summarize", "can't summarize", "i cannot", "i can't", "as an ai", "i'm sorry", "i am sorry", "unable to"]
         return not any(p in text.lower() for p in bad)
 
-    def _format_comment(self, emoji, author, tldr, graph_context, eli5=None, ui_files=None, png_urls=None):
+    def _format_comment(self, emoji, author, tldr, graph_context, eli5=None, ui_files=None, excalidraw_urls=None):
         """
         Build the Markdown comment body using the Phase 4 TLDR spec.
         Includes optional ELI5 (Explain Like I'm 5) section.
         Includes ProofShot section if UI files changed.
-        Includes Grafiphy PNG diagrams if generated.
+        Includes Excalidraw diagram link if generated.
         """
         parts = [f"## {emoji} TL;DR\n\n@{author} — {tldr}"]
 
@@ -396,11 +396,9 @@ ELI5:"""
             ui_names = ", ".join(f.get("filename", "").split("/")[-1] for f in ui_files[:5])
             parts.append(f"\n**📸 ProofShot Required**\nUI files changed: {ui_names}\nPlease run ProofShot visual verification before merging.")
 
-        # Grafiphy diagrams
-        if png_urls:
-            parts.append("\n**📈 Visual Evidence**")
-            for url in png_urls:
-                parts.append(f"\n![diagram]({url})")
+        # Grafiphy Excalidraw diagram
+        if excalidraw_urls:
+            parts.append("\n**📈 Visual Evidence**\n[Excalidraw diagram]({}) (open in [excalidraw.com](https://excalidraw.com))".format(excalidraw_urls[0]))
 
         # GIF reaction
         gif_url = GIFI_MAP.get(emoji, GIFI_MAP["✨"])
