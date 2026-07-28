@@ -127,6 +127,28 @@ class GitHubAppClient:
             h.update(extra)
         return h
 
+    def compare_commits(
+        self, installation_id: int, owner: str, repo: str, base: str, head: str
+    ) -> dict:
+        """Compare two commits and return files changed + commit metadata.
+
+        Uses GitHub's compare API: GET /repos/{owner}/{repo}/compare/{base}...{head}
+        Returns {"files": [...], "commits": [...], "total_commits": int, "ahead_by": int}
+        """
+        resp = requests.get(
+            f"{self.base_url}/repos/{owner}/{repo}/compare/{base}...{head}",
+            headers=self._headers(installation_id),
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return {
+            "files": data.get("files", []),
+            "commits": data.get("commits", []),
+            "total_commits": data.get("total_commits", 0),
+            "ahead_by": data.get("ahead_by", 0),
+        }
+
     def get_pr_files(self, installation_id: int, owner: str, repo: str, pr_number: int) -> list[dict]:
         """Fetch all files changed in a PR."""
         files = []
