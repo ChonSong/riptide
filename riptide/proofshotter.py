@@ -1,0 +1,564 @@
+#!/usr/bin/env python3
+"""
+proofshotter.py — Bot 3: Riptide ProofShot (visual verification).
+
+Cron-polled worker that:
+  1. Polls open PRs for UI changes
+  2. Checks for proofshot.config.json (author's opt-in)
+  3. Runs proofshot Playwright captures on the dev instance
+  4. Posts visual evidence (GIF/screenshots) as a GitHub PR comment
+
+Dedup: tracks pr_number + head_sha to avoid re-running on the same revision.
+Follows the same pattern as deepthink.py (Bot 2).
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import logging
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+from typing import Optional
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+log = logging.getLogger("riptide.proofshotter")
+
+# ── Config ───────────────────────────────────────────────────────────────────
+
+WATCHED_REPOS = [
+    r.strip()
+    for r in os.environ.get(
+        "RIPTIDE_WATCHED_REPOS",
+        "ChonSong/riptide,ChonSong/hermes-webui,ChonSong/hermes-webui-extensions,"
+        "ChonSong/seans-reporepo,ChonSong/pr-review,ChonSong/everything-claude-code,"
+        "codeovertcp/gto-wizard-clone-v2,nesquena/hermes-webui",
+    ).split(",")
+    if r.strip()
+]
+
+OUR_USERNAME = os.environ.get("RIPTIDE_OUR_USERNAME", "ChonSong")
+OUR_ORG = os.environ.get("RIPTIDE_OUR_ORG", "ChonSong")
+STALENESS_MINUTES = int(os.environ.get("RIPTIDE_PROOFSHOT_STALENESS_MINUTES", "5"))
+
+STATE_FILE = Path(
+    os.environ.get("RIPTIDE_DATA_DIR", "/tmp/riptide-data")
+) / "proofshotter_acted_prs.json"
+
+PROOFSHOT_CLI = Path("/home/sc/workspace/proofshot/cli.py")
+
+# UI file extensions that trigger ProofShot
+UI_EXTENSIONS = {".css", ".scss", ".less", ".html", ".jsx", ".tsx", ".vue", ".svelte", ".astro", ".svg"}
+
+PROOFSHOT_MARKER = "\U0001f4f8 ProofShot"
+
+
+# ── State ──────────────────────────────────────────────────────────────────────
+
+
+def _load_state() -> dict[str, dict]:
+    """Load processed PR state: {owner/repo#number: {head_sha, reviewed_at}}."""
+    if STATE_FILE.exists():
+        try:
+            return json.loads(STATE_FILE.read_text())
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def _save_state(state: dict[str, dict]):
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.write_text(json.dumps(state, indent=2))
+
+
+def _was_reviewed_today(owner: str, repo: str, pr_number: int) -> bool:
+    """Check if this PR was proofshot-reviewed in the last 24 hours."""
+    pr_key = f"{owner}/{repo}#{pr_number}"
+    state = _load_state()
+    entry = state.get(pr_key, {})
+    reviewed_at = entry.get("reviewed_at", "")
+    if not reviewed_at:
+        return False
+    try:
+        reviewed_time = datetime.fromisoformat(reviewed_at)
+        return (datetime.now(timezone.utc) - reviewed_time) < timedelta(hours=24)
+    except (ValueError, TypeError):
+        return False
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+
+def _has_proofshot_comment(owner: str, repo: str, pr_number: int) -> bool:
+    """Check if PR already has a ProofShot comment from us."""
+    result = subprocess.run(
+        ["gh", "api", f"repos/{owner}/{repo}/issues/{pr_number}/comments",
+         "--jq", ".[].body", "--paginate"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        log.warning("  Failed to fetch comments for #%d: %s", pr_number, result.stderr[:200])
+        return False
+    return PROOFSHOT_MARKER in result.stdout
+
+
+def _check_proofshot_config(owner: str, repo: str, pr_number: int, head_sha: str) -> Optional[dict]:
+    """Fetch proofshot.config.json from the PR's head SHA via GitHub API.
+
+    Returns parsed JSON on success, None if the file does not exist or is invalid.
+    """
+    result = subprocess.run(
+        ["gh", "api", f"repos/{owner}/{repo}/contents/proofshot.config.json?ref={head_sha}",
+         "--jq", ".content"],
+        capture_output=True, text=True, timeout=15,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        raw = base64.b64decode(result.stdout.strip()).decode("utf-8")
+        return json.loads(raw)
+    except (json.JSONDecodeError, ValueError) as exc:
+        log.warning("  Failed to parse proofshot.config.json for #%d: %s", pr_number, exc)
+        return None
+
+
+def _checkout_pr(owner: str, repo: str, pr_number: int) -> Optional[Path]:
+    """Clone and checkout the PR branch into /tmp/proofshot-pr-N/.
+
+    Returns the working directory Path on success, None on failure.
+    """
+    work_dir = Path(f"/tmp/proofshot-pr-{pr_number}")
+    try:
+        if not (work_dir / ".git").exists():
+            work_dir.mkdir(parents=True, exist_ok=True)
+            result = subprocess.run(
+                ["git", "clone", "--depth", "1",
+                 f"https://github.com/{owner}/{repo}.git", str(work_dir)],
+                capture_output=True, text=True, timeout=60,
+            )
+            if result.returncode != 0:
+                log.warning("  git clone failed for #%d: %s", pr_number, result.stderr[:200])
+                return None
+
+        # Fetch and checkout the PR head
+        subprocess.run(
+            ["git", "fetch", "origin", f"pull/{pr_number}/head"],
+            cwd=work_dir, capture_output=True, text=True, timeout=60,
+        )
+        subprocess.run(
+            ["git", "checkout", "-B", f"pr-{pr_number}", "FETCH_HEAD"],
+            cwd=work_dir, capture_output=True, text=True, timeout=30,
+        )
+        return work_dir
+    except Exception as exc:
+        log.warning("  Checkout failed for #%d: %s", pr_number, exc)
+        return None
+
+
+def _run_proofshot(
+    pr_number: int,
+    url: str,
+    seed_path: Optional[str],
+    output_dir: Path,
+    captures: list[dict],
+) -> Optional[dict]:
+    """Run the proofshot visual verification workflow.
+
+    If captures are defined in proofshot.config.json, drives the session manually
+    for each capture step. Otherwise uses the default 'proofshot pr' workflow.
+
+    Returns {'gif': str, 'screenshots': list[str]} on success, None on failure.
+    """
+    if not PROOFSHOT_CLI.exists():
+        log.warning("  Proofshot CLI not found at %s — skipping verification", PROOFSHOT_CLI)
+        return None
+
+    if captures:
+        return _run_proofshot_custom(pr_number, url, seed_path, output_dir, captures)
+    else:
+        return _run_proofshot_default(pr_number, url, seed_path, output_dir)
+
+
+def _run_proofshot_default(
+    pr_number: int,
+    url: str,
+    seed_path: Optional[str],
+    output_dir: Path,
+) -> Optional[dict]:
+    """Run the default proofshot PR workflow via the CLI."""
+    cmd = [
+        sys.executable or "python3",
+        str(PROOFSHOT_CLI),
+        "pr", str(pr_number),
+        "--url", url,
+        "--output", str(output_dir),
+    ]
+    if seed_path:
+        cmd.extend(["--seed", seed_path])
+
+    log.info("  Running: proofshot pr %d --url %s --output %s", pr_number, url, output_dir)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        log.warning("  proofshot pr failed (exit %d): %s", result.returncode, result.stderr[:300])
+        return None
+
+    gif_path = output_dir / "proofshot.gif"
+    if gif_path.exists():
+        return {"gif": str(gif_path), "screenshots": sorted(str(p) for p in output_dir.glob("*.png"))}
+
+    log.warning("  proofshot did not produce a GIF at %s", gif_path)
+    return None
+
+
+def _run_proofshot_custom(
+    pr_number: int,
+    url: str,
+    seed_path: Optional[str],
+    output_dir: Path,
+    captures: list[dict],
+) -> Optional[dict]:
+    """Drive ProofshotSession manually for custom capture sequences.
+
+    Builds and runs an inline Python script that uses the ProofshotSession class
+    from the proofshot CLI module, following each capture defined in the config.
+    """
+    captures_json = json.dumps(captures)
+    seed_repr = json.dumps(seed_path) if seed_path else "None"
+
+    script = (
+        "import json, sys, time; "
+        "sys.path.insert(0, '/home/sc/workspace/proofshot'); "
+        "from cli import ProofshotSession; "
+        f"s = ProofshotSession({json.dumps(url)}, {json.dumps(str(output_dir))}, {seed_repr}); "
+        "s.start(); "
+        f"caps = {captures_json}; "
+        "for c in caps:\n"
+        "    time.sleep(c.get('wait', 0) / 1000);\n"
+        "    s.capture(selector=c.get('selector'), output=f\"{c['name']}.png\");\n"
+        "r = s.stop(gif_output='proofshot.gif');\n"
+        "print(json.dumps({'gif': r.get('gif'), "
+        "'screenshots': [str(x) for x in r.get('screenshots', [])]}))"
+    )
+
+    log.info("  Running custom proofshot for #%d (%d captures)", pr_number, len(captures))
+    result = subprocess.run(
+        [sys.executable or "python3", "-c", script],
+        capture_output=True, text=True, timeout=180,
+    )
+    if result.returncode != 0:
+        log.warning("  Custom proofshot failed (exit %d): %s", result.returncode, result.stderr[:300])
+        return None
+
+    try:
+        data = json.loads(result.stdout.strip())
+        if data.get("gif"):
+            return data
+        log.warning("  Custom proofshot produced no GIF output")
+        return None
+    except (json.JSONDecodeError, ValueError) as exc:
+        log.warning("  Failed to parse custom proofshot output: %s", exc)
+        return None
+
+
+def _upload_gif(gif_path: str, pr_number: int) -> Optional[str]:
+    """Upload GIF to the grafiphy-assets GitHub release and return its download URL."""
+    try:
+        asset_name = f"pr{pr_number}-proofshot.gif"
+
+        # Ensure the grafiphy-assets release exists
+        result = subprocess.run(
+            ["gh", "release", "view", "grafiphy-assets", "--json", "url"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            subprocess.run(
+                ["gh", "release", "create", "grafiphy-assets",
+                 "--title", "Grafiphy Assets",
+                 "--notes", "Auto-generated visual evidence for PR reviews"],
+                capture_output=True, timeout=30,
+            )
+
+        # Upload with --clobber to overwrite existing asset of the same name
+        result = subprocess.run(
+            ["gh", "release", "upload", "grafiphy-assets", gif_path, "--clobber"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0:
+            log.warning("  Upload failed: %s", result.stderr[:200])
+            return None
+
+        # Resolve the download URL from the release assets
+        result = subprocess.run(
+            ["gh", "release", "view", "grafiphy-assets", "--json", "assets"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            assets = json.loads(result.stdout).get("assets", [])
+            for asset in assets:
+                if asset["name"] == asset_name:
+                    return asset["url"]
+        return None
+    except Exception as exc:
+        log.warning("  Upload error: %s", exc)
+        return None
+
+
+def _post_proofshot_comment(
+    owner: str, repo: str, pr_number: int,
+    gif_url: str, screenshots: list[str],
+) -> bool:
+    """Post the ProofShot visual evidence comment on the PR."""
+    body_parts = [
+        f"## {PROOFSHOT_MARKER} Visual Evidence\n",
+        "ProofShot visual verification completed for the UI changes in this PR.\n",
+        f"![ProofShot GIF]({gif_url})\n",
+    ]
+    if screenshots:
+        body_parts.append("\n**Captures:**\n")
+        for s in screenshots:
+            body_parts.append(f"- `{Path(s).name}`\n")
+
+    body_parts.append(
+        "\n---\n"
+        "<sub>\U0001f916 Generated by Riptide \u00b7 ProofShot visual verification</sub>"
+    )
+
+    body = "".join(body_parts)
+    result = subprocess.run(
+        ["gh", "pr", "comment", str(pr_number), "--repo", f"{owner}/{repo}", "--body", body],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        log.warning("  Failed to post comment on #%d: %s", pr_number, result.stderr[:200])
+        return False
+    log.info("  \u2713 ProofShot comment posted on %s/%s#%d", owner, repo, pr_number)
+    return True
+
+
+def _post_ask_config_comment(owner: str, repo: str, pr_number: int) -> bool:
+    """Post a soft comment asking the author to add proofshot.config.json."""
+    body = (
+        "## \U0001f4f8 ProofShot \u2013 Configuration Required\n\n"
+        "This PR contains UI changes but no `proofshot.config.json` was found "
+        "in the repository root.\n\n"
+        "To enable automated visual verification, add a `proofshot.config.json` "
+        "file at the root of your PR branch:\n\n"
+        "```json\n"
+        "{\n"
+        '  "url": "http://localhost:8788",\n'
+        '  "seed": "scripts/seed.js",\n'
+        '  "captures": [\n'
+        '    {"name": "initial", "wait": 2000},\n'
+        '    {"name": "loaded", "selector": "#app", "wait": 1000}\n'
+        "  ]\n"
+        "}\n"
+        "```\n\n"
+        "The `url` is the local dev server URL, `seed` is an optional "
+        "data-seeding script, and `captures` defines the screenshot sequence.\n\n"
+        "---\n"
+        "<sub>\U0001f916 Generated by Riptide \u00b7 ProofShot visual verification</sub>"
+    )
+
+    result = subprocess.run(
+        ["gh", "pr", "comment", str(pr_number), "--repo", f"{owner}/{repo}", "--body", body],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        log.warning("  Failed to post config-request comment on #%d: %s", pr_number, result.stderr[:200])
+        return False
+    log.info("  \u2713 Requested proofshot.config.json on %s/%s#%d", owner, repo, pr_number)
+    return True
+
+
+# ── Main entry point ──────────────────────────────────────────────────────────
+
+
+def run():
+    """Poll watched repos and run ProofShot on qualifying PRs."""
+    state = _load_state()
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=STALENESS_MINUTES)
+    triggered = 0
+    skipped_no_ui = 0
+    skipped_stale = 0
+    skipped_draft = 0
+    skipped_dedup = 0
+    skipped_already = 0
+    skipped_no_config = 0
+
+    for repo_full in WATCHED_REPOS:
+        try:
+            owner, repo_name = repo_full.split("/", 1)
+        except ValueError:
+            log.warning("  Invalid repo format: %s", repo_full)
+            continue
+
+        log.info("Checking %s...", repo_full)
+
+        # ── Get open PRs via gh CLI ──────────────────────────────────────
+        prs = subprocess.run(
+            ["gh", "pr", "list", "--repo", repo_full, "--state", "open",
+             "--json", "number,title,headRefName,headRefOid,author,"
+                       "additions,deletions,createdAt,updatedAt,url,state,isDraft",
+             "--limit", "50"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if prs.returncode != 0:
+            log.warning("  gh pr list failed for %s: %s", repo_full, prs.stderr[:200])
+            continue
+
+        try:
+            open_prs = json.loads(prs.stdout)
+        except json.JSONDecodeError:
+            log.warning("  JSON parse failed for %s", repo_full)
+            continue
+
+        for pr in open_prs:
+            pr_number = pr["number"]
+            pr_title = pr.get("title", "")
+            pr_author = pr.get("author", {}).get("login", "")
+            head_sha = pr.get("headRefOid", "")
+            updated_at_str = pr.get("updatedAt", "")
+            is_draft = pr.get("isDraft", False)
+
+            # ── Filter: skip draft PRs ──────────────────────────────────
+            if is_draft:
+                log.info("  #%d skip \u2014 draft PR", pr_number)
+                skipped_draft += 1
+                continue
+
+            pr_key = f"{repo_full}#{pr_number}"
+
+            # ── Dedup: same head SHA already processed ──────────────────
+            if state.get(pr_key, {}).get("head_sha") == head_sha:
+                log.info("  #%d skip \u2014 already processed (SHA %s)", pr_number, head_sha[:12])
+                skipped_dedup += 1
+                continue
+
+            # ── Dedup: 24-hour cooldown ─────────────────────────────────
+            if _was_reviewed_today(owner, repo_name, pr_number):
+                log.info("  #%d skip \u2014 reviewed in last 24h", pr_number)
+                skipped_dedup += 1
+                continue
+
+            # ── Filter: staleness (let the author push more commits) ────
+            try:
+                updated_at = datetime.fromisoformat(updated_at_str.replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                log.warning("  #%d skip \u2014 can't parse updatedAt: %s", pr_number, updated_at_str)
+                skipped_stale += 1
+                continue
+
+            if updated_at > cutoff:
+                log.info("  #%d skip \u2014 last updated %s, not yet stale", pr_number, updated_at_str)
+                skipped_stale += 1
+                continue
+
+            # ── Filter: check for UI file changes ───────────────────────
+            files_result = subprocess.run(
+                ["gh", "api", f"repos/{owner}/{repo_name}/pulls/{pr_number}/files",
+                 "--jq", ".[].filename", "--paginate"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if files_result.returncode != 0:
+                log.warning("  #%d skip \u2014 can't fetch files: %s",
+                            pr_number, files_result.stderr[:200])
+                continue
+
+            all_files = [f for f in files_result.stdout.strip().split("\n") if f]
+            ui_files = [f for f in all_files if f.endswith(tuple(UI_EXTENSIONS))]
+
+            if not ui_files:
+                log.info("  #%d skip \u2014 no UI files changed", pr_number)
+                skipped_no_ui += 1
+                continue
+
+            # ── Filter: check if proofshot already posted ───────────────
+            if _has_proofshot_comment(owner, repo_name, pr_number):
+                log.info("  #%d skip \u2014 proofshot already posted", pr_number)
+                skipped_already += 1
+                continue
+
+            # ── Filter: check for proofshot.config.json ─────────────────
+            config = _check_proofshot_config(owner, repo_name, pr_number, head_sha)
+            if config is None:
+                log.info("  #%d no proofshot.config.json \u2014 asking author", pr_number)
+                # Post a soft comment asking the author to add one (one-time per PR)
+                if not state.get(pr_key, {}).get("config_asked"):
+                    if _post_ask_config_comment(owner, repo_name, pr_number):
+                        state[pr_key] = {
+                            "head_sha": head_sha,
+                            "reviewed_at": now.isoformat(),
+                            "config_asked": True,
+                        }
+                        _save_state(state)
+                skipped_no_config += 1
+                continue
+
+            # ── All filters passed — run proofshot ──────────────────────
+            log.info(
+                "  #%d TRIGGER \u2014 UI files: %s, SHA=%s",
+                pr_number, ", ".join(ui_files[:5]), head_sha[:12],
+            )
+
+            # Checkout PR branch for seed file resolution
+            work_dir = _checkout_pr(owner, repo_name, pr_number)
+            if work_dir is None:
+                log.warning("  #%d failed to checkout \u2014 skipping", pr_number)
+                continue
+
+            # Resolve seed path (relative to repo root in the checkout)
+            seed_path: Optional[str] = None
+            raw_seed = config.get("seed")
+            if raw_seed:
+                candidate = work_dir / raw_seed
+                if candidate.exists():
+                    seed_path = str(candidate.resolve())
+                else:
+                    log.warning("  Seed file %s not found at %s", raw_seed, candidate)
+
+            url = config.get("url", "http://localhost:8788")
+            captures = config.get("captures", [])
+            output_dir = Path(f"/tmp/proofshot-pr-{pr_number}")
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            result = _run_proofshot(pr_number, url, seed_path, output_dir, captures)
+            if result is None:
+                log.warning("  #%d proofshot failed \u2014 skipping", pr_number)
+                continue
+
+            # Upload GIF to release assets
+            gif_url = _upload_gif(result["gif"], pr_number)
+            if gif_url is None:
+                log.warning("  #%d upload failed \u2014 GIF exists at %s but couldn't upload",
+                            pr_number, result["gif"])
+                # Still post the comment with a fallback to the local path
+                gif_url = result["gif"]
+
+            screenshots = result.get("screenshots", [])
+
+            # Post the evidence comment
+            if _post_proofshot_comment(owner, repo_name, pr_number, gif_url, screenshots):
+                state[pr_key] = {"head_sha": head_sha, "reviewed_at": now.isoformat()}
+                _save_state(state)
+                triggered += 1
+
+    # ── Summary ─────────────────────────────────────────────────────────
+    log.info(
+        "Done. Triggered=%d, skipped(draft)=%d, skipped(stale)=%d, "
+        "skipped(no-UI)=%d, skipped(already)=%d, "
+        "skipped(dedup)=%d, skipped(no-config)=%d",
+        triggered, skipped_draft, skipped_stale,
+        skipped_no_ui, skipped_already,
+        skipped_dedup, skipped_no_config,
+    )
+
+
+if __name__ == "__main__":
+    run()
