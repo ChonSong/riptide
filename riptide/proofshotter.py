@@ -52,7 +52,10 @@ STATE_FILE = Path(
     os.environ.get("RIPTIDE_DATA_DIR", "/tmp/riptide-data")
 ) / "proofshotter_acted_prs.json"
 
-PROOFSHOT_CLI = Path("/home/sc/workspace/proofshot/cli.py")
+PROOFSHOT_CLI = Path(
+    os.environ.get("RIPTIDE_PROOFSHOT_CLI", "/home/sc/workspace/proofshot/cli.py")
+)
+PROOFSHOT_ROOT = PROOFSHOT_CLI.parent
 
 # UI file extensions that trigger ProofShot
 UI_EXTENSIONS = {".css", ".scss", ".less", ".html", ".jsx", ".tsx", ".vue", ".svelte", ".astro", ".svg"}
@@ -79,19 +82,6 @@ def _save_state(state: dict[str, dict]):
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
-
-
-def _has_proofshot_comment(owner: str, repo: str, pr_number: int) -> bool:
-    """Check if PR already has a ProofShot comment from us."""
-    result = subprocess.run(
-        ["gh", "api", f"repos/{owner}/{repo}/issues/{pr_number}/comments",
-         "--jq", ".[].body", "--paginate"],
-        capture_output=True, text=True, timeout=30,
-    )
-    if result.returncode != 0:
-        log.warning("  Failed to fetch comments for #%d: %s", pr_number, result.stderr[:200])
-        return False
-    return PROOFSHOT_MARKER in result.stdout
 
 
 def _check_proofshot_config(owner: str, repo: str, pr_number: int, head_sha: str) -> Optional[dict]:
@@ -132,15 +122,23 @@ def _checkout_pr(owner: str, repo: str, pr_number: int) -> Optional[Path]:
                 log.warning("  git clone failed for #%d: %s", pr_number, result.stderr[:200])
                 return None
 
-        # Fetch and checkout the PR head
-        subprocess.run(
+        # Fetch and checkout the PR head — verify each step
+        result = subprocess.run(
             ["git", "fetch", "origin", f"pull/{pr_number}/head"],
             cwd=work_dir, capture_output=True, text=True, timeout=60,
         )
-        subprocess.run(
+        if result.returncode != 0:
+            log.warning("  git fetch failed for #%d: %s", pr_number, result.stderr[:200])
+            return None
+
+        result = subprocess.run(
             ["git", "checkout", "-B", f"pr-{pr_number}", "FETCH_HEAD"],
             cwd=work_dir, capture_output=True, text=True, timeout=30,
         )
+        if result.returncode != 0:
+            log.warning("  git checkout failed for #%d: %s", pr_number, result.stderr[:200])
+            return None
+
         return work_dir
     except Exception as exc:
         log.warning("  Checkout failed for #%d: %s", pr_number, exc)
@@ -219,7 +217,7 @@ def _run_proofshot_custom(
 
     script = (
         "import json, sys, time; "
-        "sys.path.insert(0, '/home/sc/workspace/proofshot'); "
+        f"sys.path.insert(0, {json.dumps(str(PROOFSHOT_ROOT))}); " \
         "from cli import ProofshotSession; "
         f"s = ProofshotSession({json.dumps(url)}, {json.dumps(str(output_dir))}, {seed_repr}); "
         "s.start(); "
@@ -340,7 +338,7 @@ def run():
     skipped_stale = 0
     skipped_draft = 0
     skipped_dedup = 0
-    skipped_already = 0
+    skipped_error = 0
 
     for repo_full in WATCHED_REPOS:
         try:
@@ -411,8 +409,9 @@ def run():
                 capture_output=True, text=True, timeout=30,
             )
             if files_result.returncode != 0:
-                log.warning("  #%d skip \u2014 can't fetch files: %s",
+                log.warning("  #%d skip — can't fetch files: %s",
                             pr_number, files_result.stderr[:200])
+                skipped_error += 1
                 continue
 
             all_files = [f for f in files_result.stdout.strip().split("\n") if f]
@@ -421,12 +420,6 @@ def run():
             if not ui_files:
                 log.info("  #%d skip \u2014 no UI files changed", pr_number)
                 skipped_no_ui += 1
-                continue
-
-            # ── Filter: check if proofshot already posted ───────────────
-            if _has_proofshot_comment(owner, repo_name, pr_number):
-                log.info("  #%d skip \u2014 proofshot already posted", pr_number)
-                skipped_already += 1
                 continue
 
             # ── Check for proofshot.config.json (optional enrichment) ──
@@ -445,6 +438,7 @@ def run():
             work_dir = _checkout_pr(owner, repo_name, pr_number)
             if work_dir is None:
                 log.warning("  #%d failed to checkout — skipping", pr_number)
+                skipped_error += 1
                 continue
 
             # Resolve seed path (relative to repo root in the checkout)
@@ -465,13 +459,15 @@ def run():
             result = _run_proofshot(pr_number, url, seed_path, output_dir, captures)
             if result is None:
                 log.warning("  #%d proofshot failed — skipping", pr_number)
+                skipped_error += 1
                 continue
 
             # Upload GIF to release assets
             gif_url = _upload_gif(result["gif"], pr_number)
             if gif_url is None:
-                log.warning("  #%d upload failed — GIF exists at %s, will retry next run",
+                log.warning("  #%d skip — upload failed for %s",
                             pr_number, result["gif"])
+                skipped_error += 1
                 continue
 
             screenshots = result.get("screenshots", [])
@@ -485,11 +481,11 @@ def run():
     # ── Summary ─────────────────────────────────────────────────────────
     log.info(
         "Done. Triggered=%d, skipped(draft)=%d, skipped(stale)=%d, "
-        "skipped(no-UI)=%d, skipped(already)=%d, "
-        "skipped(dedup)=%d",
+        "skipped(no-UI)=%d, "
+        "skipped(dedup)=%d, skipped(error)=%d",
         triggered, skipped_draft, skipped_stale,
-        skipped_no_ui, skipped_already,
-        skipped_dedup,
+        skipped_no_ui,
+        skipped_dedup, skipped_error,
     )
 
 
