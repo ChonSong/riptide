@@ -294,9 +294,12 @@ def orchestrate(pr_metadata: dict, diff: list[dict],
 
     output_dir = Path(tempfile.mkdtemp(prefix=f"grafiphy-pr{pr_number}-"))
 
-    # Get graphify graph
+    # Get graphify graph (use pre-computed context if available)
     try:
-        graph = get_graphify_graph(repo_path, diff)
+        if graphify_context:
+            graph = graphify_context
+        else:
+            graph = get_graphify_graph(repo_path, diff)
     except Exception as e:
         print(f"WARNING: Graphify graph failed: {e}")
         graph = {"nodes": [], "communities": {}, "god_nodes": []}

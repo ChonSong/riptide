@@ -166,7 +166,7 @@ class Companion:
                 if skip:
                     data[key] = {"skip": True, "last_sha": entry.get("last_sha")}
                 else:
-                    data.pop(key, None)
+                    data[key] = {"skip": False, "last_sha": entry.get("last_sha")}
                 self._skip_file.write_text(json.dumps(data, indent=2, sort_keys=True))
                 return True
         except Exception as e:
