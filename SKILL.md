@@ -76,6 +76,7 @@ Cron (every 15 min)
 riptide/
 ├── github_app.py      # JWT auth, GitHub API client
 ├── companion.py       # Bot 1: TL;DR + ELI5 + ProofShot comment generator
+├── scripts/           # Upload excalidraw diagrams
 ├── deepthink.py       # Bot 2: Cron polling + Hermes session spawner
 ├── webhook.py         # FastAPI server (companion trigger, installation sync)
 ├── __init__.py
