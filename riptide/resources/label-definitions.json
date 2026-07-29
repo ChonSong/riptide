@@ -1,0 +1,178 @@
+{
+  "$schema": "label-definitions.schema.json",
+  "version": "1.0.0",
+  "description": "Canonical label taxonomy for the Riptide labeling bot. All label names, colors, descriptions, and per-repo component mappings.",
+  "created": "2026-07-29",
+  "maintainer": "riptide-labeler (bot 4)",
+
+  "shared_labels": {
+    "description": "Labels valid on every repo. Dimensions: type/, priority/, scope/, status/, bot/.",
+    "dimensions": {
+      "type": {
+        "description": "Nature of the change or request",
+        "color": "#C5DEF5",
+        "labels": {
+          "type/bug":          { "description": "Something isn't working — fix, bugfix, hotfix", "color": "#C5DEF5" },
+          "type/feature":      { "description": "New capability or enhancement request", "color": "#C5DEF5" },
+          "type/docs":         { "description": "Documentation improvements — README, comments, wiki", "color": "#C5DEF5" },
+          "type/refactor":     { "description": "Code restructuring, no behavior change", "color": "#C5DEF5" },
+          "type/perf":         { "description": "Performance improvement or optimization", "color": "#C5DEF5" },
+          "type/test":         { "description": "Test additions, changes, or test infrastructure", "color": "#C5DEF5" },
+          "type/security":     { "description": "Security vulnerability or hardening", "color": "#C5DEF5" },
+          "type/ci":           { "description": "CI/CD pipeline or workflow changes", "color": "#C5DEF5" },
+          "type/deps":         { "description": "Dependency updates or requirements changes", "color": "#C5DEF5" }
+        }
+      },
+      "priority": {
+        "description": "Urgency and severity level",
+        "color": "severity_gradient",
+        "labels": {
+          "priority/critical": { "description": "Security, data loss, crash loop, P0-equivalent", "color": "#B60205" },
+          "priority/high":     { "description": "Major feature broken, no workaround, P1-equivalent", "color": "#D93F0B" },
+          "priority/medium":   { "description": "Degraded experience, workaround exists, P2-equivalent", "color": "#FBCA04" },
+          "priority/low":      { "description": "Cosmetic, nice to have, P3-equivalent", "color": "#0E8A16" }
+        }
+      },
+      "scope": {
+        "description": "Blast radius / impact size measured by lines changed",
+        "color": "#848d97",
+        "labels": {
+          "scope/tiny":    { "description": "< 10 lines changed", "color": "#848d97" },
+          "scope/small":   { "description": "10–99 lines changed", "color": "#848d97" },
+          "scope/medium":  { "description": "100–499 lines changed", "color": "#848d97" },
+          "scope/large":   { "description": "500–999 lines changed", "color": "#848d97" },
+          "scope/massive": { "description": "1000+ lines changed", "color": "#848d97" }
+        }
+      },
+      "status": {
+        "description": "Issue/PR lifecycle state",
+        "color": "#D876E3",
+        "labels": {
+          "status/needs-triage":  { "description": "Confidence < 70% — needs human classification", "color": "#D876E3" },
+          "status/needs-repro":   { "description": "Bug report without reproduction steps", "color": "#D876E3" },
+          "status/blocked":       { "description": "Blocked on external dependency or decision", "color": "#D876E3" },
+          "status/stale":         { "description": "No activity for 30+ days", "color": "#D876E3" },
+          "status/draft":         { "description": "PR is in draft state or marked WIP", "color": "#D876E3" },
+          "status/reviewed":      { "description": "Has received at least one human review pass", "color": "#D876E3" }
+        }
+      },
+      "bot": {
+        "description": "Automation markers — bot-internal, not classification",
+        "color": "#E99695",
+        "labels": {
+          "bot/labeled":     { "description": "Bot has applied labels to this item (dedup guard)", "color": "#E99695" },
+          "bot/mislabeled":  { "description": "Human flagged that the bot's labels were wrong", "color": "#E99695" }
+        }
+      }
+    }
+  },
+
+  "repo_components": {
+    "description": "Per-repo comp/* mappings. Each repo has its own component labels derived from file paths.",
+    "repos": {
+      "ChonSong/riptide": {
+        "comp/github-app":  { "description": "GitHub App plumbing: JWT auth, webhook server, installation sync", "color": "#BFD4F2", "paths": ["riptide/github_app.py", "riptide/webhook.py", "server.py"] },
+        "comp/companion":   { "description": "Bot 1: PR companion TL;DR, ELI5, emoji classification", "color": "#BFD4F2", "paths": ["riptide/companion.py"] },
+        "comp/deepthink":   { "description": "Bot 2: Cron-pumped Hermes deep-think PR reviews", "color": "#BFD4F2", "paths": ["riptide/deepthink.py"] },
+        "comp/proofshot":   { "description": "Bot 3: Cron-pumped Playwright visual verification captures", "color": "#BFD4F2", "paths": ["riptide/proofshotter.py", "proofshot.config.json", "proofshot/**"] },
+        "comp/diagram":     { "description": "Excalidraw diagram generation, grafiphy integration", "color": "#BFD4F2", "paths": ["riptide/grafiphy/**", "**/excalidraw_*"] },
+        "comp/labeler":     { "description": "Bot 4: Labeling engine — this file, labeler.py, labeler_test.py", "color": "#BFD4F2", "paths": ["riptide/labeler*", "riptide/resources/label-definitions*"] },
+        "comp/infra":       { "description": "Deployment, Docker, Cloudflare tunnel, scripts", "color": "#BFD4F2", "paths": ["Dockerfile", "docker-compose.yml", "start.sh", ".github/**"] }
+      },
+      "ChonSong/proofshot": {
+        "comp/runner":   { "description": "Test execution, browser automation driver", "color": "#BFD4F2", "paths": ["**/runner*", "**/execute*", "**/browser*"] },
+        "comp/reporter": { "description": "Result reporting, output formatting, PR comment posting", "color": "#BFD4F2", "paths": ["**/reporter*", "**/result*", "**/output*"] },
+        "comp/config":   { "description": "Configuration, selectors, proofshot.config.json", "color": "#BFD4F2", "paths": ["**/config*", "**/*.config.*", "**/selectors*"] },
+        "comp/cli":      { "description": "CLI entry point, argument parsing", "color": "#BFD4F2", "paths": ["cli.py", "**/main*", "**/entry*"] }
+      },
+      "ChonSong/hermes-webui": {
+        "comp/ui":           { "description": "Svelte frontend components, pages, CSS, static assets", "color": "#BFD4F2", "paths": ["static/ui*", "static/style.css", "static/*.js", "static/*.html"] },
+        "comp/extensions":   { "description": "Extension system, plugin hooks, extension settings", "color": "#BFD4F2", "paths": ["static/extension*", "api/extensions.py"] },
+        "comp/api":          { "description": "FastAPI backend endpoints, routes, middleware", "color": "#BFD4F2", "paths": ["api/routes.py", "api/**/*.py"] },
+        "comp/auth":         { "description": "Authentication, OAuth, passkeys, sessions", "color": "#BFD4F2", "paths": ["api/auth*", "api/oauth*", "api/passkeys*"] },
+        "comp/sessions":     { "description": "Session lifecycle, recovery, export, streaming", "color": "#BFD4F2", "paths": ["api/session*", "api/streaming*", "api/gateway*"] },
+        "comp/gateway":      { "description": "AI provider gateway, model routing, SSE chunking", "color": "#BFD4F2", "paths": ["api/gateway*", "api/sse_*", "api/providers*"] },
+        "comp/workspace":    { "description": "Workspace management, git integration, file tools", "color": "#BFD4F2", "paths": ["api/workspace*", "api/worktrees*", "workspace*"] },
+        "comp/deploy":       { "description": "Docker, Nix, deployment scripts, CI/CD configs", "color": "#BFD4F2", "paths": ["Dockerfile*", "docker-compose*", "flake*", "docker_init*", "scripts/**"] }
+      },
+      "NousResearch/hermes-agent": {
+        "comp/agent":      { "description": "Core agent runtime: loop, agent_init, prompt builder, responses endpoint", "color": "#6f42c1", "paths": ["src/hermes_agent/**"] },
+        "comp/cli":        { "description": "CLI entry point, hermes_cli/, setup wizard", "color": "#6f42c1", "paths": ["src/hermes_cli/**"] },
+        "comp/gateway":    { "description": "Gateway runner, session dispatch, delivery", "color": "#6f42c1", "paths": ["src/gateway/**"] },
+        "comp/tools":      { "description": "Tool registry, model_tools, toolsets", "color": "#6f42c1", "paths": ["src/tools/**"] },
+        "comp/tui":        { "description": "Terminal UI (ui-tui/ + tui_gateway/)", "color": "#6f42c1", "paths": ["src/ui-tui/**"] },
+        "comp/plugins":    { "description": "Plugin system and bundled plugins", "color": "#6f42c1", "paths": ["src/plugins/**"] },
+        "comp/cron":       { "description": "Cron scheduler and job management", "color": "#6f42c1", "paths": ["src/cron/**"] },
+        "comp/acp":        { "description": "Agent Communication Protocol adapter", "color": "#6f42c1", "paths": ["src/acp/**"] }
+      }
+    }
+  },
+
+  "preserved_legacy_labels": {
+    "description": "Default GitHub labels that coexist with the new taxonomy. These are human-assigned only (bot never auto-applies).",
+    "labels": [
+      { "name": "good first issue", "color": "7057ff", "reason": "Human designation for new contributors" },
+      { "name": "help wanted",      "color": "008672", "reason": "Human designation for external help" },
+      { "name": "question",         "color": "d876e3", "reason": "Support signal, not a type/ change" },
+      { "name": "duplicate",        "color": "cfd3d7", "reason": "Human cross-reference marker" },
+      { "name": "invalid",          "color": "e4e669", "reason": "Human decision, not auto-detectable" },
+      { "name": "wontfix",          "color": "ffffff", "reason": "Human decision" }
+    ]
+  },
+
+  "labels_to_remove": {
+    "description": "Default GitHub labels replaced by type/* taxonomy. Bot removes these on repo setup.",
+    "labels": [
+      { "name": "bug",          "replaced_by": "type/bug" },
+      { "name": "enhancement",  "replaced_by": "type/feature" },
+      { "name": "documentation","replaced_by": "type/docs" }
+    ]
+  },
+
+  "classification_rules": {
+    "description": "Deterministic rules for label assignment. Applied before AI fallback.",
+    "type": [
+      { "label": "type/bug",      "rule": "title starts with 'fix:' OR title contains 'bug'|'bugfix'|'hotfix'|'regression' OR issue body contains 'steps to reproduce' (case-insensitive)" },
+      { "label": "type/feature",  "rule": "title starts with 'feat:' OR title contains 'feature'|'add'|'new' (not as prefix of another word)" },
+      { "label": "type/docs",     "rule": "title starts with 'docs:' OR all changed files are .md / .rst / docs/ path" },
+      { "label": "type/refactor", "rule": "title starts with 'refactor:'|'chore:' OR title contains 'restructure'|'reorganize'" },
+      { "label": "type/perf",     "rule": "title starts with 'perf:' OR title contains 'performance'|'optimize'|'speed'|'latency'" },
+      { "label": "type/test",     "rule": "title starts with 'test:' OR all changed files are in test/ or *_test.* / *.test.* or *_spec.*" },
+      { "label": "type/security", "rule": "title/body contains 'security'|'vuln'|'cve'|'xss'|'injection'|'exploit'" },
+      { "label": "type/ci",       "rule": "title starts with 'ci:' OR changed files are exclusively .github/ or Dockerfile*" },
+      { "label": "type/deps",     "rule": "title starts with 'deps:'|'depend:' OR changed files are only requirements.*, package.*, Cargo.*, go.mod, go.sum, pyproject.toml" }
+    ],
+    "priority": [
+      { "label": "priority/critical", "rule": "title/body contains 'security'|'data loss'|'crash loop'|'P0'|'data breach'|'exploit'|'RCE'" },
+      { "label": "priority/high",     "rule": "title/body contains 'crash'|'down'|'blocking'|'broken'|'regression' OR scope is 'scope/massive' OR assigned to current milestone" },
+      { "label": "priority/medium",   "rule": ">200 lines changed OR mentions 'workaround' OR issue has reproduction steps provided" },
+      { "label": "priority/low",      "rule": "default for all new items" }
+    ],
+    "scope": [
+      { "label": "scope/tiny",    "rule": "total lines changed (additions + deletions) < 10" },
+      { "label": "scope/small",   "rule": "total lines changed >= 10 AND < 100" },
+      { "label": "scope/medium",  "rule": "total lines changed >= 100 AND < 500" },
+      { "label": "scope/large",   "rule": "total lines changed >= 500 AND < 1000" },
+      { "label": "scope/massive", "rule": "total lines changed >= 1000" }
+    ],
+    "status": [
+      { "label": "status/draft",           "rule": "PR is in draft state (GitHub PR.draft == true)" },
+      { "label": "status/needs-triage",    "rule": "confidence score < 0.7 on type/ classification" },
+      { "label": "status/needs-repro",     "rule": "type is bug AND no reproduction steps detected in body" },
+      { "label": "status/stale",           "rule": "no activity (comment, commit, edit) for 30+ days (cron sweep only)" },
+      { "label": "status/blocked",         "rule": "body contains 'blocked on'|'waiting for'|'depends on'" }
+    ]
+  },
+
+  "ai_fallback_config": {
+    "description": "When deterministic rules can't classify, falls back to local LLM.",
+    "model": "qwen2.5-coder:7b",
+    "endpoint": "http://localhost:43311/api/generate",
+    "confidence_threshold": 0.7,
+    "triggers": [
+      "Non-conventional-commit PR title (no type: prefix)",
+      "Issue classification (no files to analyze)",
+      "Priority escalation detected from conversation (cron sweep re-evaluates)"
+    ]
+  }
+}
