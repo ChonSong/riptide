@@ -470,10 +470,9 @@ def run():
             # Upload GIF to release assets
             gif_url = _upload_gif(result["gif"], pr_number)
             if gif_url is None:
-                log.warning("  #%d upload failed — GIF exists at %s but couldn't upload",
+                log.warning("  #%d upload failed — GIF exists at %s, will retry next run",
                             pr_number, result["gif"])
-                # Still post the comment with a fallback to the local path
-                gif_url = result["gif"]
+                continue
 
             screenshots = result.get("screenshots", [])
 
