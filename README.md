@@ -4,6 +4,8 @@
 
 # Riptide — Self-Hosted GitHub App (Two Bots)
 
+https://excalidraw.com/#json=xGk0JJ9K3Fj3w-jrNM1kw,iEepj-mogls0LeSUBi03JA
+
 AI-powered code review that runs in your infrastructure. Two bots, zero bloat.
 
 **Bot 1 — Companion:** Posts TL;DR comments on PRs with graphify-informed blast radius.
