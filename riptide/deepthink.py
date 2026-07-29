@@ -7,6 +7,9 @@ Polls open PRs and spawns Hermes deep-think sessions when:
   2. PR hasn't been updated in >= 30 minutes (settled)
   3. Either we own the repo (ChonSong org) OR we authored the PR
 
+Also handles on-demand @riptide-bot review commands via handle_review_command(),
+called directly from webhook.py when a user comments @riptide-bot review on a PR.
+
 Dedup: tracks pr_number + head_sha to avoid re-spawning on the same revision.
 Uses `gh` CLI (already authenticated as ChonSong) for all GitHub queries.
 """
@@ -15,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone, timedelta
@@ -28,6 +32,8 @@ logging.basicConfig(
 log = logging.getLogger("riptide.deepthink")
 
 # ── Config ───────────────────────────────────────────────────────────────────
+
+REVIEW_RE = re.compile(r"@riptide-bot\s+(review|deepthink|full\s*review)", re.IGNORECASE)
 
 WATCHED_REPOS = [
     r.strip()
@@ -76,6 +82,55 @@ def _was_reviewed_today(owner: str, repo: str, pr_number: int) -> bool:
         return (datetime.now(timezone.utc) - reviewed_time) < timedelta(hours=24)
     except (ValueError, TypeError):
         return False
+
+
+def handle_review_command(
+    client,
+    installation_id: int,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    commenter: str,
+) -> str | None:
+    """Handle @riptide-bot review command — spawn an on-demand deep-think review.
+
+    Called from webhook.py when a user comments @riptide-bot review on a PR.
+    Fetches PR details via GitHub API client, spawns the deep-think session,
+    and returns a user-facing confirmation message (or error message).
+    """
+    try:
+        pr_details = client.get_pr_details(installation_id, owner, repo, pr_number)
+    except Exception as e:
+        log.warning("Failed to fetch PR details for review: %s", e)
+        return (
+            f"⚠️ Could not fetch PR #{pr_number} details ({e}). "
+            f"Make sure the PR exists and the app is installed."
+        )
+
+    title = pr_details.get("title", f"PR #{pr_number}")
+    author = pr_details.get("user", {}).get("login", "unknown")
+    additions = pr_details.get("additions", 0)
+    deletions = pr_details.get("deletions", 0)
+    total_loc = additions + deletions
+    head_sha = pr_details.get("head", {}).get("sha", "")
+
+    try:
+        _spawn_deepthink(owner, repo, pr_number, title, author, total_loc, head_sha)
+    except Exception as e:
+        log.error("Failed to spawn deep-think: %s", e)
+        return f"⚠️ Failed to spawn deep-think review for #{pr_number}: {e}"
+
+    log.info("On-demand review spawned for %s/%s#%d by %s", owner, repo, pr_number, commenter)
+    return (
+        f"🧠 **Riptide Review triggered for #{pr_number}!**\n\n"
+        f"A Hermes deep-think session has been scheduled and will begin within 2 minutes. "
+        f"The review will analyze the full diff, run graphify blast-radius analysis, "
+        f"post inline suggestions, and generate an Excalidraw architecture diagram.\n\n"
+        f"**PR:** {title}\n"
+        f"**Author:** @{author}\n"
+        f"**Changes:** +{additions}/-{deletions} ({total_loc} LOC)\n"
+        f"**Commit:** `{head_sha[:12]}`"
+    )
 
 
 def _is_cron_available() -> bool:

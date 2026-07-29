@@ -28,6 +28,13 @@ Posts a TL;DR comment on every PR with graphify-informed blast radius analysis.
 @riptide-bot companion resume   # Re-enable
 ```
 
+**On-Demand Deep-Think Review:**
+```
+@riptide-bot review             # Trigger Bot 2 deep-think review now
+@riptide-bot full review        # Same (alias)
+@riptide-bot deepthink          # Same (alias)
+```
+
 ## Bot 2: Riptide Review (Cron-Triggered)
 
 Autonomous deep-think code review for large, settled PRs.
