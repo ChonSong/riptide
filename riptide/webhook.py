@@ -47,6 +47,15 @@ log = logging.getLogger("riptide.webhook")
 
 app = FastAPI(title="Riptide Webhook Server")
 
+
+# ── Health check ────────────────────────────────────────────────────────────────
+
+
+@app.get("/health")
+async def health():
+    """Return server health status for monitoring / tunnel-watchdog."""
+    return {"status": "ok"}
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 GITHUB_APP_ID = int(os.environ.get("GITHUB_APP_ID", "4262983"))
@@ -135,8 +144,18 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
         if companion and companion.is_active_for(owner, repo_name):
             from threading import Thread
 
+            def _safe_run_for_pr(*args, **kwargs):
+                """Run companion with fail-safe to prevent thread death from crashing server."""
+                try:
+                    companion.run_for_pr(*args, **kwargs)
+                except Exception as e:
+                    log.error(
+                        f"[{delivery_id}] Companion thread crashed for "
+                        f"{repo_full}#{pr_number}: {e}\n{traceback.format_exc()}"
+                    )
+
             t = Thread(
-                target=companion.run_for_pr,
+                target=_safe_run_for_pr,
                 args=(
                     installation_id,
                     owner,
