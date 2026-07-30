@@ -1,19 +1,22 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/Riptide-Two%20Bots-1f6feb?style=flat" alt="Riptide" />
+  <img src="https://img.shields.io/badge/Riptide-Three%20Bots-1f6feb?style=flat" alt="Riptide" />
 </p>
 
-# Riptide — Self-Hosted GitHub App (Two Bots)
+# Riptide — Self-Hosted GitHub App (Three Bots)
 
-AI-powered code review that runs in your infrastructure. Two bots, zero bloat.
+https://excalidraw.com/#json=xGk0JJ9K3Fj3w-jrNM1kw,iEepj-mogls0LeSUBi03JA
+
+AI-powered code review that runs in your infrastructure. Three bots, zero bloat.
 
 **Bot 1 — Companion:** Posts TL;DR comments on PRs with graphify-informed blast radius.
 **Bot 2 — Riptide Review:** Deep-think autonomous code review for large, settled PRs.
+**Bot 3 — Proofshotter:** Visual verification via Playwright captures on UI changes.
 
 ---
 
 ## Architecture
 
-```
+```text
 GitHub Webhook
   → FastAPI /webhook/github (verify signature, route event)
       → Companion thread (TL;DR + graphify blast radius)
@@ -23,6 +26,11 @@ Cron (every 15 min)
   → riptide/deepthink.py (poll open PRs, filter by LOC + staleness)
   → Hermes cron session (deep-think + graphify analysis)
   → GitHub API (post review comment)
+
+Cron (every 10 min)
+  → riptide/proofshotter.py (poll open PRs for UI changes)
+  → Playwright captures on dev instance
+  → GitHub API (post visual evidence comment)
 ```
 
 ---
@@ -60,11 +68,17 @@ makes it even cooler.
 `@riptide-bot companion skip` to opt out</sub>
 ```
 
-### Skip/Resume Per PR
-```
-@riptide-bot companion skip     # Stop commenting on this PR
-@riptide-bot companion resume   # Re-enable
-```
+### Commands
+
+Reply to any PR comment with `@riptide-bot`:
+
+| Command | Effect | Bot |
+|---------|--------|-----|
+| `@riptide-bot review` | Trigger deep-think review now | Bot 2 |
+| `@riptide-bot full review` | Same (alias) | Bot 2 |
+| `@riptide-bot deepthink` | Same (alias) | Bot 2 |
+| `@riptide-bot companion skip` | Stop companion TLDR on this PR | Bot 1 |
+| `@riptide-bot companion resume` | Re-enable companion TLDR | Bot 1 |
 
 ---
 
@@ -89,6 +103,22 @@ The deep-think loop:
 
 ---
 
+## Bot 3: Proofshotter (Cron-Triggered)
+
+Visual verification for UI changes. Runs every 10 minutes.
+
+```yaml
+Trigger: Cron polling (every 10 min)
+Filter:  UI files changed + not draft + stale 5+ min
+Output:  PR comment with GIF + screenshots of UI changes
+Config:  proofshot.config.json (optional — defaults to localhost:8788)
+```
+
+Proofshotter captures screenshots of the dev instance (default http://localhost:8788)
+and posts them as visual evidence on the PR. Requires Playwright installed on the host.
+
+---
+
 ## Repo Structure
 
 ```
@@ -97,6 +127,7 @@ riptide/
 │   ├── github_app.py      # JWT auth, GitHub API client
 │   ├── companion.py       # Bot 1: TL;DR + ELI5 + ProofShot comment generator
 │   ├── deepthink.py       # Bot 2: Cron polling + Hermes session spawner
+│   ├── proofshotter.py    # Bot 3: Cron-polled visual verification
 │   ├── webhook.py         # FastAPI server (companion trigger, installation sync)
 │   └── __init__.py
 ├── server.py              # Uvicorn entry point
@@ -218,7 +249,8 @@ GET /health
 | Event | Action | Output |
 |-------|--------|--------|
 | `pull_request` opened/reopened/synchronize | Companion TLDR | TL;DR comment |
-| `issue_comment` (@riptide-bot companion skip/resume) | Control companion | Confirmation reply |
+| `issue_comment` `@riptide-bot companion skip/resume` | Control companion | Confirmation reply |
+| `issue_comment` `@riptide-bot review` / `full review` / `deepthink` | Trigger Bot 2 deep-think | Confirmation reply |
 | `installation` created/deleted | Sync repo list | Metadata DB updated |
 
 ---
@@ -257,6 +289,28 @@ body = json.dumps(payload)
 sig = 'sha256=' + hmac.new(b'secret', body.encode(), hashlib.sha256).hexdigest()
 requests.post('http://localhost:8477/webhook/github', data=body, headers={'X-Hub-Signature-256': sig, 'X-GitHub-Event': 'pull_request'})
 "
+```
+
+---
+
+## Local Test
+
+```bash
+# Run unit tests
+source .env 2>/dev/null  # optional — tests with no-op fallback
+python3 -m pytest riptide/tests/ -v
+
+# Manual webhook smoke-test
+python3 -c "
+import requests, json, hmac, hashlib
+payload = {'action': 'opened', 'number': 1, 'pull_request': {'title': 'test', 'user': {'login': 'test'}, 'head': {'sha': 'abc'}},'repository': {'full_name': 'owner/repo', 'name': 'repo'}, 'installation': {'id': 123}}
+body = json.dumps(payload)
+sig = 'sha256=' + hmac.new(b'secret', body.encode(), hashlib.sha256).hexdigest()
+requests.post('http://localhost:8477/webhook/github', data=body, headers={'X-Hub-Signature-256': sig, 'X-GitHub-Event': 'pull_request'})
+"
+
+# Server health check (requires running service)
+curl -s http://localhost:8477/health
 ```
 
 ---

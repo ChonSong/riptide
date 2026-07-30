@@ -6,17 +6,18 @@ __pycache__/
 node_modules/
 *.egg-info/
 .pytest_cache/
-# Octopus artifacts (not part of Riptide)
-AGENTS.md
-CHANGELOG.md
-CODE_OF_CONDUCT.md
-CONTRIBUTING.md
-GOVERNANCE.md
-LICENSE.md
-MAINTAINERS.md
-ROADMAP.md
-SECURITY.md
-SUPPORT.md
+# Octopus artifacts (not part of Riptide) — keep uncommented to suppress
+# IDE noise, but re-add to git for AgentLint compliance with -f
+# AGENTS.md
+# CHANGELOG.md
+# CODE_OF_CONDUCT.md
+# CONTRIBUTING.md
+# GOVERNANCE.md
+# LICENSE.md
+# MAINTAINERS.md
+# ROADMAP.md
+# SECURITY.md
+# SUPPORT.md
 bun.lock
 docker-compose.build.yml
 docker-compose.ollama.yml
@@ -30,5 +31,6 @@ turbo.json
 .octopusignore
 .github/
 .dockerignore
-# Generated graphify artifacts
-graphify-out/
+# Generated graphify artifacts — cache dir contains AST analyses that
+# embed absolute source paths; keep only the manifest/report level.
+graphify-out/cache/

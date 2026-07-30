@@ -158,7 +158,7 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
 
 
 async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
-    """Handle issue_comment events — companion skip/resume commands."""
+    """Handle issue_comment events — companion skip/resume and on-demand review commands."""
     action = payload.get("action", "")
     if action != "created":
         return Response(status_code=200)
@@ -168,6 +168,7 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
     issue = payload.get("issue", {})
     repo = payload.get("repository", {})
     installation = payload.get("installation", {})
+    installation_id = installation.get("id")
 
     # Skip own comments (posted by the bot)
     via_app = comment.get("performed_via_github_app") or {}
@@ -182,14 +183,8 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
             log.info(f"[{delivery_id}] Skipping own bot comment: {bot_login}")
             return Response(status_code=200)
 
-    # Only handle companion skip/resume commands
     is_pr = bool(issue.get("pull_request"))
     if not is_pr:
-        return Response(status_code=200)
-
-    # Check for companion command
-    companion = get_companion()
-    if not companion:
         return Response(status_code=200)
 
     owner = repo.get("full_name", "").split("/")[0] if repo.get("full_name") else ""
@@ -197,18 +192,41 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
     pr_number = issue.get("number")
     commenter = comment.get("user", {}).get("login", "unknown")
 
-    result = companion.handle_comment(
-        None, owner, repo_name, pr_number, body, commenter
-    )
-    if result:
-        installation_id = installation.get("id")
-        if installation_id:
+    # Route 1: Companion skip/resume commands
+    companion = get_companion()
+    if companion:
+        result = companion.handle_comment(
+            installation_id, owner, repo_name, pr_number, body, commenter
+        )
+        if result:
+            if installation_id:
+                try:
+                    github_client().post_pr_comment(
+                        installation_id, owner, repo_name, pr_number, result
+                    )
+                except Exception as e:
+                    log.warning(f"[{delivery_id}] Could not post companion reply: {e}")
+            return Response(status_code=200)
+
+    # Route 2: On-demand review command (@riptide-bot review / deepthink / full review)
+    if installation_id and body and "@riptide-bot" in body.lower():
+        from riptide.deepthink import REVIEW_RE, handle_review_command
+
+        if REVIEW_RE.search(body):
+            log.info(
+                f"[{delivery_id}] Review command on {owner}/{repo_name}#{pr_number} by {commenter}"
+            )
             try:
-                github_client().post_pr_comment(
-                    installation_id, owner, repo_name, pr_number, result
+                client = github_client()
+                result = handle_review_command(
+                    client, installation_id, owner, repo_name, pr_number, commenter
                 )
+                if result:
+                    client.post_pr_comment(
+                        installation_id, owner, repo_name, pr_number, result
+                    )
             except Exception as e:
-                log.warning(f"[{delivery_id}] Could not post companion reply: {e}")
+                log.error(f"[{delivery_id}] Review command failed: {e}")
 
     return Response(status_code=200)
 
