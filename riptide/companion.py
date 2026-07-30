@@ -257,6 +257,29 @@ class Companion:
             logger.info("Skipped (user) %s#%d", full_name, pr_number)
             return
 
+        # Refresh graphify data before analyzing — cheap AST-only update
+        if self.enable_graphify:
+            try:
+                import subprocess
+                from pathlib import Path
+                repo_workspace = Path.home() / "workspace" / repo
+                if repo_workspace.is_dir() and (repo_workspace / "graphify-out").is_dir():
+                    result = subprocess.run(
+                        ["graphify", "update", "."],
+                        capture_output=True, text=True, timeout=30,
+                        cwd=str(repo_workspace),
+                    )
+                    if result.returncode == 0:
+                        logger.info("Graphify updated for %s", repo)
+                    else:
+                        logger.warning("Graphify update stderr for %s: %s", repo, result.stderr[:200])
+                else:
+                    logger.debug("No graphify-out dir at %s — skipping update", repo_workspace)
+            except FileNotFoundError:
+                logger.debug("graphify binary not found — skipping update")
+            except Exception as e:
+                logger.warning("Graphify update failed for %s: %s", repo, e)
+
         # Attempt to fetch current PR head SHA for change tracking
         current_sha = None
         try:
