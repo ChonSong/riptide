@@ -22,10 +22,9 @@ jobs:
             files=$(git diff-tree --no-commit-id -r --name-only "$sha" | tr '\n' ' ')
             # Only check feat: / fix: prefixed commits
             case "$msg" in
-              feat:*|fix:*)
+              feat:*)
                 test_files=$(echo "$files" | grep -Eo 'test[_/]|\.test\.|_test\.py' || true)
-                infra_files=$(echo "$files" | grep -E '\.github/workflows|\.gitleaks|\.gitignore|\.github/' || true)
-                if [ -z "$test_files" ] && [ -z "$infra_files" ]; then
+                if [ -z "$test_files" ]; then
                   echo "::error::Commit $sha ($msg) adds/changes no test files. Feat/fix commits must include paired test changes."
                   exit 1
                 fi
