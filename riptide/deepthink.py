@@ -21,6 +21,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
@@ -149,8 +150,15 @@ def _spawn_deepthink(
     pr_author: str,
     total_loc: int,
     head_sha: str,
-):
-    """Spawn a Hermes cron session for deep-think review on this PR."""
+) -> bool:
+    """Spawn a Hermes cron session for deep-think review on this PR.
+
+    Retries up to 3 times with exponential backoff (5s/15s/30s).
+    Only records state on successful spawn.
+    Returns True if spawned successfully, False otherwise.
+    """
+    max_retries = 3
+    base_delay = 5  # seconds
     name = f"riptide-review-{owner}-{repo}-{pr_number}"
     run_at = (datetime.now() + timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%S")
 
@@ -187,12 +195,12 @@ def _spawn_deepthink(
         f"```\n\n"
         f"**To post an inline comment:**\n"
         f"```\n"
-        f"gh api repos/{owner}/{repo}/pulls/{pr_number}/comments \\\n"
-        f"  --method POST \\\n"
-        f"  -f body='**severity:** explanation here\\n\\n```suggestion\\nproposed code here\\n```' \\\n"
-        f"  -f commit_id='{head_sha}' \\\n"
-        f"  -f path='<file_path>' \\\n"
-        f"  -F line=<line_number> \\\n"
+        f"gh api repos/{owner}/{repo}/pulls/{pr_number}/comments \\\\\n"
+        f"  --method POST \\\\\n"
+        f"  -f body='**🔴 Critical:** explanation here\\\\n```suggestion\\\\nproposed code here\\\\n```' \\\\\n"
+        f"  -f commit_id='{head_sha}' \\\\\n"
+        f"  -f path='<file_path>' \\\\\n"
+        f"  -F line=<line_number> \\\\\n"
         f"  -f side='RIGHT'\n"
         f"```\n\n"
         f"**How to calculate line numbers:**\n"
@@ -298,19 +306,34 @@ def _spawn_deepthink(
         "--deliver", "origin",
     ]
 
-    log.info(f"Spawning: hermes cron create {run_at} --name {name} ...")
-    try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=15
-        )
-        if result.returncode == 0:
-            log.info(f"✓ Spawned deep-think for {owner}/{repo}#{pr_number}: {result.stdout[:200]}")
-        else:
-            log.error(f"✗ Spawn failed for {owner}/{repo}#{pr_number}: {result.stderr[:300]}")
-    except subprocess.TimeoutExpired:
-        log.warning(f"Timeout spawning deep-think for {owner}/{repo}#{pr_number}")
-    except Exception as e:
-        log.error(f"Error spawning deep-think: {e}")
+    for attempt in range(max_retries):
+        if attempt > 0:
+            delay = base_delay * (2 ** attempt)  # 5s, 10s, 20s
+            log.info(f"Retry {attempt+1}/{max_retries} for {owner}/{repo}#{pr_number} in {delay}s...")
+            time.sleep(delay)
+
+        # Check hermes availability before each attempt
+        if not _is_cron_available():
+            log.warning(f"hermes not available on attempt {attempt+1} for {owner}/{repo}#{pr_number}")
+            continue
+
+        log.info(f"Spawning: hermes cron create {run_at} --name {name} (attempt {attempt+1})")
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=15
+            )
+            if result.returncode == 0:
+                log.info(f"✓ Spawned deep-think for {owner}/{repo}#{pr_number}: {result.stdout[:200]}")
+                return True
+            else:
+                log.error(f"✗ Spawn failed (attempt {attempt+1}): {result.stderr[:300]}")
+        except subprocess.TimeoutExpired:
+            log.warning(f"Timeout spawning deep-think (attempt {attempt+1})")
+        except Exception as e:
+            log.error(f"Error spawning deep-think (attempt {attempt+1}): {e}")
+
+    log.error(f"All {max_retries} attempts failed for {owner}/{repo}#{pr_number}")
+    return False
 
 
 def run():
@@ -399,12 +422,13 @@ def run():
                 f"  #{pr_number} TRIGGER — {total_loc} LOC changed, "
                 f"stale since {updated_at_str}, SHA={head_sha[:12]}"
             )
-            _spawn_deepthink(owner, repo_name, pr_number, pr_title, pr_author, total_loc, head_sha)
-
-            # Record dedup immediately to prevent double-spawn
-            state[pr_key] = {"head_sha": head_sha, "reviewed_at": datetime.now(timezone.utc).isoformat()}
-            _save_state(state)
-            triggered += 1
+            if _spawn_deepthink(owner, repo_name, pr_number, pr_title, pr_author, total_loc, head_sha):
+                # Record dedup only on successful spawn
+                state[pr_key] = {"head_sha": head_sha, "reviewed_at": datetime.now(timezone.utc).isoformat()}
+                _save_state(state)
+                triggered += 1
+            else:
+                log.warning(f"  #{pr_number} spawn failed after retries — not recording state")
 
     # Summary
     log.info(
