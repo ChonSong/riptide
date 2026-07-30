@@ -293,6 +293,28 @@ requests.post('http://localhost:8477/webhook/github', data=body, headers={'X-Hub
 
 ---
 
+## Local Test
+
+```bash
+# Run unit tests
+source .env 2>/dev/null  # optional — tests with no-op fallback
+python3 -m pytest riptide/tests/ -v
+
+# Manual webhook smoke-test
+python3 -c "
+import requests, json, hmac, hashlib
+payload = {'action': 'opened', 'number': 1, 'pull_request': {'title': 'test', 'user': {'login': 'test'}, 'head': {'sha': 'abc'}},'repository': {'full_name': 'owner/repo', 'name': 'repo'}, 'installation': {'id': 123}}
+body = json.dumps(payload)
+sig = 'sha256=' + hmac.new(b'secret', body.encode(), hashlib.sha256).hexdigest()
+requests.post('http://localhost:8477/webhook/github', data=body, headers={'X-Hub-Signature-256': sig, 'X-GitHub-Event': 'pull_request'})
+"
+
+# Server health check (requires running service)
+curl -s http://localhost:8477/health
+```
+
+---
+
 ## License
 
 Modified MIT — see [LICENSE.md](LICENSE.md).
