@@ -7,6 +7,9 @@ Polls open PRs and spawns Hermes deep-think sessions when:
   2. PR hasn't been updated in >= 30 minutes (settled)
   3. Either we own the repo (ChonSong org) OR we authored the PR
 
+Also handles on-demand @riptide-bot review commands via handle_review_command(),
+called directly from webhook.py when a user comments @riptide-bot review on a PR.
+
 Dedup: tracks pr_number + head_sha to avoid re-spawning on the same revision.
 Uses `gh` CLI (already authenticated as ChonSong) for all GitHub queries.
 """
@@ -15,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone, timedelta
@@ -28,6 +32,8 @@ logging.basicConfig(
 log = logging.getLogger("riptide.deepthink")
 
 # ── Config ───────────────────────────────────────────────────────────────────
+
+REVIEW_RE = re.compile(r"@riptide-bot\s+(review|deepthink|full\s*review)", re.IGNORECASE)
 
 WATCHED_REPOS = [
     r.strip()
@@ -76,6 +82,55 @@ def _was_reviewed_today(owner: str, repo: str, pr_number: int) -> bool:
         return (datetime.now(timezone.utc) - reviewed_time) < timedelta(hours=24)
     except (ValueError, TypeError):
         return False
+
+
+def handle_review_command(
+    client,
+    installation_id: int,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    commenter: str,
+) -> str | None:
+    """Handle @riptide-bot review command — spawn an on-demand deep-think review.
+
+    Called from webhook.py when a user comments @riptide-bot review on a PR.
+    Fetches PR details via GitHub API client, spawns the deep-think session,
+    and returns a user-facing confirmation message (or error message).
+    """
+    try:
+        pr_details = client.get_pr_details(installation_id, owner, repo, pr_number)
+    except Exception as e:
+        log.warning("Failed to fetch PR details for review: %s", e)
+        return (
+            f"⚠️ Could not fetch PR #{pr_number} details ({e}). "
+            f"Make sure the PR exists and the app is installed."
+        )
+
+    title = pr_details.get("title", f"PR #{pr_number}")
+    author = pr_details.get("user", {}).get("login", "unknown")
+    additions = pr_details.get("additions", 0)
+    deletions = pr_details.get("deletions", 0)
+    total_loc = additions + deletions
+    head_sha = pr_details.get("head", {}).get("sha", "")
+
+    try:
+        _spawn_deepthink(owner, repo, pr_number, title, author, total_loc, head_sha)
+    except Exception as e:
+        log.error("Failed to spawn deep-think: %s", e)
+        return f"⚠️ Failed to spawn deep-think review for #{pr_number}: {e}"
+
+    log.info("On-demand review spawned for %s/%s#%d by %s", owner, repo, pr_number, commenter)
+    return (
+        f"🧠 **Riptide Review triggered for #{pr_number}!**\n\n"
+        f"A Hermes deep-think session has been scheduled and will begin within 2 minutes. "
+        f"The review will analyze the full diff, run graphify blast-radius analysis, "
+        f"post inline suggestions, and generate an Excalidraw architecture diagram.\n\n"
+        f"**PR:** {title}\n"
+        f"**Author:** @{author}\n"
+        f"**Changes:** +{additions}/-{deletions} ({total_loc} LOC)\n"
+        f"**Commit:** `{head_sha[:12]}`"
+    )
 
 
 def _is_cron_available() -> bool:
@@ -132,12 +187,12 @@ def _spawn_deepthink(
         f"```\n\n"
         f"**To post an inline comment:**\n"
         f"```\n"
-        f"gh api repos/{owner}/{repo}/pulls/{pr_number}/comments \\\\\n"
-        f"  --method POST \\\\\n"
-        f"  -f body='**🔴 Critical:** explanation here\\n\\n```suggestion\\nproposed code here\\n```' \\\\\n"
-        f"  -f commit_id='{head_sha}' \\\\\n"
-        f"  -f path='<file_path>' \\\\\n"
-        f"  -F line=<line_number> \\\\\n"
+        f"gh api repos/{owner}/{repo}/pulls/{pr_number}/comments \\\n"
+        f"  --method POST \\\n"
+        f"  -f body='**severity:** explanation here\\n\\n```suggestion\\nproposed code here\\n```' \\\n"
+        f"  -f commit_id='{head_sha}' \\\n"
+        f"  -f path='<file_path>' \\\n"
+        f"  -F line=<line_number> \\\n"
         f"  -f side='RIGHT'\n"
         f"```\n\n"
         f"**How to calculate line numbers:**\n"
@@ -149,43 +204,71 @@ def _spawn_deepthink(
         f"proposed replacement code\n"
         f"```\n"
         f"Prepend a severity marker before the suggestion:\n"
-        f"- `**🔴 Critical:**` — definite bug, security issue, data loss risk\n"
-        f"- `**🟡 Warning:**` — potential issue, performance concern, code smell\n"
-        f"- `**ℹ️ Suggestion:**` — style improvement, minor refactor, nitpick\n\n"
+        f"- `**CRITICAL:**` — definite bug, security issue, data loss risk\n"
+        f"- `**WARNING:**` — potential issue, performance concern, code smell\n"
+        f"- `**SUGGESTION:**` — style improvement, minor refactor, nitpick\n\n"
         f"Post inline comments for substantive findings only (1-3 per PR maximum). "
         f"Focus on real issues — do not comment on every line or nitpick style.\n\n"
-        f"### Step 4: Generate Excalidraw Diagram with Decision Colors\n"
+        f"### Step 4: Generate Excalidraw Diagram\n"
         f"After all inline review comments are posted, generate an Excalidraw diagram "
-        f"visualizing your findings. Use this Python script:\n\n"
+        f"visualizing your findings using the **excalidraw_renderer** module.\n\n"
+        f"The diagram is a flowing narrative: Codebase Landscape (all modules with PR files "
+        f"highlighted) -> PR Scope -> Graphify Analysis (god nodes + communities) -> "
+        f"Code Chunks with WHY -> Human-Readable Narrative -> Findings with Severity -> "
+        f"Suggested Changes -> Legend. All sections connected by arrows.\n\n"
         f"```python\n"
-        f"import json\n"
-        f"from pathlib import Path\n\n"
-        f"elements = [\n"
-        f"    # Title\n"
-        f"    dict(type='text', id='t', x=300, y=20, width=600, height=40,\n"
-        f"         text='PR Review: {pr_title[:50]}', fontSize=20, fontFamily=1,\n"
-        f"         strokeColor='#1e1e1e', textAlign='center', originalText='PR Review'),\n"
-        f"]\n\n"
-        f"# Color-code by severity:\n"
-        f"# Critical = #ef4444 (red), Warning = #fbbf24 (amber), Suggestion = #22d3ee (cyan), Approve = #34d399 (green)\n"
-        f"color = '#22d3ee'  # change based on your findings\n"
-        f"elements.append(dict(type='rectangle', id='r1', x=200, y=100, width=400, height=80,\n"
-        f"     roundness=dict(type=3), backgroundColor=color, fillStyle='solid',\n"
-        f"     boundElements=[dict(id='t1', type='text')]))\n"
-        f"elements.append(dict(type='text', id='t1', x=210, y=110, width=380, height=60,\n"
-        f"     text='Your review summary here (ELI5 pseudocode)', fontSize=12, fontFamily=1,\n"
-        f"     strokeColor='#1e1e1e', textAlign='left', verticalAlign='top',\n"
-        f"     originalText='Review summary', containerId='r1', autoResize=True))\n\n"
-        f"data = dict(type='excalidraw', version=2, source='riptide-review', elements=elements,\n"
-        f"            appState=dict(viewBackgroundColor='#ffffff'))\n"
-        f"Path('/tmp/review.excalidraw').write_text(json.dumps(data, indent=2))\n"
+        f"import sys\n"
+        f"sys.path.insert(0, '/home/sc/workspace')\n"
+        f"from riptide.grafiphy.excalidraw_renderer import render_review, upload_excalidraw\n"
+        f"\n"
+        f"findings = [\n"
+        f"    dict(severity='critical', title='...', detail='...', file='...', line=...),\n"
+        f"    dict(severity='warning', title='...', detail='...', file='...'),\n"
+        f"]\n"
+        f"\n"
+        f"graph_data = dict(\n"
+        f"    god_nodes=[dict(name=..., edges=..., why=...)],\n"
+        f"    communities=[dict(name=..., members=[...], why=...)],\n"
+        f")\n"
+        f"\n"
+        f"# NEW: Collect full repo graph for codebase landscape\n"
+        f"repo_graph = [\n"
+        f"    dict(name='routes.py', type='module', file='api/routes.py', why='HTTP routing'),\n"
+        f"    dict(name='models.py', type='module', file='api/models.py', why='Core data models'),\n"
+        f"]\n"
+        f"\n"
+        f"# NEW: Suggestions from inline review comments (Bot 2)\n"
+        f"suggestions = [\n"
+        f"    dict(file='api/draft.py', line=42, old_code='old', new_code='new',\n"
+        f"         severity='critical', reasoning='Avoids null pointer'),\n"
+        f"]\n"
+        f"\n"
+        f"# NEW: Distance map for network-radius layout\n"
+        f"distance_map = {{\n"
+        f"    'companion.py': dict(hops=0, relation='epicenter', community='github_webhook', degree=0),\n"
+        f"    'webhook.py': dict(hops=1, relation='affected by companion.py', community='github_webhook', degree=8),\n"
+        f"}}\n"
+        f"\n"
+        f"url = upload_excalidraw(\n"
+        f"    render_review(\n"
+        f"        pr_data=dict(number={pr_number}, title=\"{pr_title[:50]}\",\n"
+        f"                    repo=\"{owner}/{repo}\", loc={total_loc}),\n"
+        f"        findings=findings,\n"
+        f"        graph_data=graph_data,\n"
+        f"        repo_graph=repo_graph,     # NEW: landscape view\n"
+        f"        suggestions=suggestions,   # NEW: suggestion blocks\n"
+        f"        distance_map=distance_map, # NEW: distance-radius layout\n"
+        f"        output_path='/tmp/review.excalidraw',\n"
+        f"    )\n"
+        f")\n"
+        f"print(f'Excalidraw: {url}')\n"
         f"```\n\n"
-        f"Upload the diagram to excalidraw.com using this command:\n"
-        f"```\n"
-        f"python3 ~/workspace/riptide/scripts/upload_excalidraw.py /tmp/review.excalidraw\n"
-        f"```\n"
-        f"This returns a link like `https://excalidraw.com/#json=...` that opens directly in the browser.\n"
-        f"Include this link in your summary — NOT a Gist link.\n\n"
+        f"The renderer creates 9 connected sections: distance-radius network map (nodes arranged "
+        f"by network distance from PR changes), codebase landscape (all modules with "
+        f"PR files highlighted), PR scope, graphify analysis (god nodes + communities with WHY), "
+        f"code chunks with detailed WHY, human-readable narrative, findings with severity colors, "
+        f"suggested changes (code diffs), and legend.\n"
+        f"Include the returned URL in your summary.\n\n"
         f"### Step 5: Post Summary Review\n"
         f"After posting all inline comments and generating the Excalidraw, post a **summary review**:\n"
         f"`gh pr comment {pr_number} --repo {owner}/{repo} --body '<review>'`\n\n"
@@ -200,7 +283,7 @@ def _spawn_deepthink(
         f"**Sign-off**: End your summary with:\n"
         f"```\n"
         f"---\n"
-        f"<sub>🤖 Riptide Review via Hermes · model: `hermes` (LongCat-2.0)</sub>\n"
+        f"<sub>Riptide Review via Hermes</sub>\n"
         f"```\n\n"
         f"REPO PATH: ~/workspace/{repo}/\n"
     )
@@ -305,7 +388,7 @@ def run():
                 log.info(f"  #{pr_number} skip — already processed (SHA {head_sha[:12]})")
                 skipped_dedup += 1
                 continue
-            
+
             if _was_reviewed_today(owner, repo_name, pr_number):
                 log.info(f"  #{pr_number} skip — reviewed in last 24h")
                 skipped_dedup += 1

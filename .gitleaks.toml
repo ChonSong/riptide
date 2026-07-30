@@ -1,0 +1,10 @@
+title = "Riptide gitleaks config"
+
+[allowlist]
+description = "Known test/sample values that are not real secrets"
+regexes = [
+  # Example/dummy secrets used in CI builds or templates
+  "(?i)dummy",
+  "(?i)example.*secret",
+  "(?i)build-time-dummy-secret",
+]
