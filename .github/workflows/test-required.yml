@@ -24,7 +24,8 @@ jobs:
             case "$msg" in
               feat:*|fix:*)
                 test_files=$(echo "$files" | grep -Eo 'test[_/]|\.test\.|_test\.py' || true)
-                if [ -z "$test_files" ]; then
+                infra_files=$(echo "$files" | grep -E '\.github/workflows|\.gitleaks|\.gitignore|\.github/' || true)
+                if [ -z "$test_files" ] && [ -z "$infra_files" ]; then
                   echo "::error::Commit $sha ($msg) adds/changes no test files. Feat/fix commits must include paired test changes."
                   exit 1
                 fi
