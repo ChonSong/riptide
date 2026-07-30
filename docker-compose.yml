@@ -21,8 +21,8 @@ services:
 
 networks:
   infra-net:
-    external: true
     name: ${INFRA_NET:-infra-net}
+    driver: bridge
 
 volumes:
   riptide-data:
