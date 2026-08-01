@@ -9,10 +9,12 @@ Pipeline:
   5. Generate ELI5 via Ollama (or skip)
   6. Post comment with GIF reaction + model attribution
 
-Self-heal: if Ollama is unreachable after 3 retries (5s/30s/60s):
-  - Owned repo (ChonSong/*) → post degradation comment on the PR
-  - Unowned repo → send alert via Hermes Discord
+Self-heal: if Ollama is unreachable after 4 retries (5s/30s/60s):
+  - Owned repo (ChonSong/*) → post degradation comment on the PR (10 min cooldown)
+  - Unowned repo → send alert via Hermes Discord (10 min cooldown)
   - Always spawn a Hermes cron session to investigate (read-only)
+  - Global cooldown: max 1 alert per 10 min window across all PRs
+  - Per-PR cooldown: max 1 alert per PR per 10 min window
 """
 
 from __future__ import annotations
@@ -361,7 +363,9 @@ class Companion:
 
         data_dir = Path(os.environ.get("RIPTIDE_DATA_DIR", "/tmp/riptide"))
         self._skip_file = data_dir / "companion_skip.json"
+        self._alert_file = data_dir / "companion_alerts.json"
         self._skip_file.parent.mkdir(parents=True, exist_ok=True)
+        self._alert_lock = threading.Lock()
         self._skip_lock = threading.Lock()
 
         self._semaphore = threading.Semaphore(1)
@@ -376,6 +380,10 @@ class Companion:
                 self.allowed_repos = {r.strip() for r in raw.split(",") if r.strip()}
 
         self.enable_graphify = os.environ.get("COMPANION_ENABLE_GRAPHIFY", "1") == "1"
+
+        # Cooldown config
+        self._pr_alert_cooldown = 600   # 10 min per PR
+        self._global_alert_cooldown = 600  # 10 min global
 
         logger.info(
             "Companion initialised: model=%s repos=%s",
@@ -778,7 +786,11 @@ ELI5:"""
         return None
 
     def _handle_degradation(self, installation_id, owner, repo, pr_number, full_name):
-        """Self-heal: post degradation alert based on repo ownership."""
+        """Self-heal: post degradation alert based on repo ownership, with cooldowns."""
+        if not self._should_alert(full_name):
+            logger.info("Degradation alert suppressed (cooldown) for %s#%d", full_name, pr_number)
+            return
+
         is_owned = owner == "ChonSong"
         if is_owned:
             # Owned repo — post a comment on the PR
@@ -810,6 +822,41 @@ ELI5:"""
 
         # Spawn Hermes self-heal session (investigate + fix, no write/edit)
         self._spawn_self_heal(full_name, pr_number)
+
+    def _should_alert(self, full_name: str) -> bool:
+        """Check cooldowns before alerting. Returns True if alert should fire."""
+        now = time.time()
+        with self._alert_lock:
+            data = self._load_alerts()
+            # Global cooldown
+            last_global = data.get("_global", 0)
+            if now - last_global < self._global_alert_cooldown:
+                return False
+            # Per-PR cooldown
+            last_pr = data.get(full_name, 0)
+            if now - last_pr < self._pr_alert_cooldown:
+                return False
+            # Update timestamps
+            data["_global"] = now
+            data[full_name] = now
+            self._save_alerts(data)
+            return True
+
+    def _load_alerts(self) -> dict:
+        """Load alert cooldown timestamps."""
+        if not self._alert_file.exists():
+            return {}
+        try:
+            return json.loads(self._alert_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            return {}
+
+    def _save_alerts(self, data: dict):
+        """Save alert cooldown timestamps."""
+        try:
+            self._alert_file.write_text(json.dumps(data, indent=2))
+        except OSError as e:
+            logger.warning("Failed to save alert timestamps: %s", e)
 
     def _spawn_self_heal(self, full_name, pr_number):
         """Spawn a Hermes session to investigate the degradation (read-only)."""

@@ -5,6 +5,8 @@ Covers PR classification, UI detection, TL;DR generation, and Ollama edge cases.
 """
 
 import os
+import time
+import threading
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -20,6 +22,9 @@ def make_companion(tmp_path=None):
     client = MagicMock()
     with patch("threading.Thread"):
         companion = Companion(client)
+    if tmp_path:
+        companion._alert_file = tmp_path / "companion_alerts.json"
+        companion._alert_lock = threading.Lock()
     return companion
 
 
@@ -303,30 +308,77 @@ class TestHandleDegradation:
     def test_owned_repo_posts_comment(self):
         companion = make_companion()
         companion.client.post_pr_comment = MagicMock()
-        with patch.object(companion, "_spawn_self_heal"):
-            companion._handle_degradation(123, "ChonSong", "riptide", 42, "ChonSong/riptide")
-            companion.client.post_pr_comment.assert_called_once()
-            body = companion.client.post_pr_comment.call_args[0][4]
-            assert "⚠️" in body
-            assert "model offline" in body
+        with patch.object(companion, "_should_alert", return_value=True):
+            with patch.object(companion, "_spawn_self_heal"):
+                companion._handle_degradation(123, "ChonSong", "riptide", 42, "ChonSong/riptide")
+                companion.client.post_pr_comment.assert_called_once()
+                body = companion.client.post_pr_comment.call_args[0][4]
+                assert "⚠️" in body
+                assert "model offline" in body
 
     def test_unowned_repo_sends_discord(self):
         companion = make_companion()
-        with patch("subprocess.run") as mock_run:
-            with patch.object(companion, "_spawn_self_heal"):
-                companion._handle_degradation(123, "other", "repo", 42, "other/repo")
-                mock_run.assert_called_once()
-                cmd = mock_run.call_args[0][0]
-                assert "hermes" in cmd
-                assert "send" in cmd
-                assert "discord" in cmd
+        with patch.object(companion, "_should_alert", return_value=True):
+            with patch("subprocess.run") as mock_run:
+                with patch.object(companion, "_spawn_self_heal"):
+                    companion._handle_degradation(123, "other", "repo", 42, "other/repo")
+                    mock_run.assert_called_once()
+                    cmd = mock_run.call_args[0][0]
+                    assert "hermes" in cmd
+                    assert "send" in cmd
+                    assert "discord" in cmd
 
     def test_spawns_self_heal(self):
         companion = make_companion()
         companion.client.post_pr_comment = MagicMock()
-        with patch.object(companion, "_spawn_self_heal") as mock_heal:
-            companion._handle_degradation(123, "ChonSong", "riptide", 42, "ChonSong/riptide")
-            mock_heal.assert_called_once_with("ChonSong/riptide", 42)
+        with patch.object(companion, "_should_alert", return_value=True):
+            with patch.object(companion, "_spawn_self_heal") as mock_heal:
+                companion._handle_degradation(123, "ChonSong", "riptide", 42, "ChonSong/riptide")
+                mock_heal.assert_called_once_with("ChonSong/riptide", 42)
+
+    def test_cooldown_suppresses_alert(self):
+        companion = make_companion()
+        companion.client.post_pr_comment = MagicMock()
+        with patch.object(companion, "_should_alert", return_value=False):
+            with patch.object(companion, "_spawn_self_heal") as mock_heal:
+                companion._handle_degradation(123, "ChonSong", "riptide", 42, "ChonSong/riptide")
+                companion.client.post_pr_comment.assert_not_called()
+                mock_heal.assert_not_called()
+
+
+class TestShouldAlert:
+    """Tests for Companion._should_alert cooldown logic."""
+
+    def test_first_alert_allowed(self, tmp_path):
+        companion = make_companion(tmp_path)
+        assert companion._should_alert("ChonSong/riptide") is True
+
+    def test_second_alert_same_pr_suppressed(self, tmp_path):
+        companion = make_companion(tmp_path)
+        assert companion._should_alert("ChonSong/riptide") is True
+        assert companion._should_alert("ChonSong/riptide") is False
+
+    def test_different_pr_allowed_after_global_clears(self, tmp_path):
+        companion = make_companion(tmp_path)
+        companion._pr_alert_cooldown = 1  # 1 second for test
+        companion._global_alert_cooldown = 1
+        assert companion._should_alert("ChonSong/riptide") is True
+        # Same PR suppressed
+        assert companion._should_alert("ChonSong/riptide") is False
+        # Different PR also suppressed (global)
+        assert companion._should_alert("ChonSong/other") is False
+        # Wait for cooldown
+        time.sleep(1.1)
+        # Now allowed again
+        assert companion._should_alert("ChonSong/riptide") is True
+
+    def test_global_cooldown_blocks_all(self, tmp_path):
+        companion = make_companion(tmp_path)
+        companion._global_alert_cooldown = 600
+        companion._pr_alert_cooldown = 0  # no per-PR cooldown
+        assert companion._should_alert("ChonSong/riptide") is True
+        # Global blocks next PR
+        assert companion._should_alert("ChonSong/other") is False
 
 
 class TestSpawnSelfHeal:
