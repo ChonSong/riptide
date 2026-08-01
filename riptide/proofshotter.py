@@ -105,11 +105,11 @@ def _check_proofshot_config(owner: str, repo: str, pr_number: int, head_sha: str
 
 
 def _checkout_pr(owner: str, repo: str, pr_number: int) -> Optional[Path]:
-    """Clone and checkout the PR branch into /tmp/proofshot-pr-N/.
+    """Clone and checkout the PR branch into /tmp/proofshot-pr-{owner}-{repo}-N/.
 
     Returns the working directory Path on success, None on failure.
     """
-    work_dir = Path(f"/tmp/proofshot-pr-{pr_number}")
+    work_dir = Path(f"/tmp/proofshot-pr-{owner}-{repo}-{pr_number}")
     try:
         if not (work_dir / ".git").exists():
             work_dir.mkdir(parents=True, exist_ok=True)
@@ -453,7 +453,7 @@ def run():
 
             url = config.get("url", "http://localhost:8788")
             captures = config.get("captures", [])
-            output_dir = Path(f"/tmp/proofshot-pr-{pr_number}")
+            output_dir = Path(f"/tmp/proofshot-pr-{owner}-{repo_name}-{pr_number}")
             output_dir.mkdir(parents=True, exist_ok=True)
 
             result = _run_proofshot(pr_number, url, seed_path, output_dir, captures)
