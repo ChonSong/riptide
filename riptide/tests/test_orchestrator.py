@@ -150,6 +150,15 @@ class TestStateStore:
         assert failed == 1
         conn.close()
 
+    def test_create_job_duplicate_id_no_crash(self):
+        """Duplicate job_id must not crash — second call is a no-op."""
+        self.store.create_job("job-dup", 42, "t1")
+        self.store.create_job("job-dup", 42, "t1")  # must not raise
+        conn = sqlite3.connect(self.db_path)
+        count = conn.execute("SELECT COUNT(*) FROM jobs WHERE id='job-dup'").fetchone()[0]
+        assert count == 1
+        conn.close()
+
 
 class TestT0Orchestrator:
     """Test T0 orchestrator with both modes."""
