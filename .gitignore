@@ -34,3 +34,5 @@ turbo.json
 # Generated graphify artifacts — cache dir contains AST analyses that
 # embed absolute source paths; keep only the manifest/report level.
 graphify-out/cache/
+graphify-out/.graphify_*
+graphify-out/20*/

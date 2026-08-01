@@ -22,7 +22,7 @@ from fastapi import FastAPI, Request, Response, HTTPException
 from pydantic import BaseModel
 
 from .github_app import verify_webhook_signature, GitHubAppClient
-from .orchestrator import StateStore
+from .orchestrator import T0Orchestrator, TaskClassifier, StateStore
 
 # Companion is optional — silently unavailable if RIPTIDE_COMPANION_REPOS is unset
 _companion = None
@@ -156,39 +156,55 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
         f"[{delivery_id}] PR {action}: {repo_full}#{pr_number}"
     )
 
-    # PR opened/reopened/synchronize → companion TLDR
+    # PR opened/reopened/synchronize → T0 orchestrator review
     if action in ("opened", "reopened", "synchronize"):
         companion = get_companion()
+        github = github_client() if GITHUB_PRIVATE_KEY_PATH else None
         if companion and companion.is_active_for(owner, repo_name):
             from threading import Thread
 
-            def _safe_run_for_pr(*args, **kwargs):
-                """Run companion with fail-safe to prevent thread death from crashing server."""
+            def _safe_orchestrate(*args, **kwargs):
+                """Run T0 orchestrator with fail-safe."""
                 try:
-                    companion.run_for_pr(*args, **kwargs)
+                    orch = T0Orchestrator(companion=companion, github_client=github)
+                    orch.review_pr(*args, **kwargs)
                 except Exception as e:
                     log.error(
-                        f"[{delivery_id}] Companion thread crashed for "
+                        f"[{delivery_id}] Orchestrator crashed for "
                         f"{repo_full}#{pr_number}: {e}\n{traceback.format_exc()}"
                     )
 
+            # Fetch PR files + head SHA for classifier
+            files = []
+            head_sha = ""
+            if github:
+                try:
+                    files = github.get_pr_files(installation_id, owner, repo_name, pr_number)
+                    pr_detail = github.get_pr_details(installation_id, owner, repo_name, pr_number)
+                    head_sha = pr_detail.get("head", {}).get("sha", "")
+                except Exception as e:
+                    log.warning(f"[{delivery_id}] Could not fetch PR files: {e}")
+
+            total_loc = sum(f.get("additions", 0) + f.get("deletions", 0) for f in files)
+            profile = TaskClassifier().classify(
+                pr_number, owner, repo_name,
+                pr.get("title", f"PR #{pr_number}"),
+                pr.get("user", {}).get("login", "unknown"),
+                files, total_loc,
+                installation_id=installation_id,
+                head_sha=head_sha,
+            )
+
             t = Thread(
-                target=_safe_run_for_pr,
-                args=(
-                    installation_id,
-                    owner,
-                    repo_name,
-                    pr_number,
-                    pr.get("title", f"PR #{pr_number}"),
-                    pr.get("user", {}).get("login", "unknown"),
-                    [],  # changed_files will be fetched inside companion thread
-                ),
+                target=_safe_orchestrate,
+                args=(profile,),
+                kwargs={"mode": "parallel"},
                 daemon=True,
-                name=f"companion-{repo_name}-{pr_number}",
+                name=f"t0-{repo_name}-{pr_number}",
             )
             t.start()
             log.info(
-                f"[{delivery_id}] Companion thread spawned for {repo_full}#{pr_number}"
+                f"[{delivery_id}] T0 orchestrator spawned for {repo_full}#{pr_number}"
             )
 
     return Response(status_code=200)
