@@ -22,6 +22,7 @@ from fastapi import FastAPI, Request, Response, HTTPException
 from pydantic import BaseModel
 
 from .github_app import verify_webhook_signature, GitHubAppClient
+from .orchestrator import StateStore
 
 # Companion is optional — silently unavailable if RIPTIDE_COMPANION_REPOS is unset
 _companion = None
@@ -46,6 +47,18 @@ logging.basicConfig(
 log = logging.getLogger("riptide.webhook")
 
 app = FastAPI(title="Riptide Webhook Server")
+
+# ── State store (webhook idempotency) ──────────────────────────────────────
+_state_store = None
+
+
+def _get_state_store():
+    global _state_store
+    if _state_store is None:
+        _state_store = StateStore(
+            db_path=os.environ.get("RIPTIDE_STATE_DB", "/tmp/riptide_state.db")
+        )
+    return _state_store
 
 
 # ── Health check ────────────────────────────────────────────────────────────────
@@ -91,6 +104,11 @@ async def github_webhook(request: Request) -> Response:
     signature = request.headers.get("x-hub-signature-256", "")
     event = request.headers.get("x-github-event", "")
     delivery_id = request.headers.get("x-github-delivery", "unknown")
+
+    # Idempotency: drop duplicate deliveries before expensive processing
+    if not _get_state_store().reserve_delivery(delivery_id):
+        log.info(f"[{delivery_id}] Duplicate delivery dropped")
+        return Response(status_code=200)
 
     if not verify_webhook_signature(body, signature, WEBHOOK_SECRET):
         log.warning(f"[{delivery_id}] Invalid webhook signature from {request.client}")
