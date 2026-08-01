@@ -157,6 +157,13 @@ class TestT0Orchestrator:
     def setup_method(self):
         self.db_path = os.path.join(tempfile.mkdtemp(), "test.db")
         self.store = StateStore(db_path=self.db_path)
+        # Mock semaphore for tests (avoid blocking)
+        self._sem_patcher = patch("riptide.orchestrator._T0_SEMAPHORE")
+        self._mock_sem = self._sem_patcher.start()
+        self._mock_sem.acquire.return_value = True
+
+    def teardown_method(self):
+        self._sem_patcher.stop()
 
     def _make_profile(self, pr_number, files, total_loc, title="feat: test", ui_files=None):
         return TaskProfile(
