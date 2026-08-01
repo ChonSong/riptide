@@ -21,6 +21,7 @@ import re
 import subprocess
 import threading
 import time
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -48,26 +49,189 @@ EMOJI_MAP = {
 SKIP_RE = re.compile(r"@riptide-bot\s+companion\s+(skip|resume)", re.IGNORECASE)
 
 # ── GIFs ─────────────────────────────────────────────────────────────────────
-
-GIFI_MAP = {
-    "✨": "https://media.giphy.com/media/26tOZ42Mg6pbTUPHW/giphy.gif",  # sparkles
-    "🐛": "https://media.giphy.com/media/l0HlBO7eyXzSZkJri/giphy.gif",  # bug
-    "♻️": "https://media.giphy.com/media/26tn33aiTi1jkl6H6/giphy.gif",  # recycle/refactor
-    "🧹": "https://media.giphy.com/media/3DnDRfZe2ubQc/giphy.gif",    # cleaning
-    "🔧": "https://media.giphy.com/media/Y3kQOYHyVZcErGeMYF/giphy.gif",  # wrench/config
-    "📝": "https://media.giphy.com/media/13HgwGsXF0aiGY/giphy.gif",    # writing/docs
-    "📦": "https://media.giphy.com/media/3o6Zt6KHwTY5sxJZE/giphy.gif",  # package/deps
-    "🧪": "https://media.giphy.com/media/3o7TKSjRrfIPjeiYxW/giphy.gif",  # test
-    "⏪": "https://media.giphy.com/media/26tOZ42Mg6pbTUPHW/giphy.gif",  # rewind/revert
-    "⚡": "https://media.giphy.com/media/26tOZ42Mg6pbTUPHW/giphy.gif",  # lightning/perf
+# ── GIFs ─────────────────────────────────────────────────────────────────────
+# Curated GIF URLs per emoji. Each emoji has a primary + alternatives for variety.
+# Format: list of (giphy_id, description) tuples
+GIF_POOL = {
+    "✨": [
+        ("26tOZ42Mg6pbTUPHW", "sparkles"),
+        ("l46Cbqvg6gxGvh2PS", "stars"),
+        ("3o7TKSjRrfIPjeiYxW", "magic"),
+    ],
+    "🐛": [
+        ("l0HlBO7eyXzSZkJri", "bug"),
+        ("3o7TKMt12RVebpyZ0c", "bug fix"),
+        ("xT0xeJpnrWC4XWblEk", "debugging"),
+    ],
+    "♻️": [
+        ("26tn33aiTi1jkl6H6", "recycle"),
+        ("3o7qDEq2bMbcbPRQ2c", "refactor"),
+        ("l0HlNQ03J5JxX2rGU", "cleanup"),
+    ],
+    "🧹": [
+        ("3DnDRfZe2ubQc", "cleaning"),
+        ("l0HlBO7eyXzSZkJri", "sweep"),
+        ("3o7TKMt12RVebpyZ0c", "tidy"),
+    ],
+    "🔧": [
+        ("Y3kQOYHyVZcErGeMYF", "wrench"),
+        ("3o7qDEq2bMbcbPRQ2c", "tools"),
+        ("l46Cbqvg6gxGvh2PS", "mechanic"),
+    ],
+    "📝": [
+        ("13HgwGsXF0aiGY", "writing"),
+        ("3o7TKSjRrfIPjeiYxW", "notes"),
+        ("l0HlNQ03J5JxX2rGU", "documentation"),
+    ],
+    "📦": [
+        ("3o6Zt6KHwTY5sxJZE", "package"),
+        ("l46Cbqvg6gxGvh2PS", "delivery"),
+        ("3o7qDEq2bMbcbPRQ2c", "box"),
+    ],
+    "🧪": [
+        ("3o7TKSjRrfIPjeiYxW", "test"),
+        ("l0HlNQ03J5JxX2rGU", "science"),
+        ("26tOZ42Mg6pbTUPHW", "experiment"),
+    ],
+    "⏪": [
+        ("26tOZ42Mg6pbTUPHW", "rewind"),
+        ("3o7TKMt12RVebpyZ0c", "undo"),
+        ("l46Cbqvg6gxGvh2PS", "back"),
+    ],
+    "⚡": [
+        ("26tOZ42Mg6pbTUPHW", "lightning"),
+        ("3o7qDEq2bMbcbPRQ2c", "speed"),
+        ("l0HlBO7eyXzSZkJri", "fast"),
+    ],
 }
 
+# Legacy static map (kept for backward compatibility)
+GIFI_MAP = {emoji: f"https://media.giphy.com/media/{ids[0][0]}/giphy.gif" for emoji, ids in GIF_POOL.items()}
 
-def classify_pr_mood(title: str, changed_files: list[dict]) -> str:
+
+def select_gif(emoji: str, pr_title: str = "", changed_files: list[dict] = None) -> str:
+    """
+    Select a GIF URL based on PR mood and content.
+    
+    Uses Giphy API if GIPHY_API_KEY is set, otherwise falls back to curated pool.
+    Picks from alternatives based on PR title/content hash for variety.
+    """
+    # Try Giphy API if key is available
+    giphy_key = os.environ.get("GIPHY_API_KEY", "")
+    if giphy_key and pr_title:
+        try:
+            tag = _emoji_to_giphy_tag(emoji)
+            url = _search_giphy(tag, giphy_key)
+            if url:
+                return url
+        except Exception:
+            pass  # Fall through to static pool
+    
+    # Use curated pool with content-based selection
+    pool = GIF_POOL.get(emoji, GIF_POOL["✨"])
+    if pr_title and changed_files:
+        # Hash PR content to pick different GIFs for different PRs
+        content_hash = zlib.crc32((pr_title + str(len(changed_files))).encode())
+        idx = content_hash % len(pool)
+        gif_id = pool[idx][0]
+    else:
+        gif_id = pool[0][0]
+    
+    return f"https://media.giphy.com/media/{gif_id}/giphy.gif"
+
+
+def _emoji_to_giphy_tag(emoji: str) -> str:
+    """Map emoji to Giphy search tag."""
+    tag_map = {
+        "✨": "sparkle celebration",
+        "🐛": "bug fix",
+        "♻️": "refactor",
+        "🧹": "cleaning",
+        "🔧": "tools fix",
+        "📝": "writing notes",
+        "📦": "package delivery",
+        "🧪": "test science",
+        "⏪": "rewind undo",
+        "⚡": "lightning fast",
+    }
+    return tag_map.get(emoji, "reaction")
+
+
+def _search_giphy(tag: str, api_key: str, limit: int = 5) -> str | None:
+    """Search Giphy for a GIF matching the tag. Returns MP4 or GIF URL."""
+    import urllib.request
+    import urllib.parse
+    
+    encoded_tag = urllib.parse.quote(tag)
+    url = f"https://api.giphy.com/v1/gifs/search?api_key={api_key}&q={encoded_tag}&limit={limit}&rating=g"
+    
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read())
+    
+    results = data.get("data", [])
+    if not results:
+        return None
+    
+    # Pick based on deterministic hash of tag for variety (crc32, not hash())
+    idx = zlib.crc32(tag.encode()) % len(results)
+    images = results[idx].get("images", {})
+    # Prefer fixed_height GIF (smaller, consistent)
+    gif = images.get("fixed_height", images.get("original", {}))
+    return gif.get("url") or gif.get("mp4")
+
+
+def classify_pr_mood(title: str, changed_files: list[dict] | None = None) -> str:
+    """
+    Classify PR mood based on title keywords and changed file patterns.
+    
+    Analyzes both the PR title and the types of files changed to pick
+    the most appropriate emoji reaction.
+    """
     title_lower = title.lower()
+    
+    # Check title keywords first (explicit signals)
+    priority_keywords = ["revert", "rollback", "hotfix", "bugfix", "security"]
+    for keyword in priority_keywords:
+        if keyword in title_lower:
+            return EMOJI_MAP.get(keyword, "🐛")
+    
+    # Check file extensions for signals
+    if changed_files:
+        extensions = set()
+        for f in changed_files:
+            fname = f.get("filename", "")
+            if "." in fname:
+                extensions.add("." + fname.rsplit(".", 1)[-1])
+        
+        # Test files dominant
+        test_exts = {".test.", "_test.", ".spec.", "_spec.", "test_"}
+        test_files = [f for f in changed_files if
+            any(t in f.get("filename", "") for t in test_exts) or
+            "/tests/" in f.get("filename", "") or
+            "/test/" in f.get("filename", "") or
+            f.get("filename", "").split("/")[-1].startswith("test_") or
+            f.get("filename", "").split("/")[-1].startswith("spec_")]
+        if test_files and len(test_files) > len(changed_files) / 2:
+            return "🧪"
+        
+        # CSS/UI files dominant
+        ui_exts = {".css", ".scss", ".less", ".html", ".jsx", ".tsx", ".vue", ".svelte"}
+        ui_files = [f for f in changed_files if any(f.get("filename", "").endswith(ext) for ext in ui_exts)]
+        if ui_files and len(ui_files) > len(changed_files) / 2:
+            return "✨"  # Feature/UI work
+        
+        # Config/infra files
+        config_exts = {".yml", ".yaml", ".toml", ".json", ".ini", ".cfg"}
+        config_files = [f for f in changed_files if any(f.get("filename", "").endswith(ext) for ext in config_exts)]
+        if config_files and len(config_files) > len(changed_files) / 2:
+            return "🔧"
+    
+    # Fall back to title keyword matching
     for keyword, emoji in EMOJI_MAP.items():
         if keyword in title_lower:
             return emoji
+    
     return "✨"
 
 
@@ -302,7 +466,8 @@ class Companion:
         eli5 = self._generate_eli5(title, files, is_delta=is_delta)
 
         body = self._format_comment(emoji, author, tldr, graph_context, eli5, ui_files,
-                                    owner=owner, repo=repo, pr_number=pr_number, is_delta=is_delta)
+                                    owner=owner, repo=repo, pr_number=pr_number,
+                                    title=title, files=files, is_delta=is_delta)
 
         try:
             self.client.post_pr_comment(installation_id, owner, repo, pr_number, body)
@@ -509,7 +674,7 @@ ELI5:"""
             return None
 
     def _format_comment(self, emoji, author, tldr, graph_context, eli5=None, ui_files=None,
-                        owner=None, repo=None, pr_number=None, is_delta=False):
+                        owner=None, repo=None, pr_number=None, title=None, files=None, is_delta=False):
         """
         Build the Markdown comment body using the Phase 4 TLDR spec.
         Includes optional ELI5 (Explain Like I'm 5) section.
@@ -535,7 +700,7 @@ ELI5:"""
             parts.append(f"\n**📸 ProofShot Required**\nUI files changed: {ui_names}\nPlease run ProofShot visual verification before merging.")
 
         # GIF reaction
-        gif_url = GIFI_MAP.get(emoji, GIFI_MAP["✨"])
+        gif_url = select_gif(emoji, title or "", files or [])
         parts.append(f"\n\n![{emoji}]({gif_url})")
 
         # Bot 2 status footer
