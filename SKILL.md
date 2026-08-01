@@ -70,7 +70,7 @@ Visual verification for UI changes.
 **Trigger:** Cron polling every 10 min. Runs when:
   - UI files changed in PR
   - PR not draft
-  - PR stale for ≥5 minutes
+  - PR stale for ≥10 minutes
 
 **Output:** PR comment with GIF + screenshots of UI changes
 **Config:** `proofshot.config.json` (optional — defaults to `localhost:8788`)
