@@ -653,7 +653,7 @@ class T0Orchestrator:
         }
     
     def _post_comment(self, profile: TaskProfile, unified: dict):
-        """Post unified comment to PR with retry + validation."""
+        """Post unified comment to PR with retry."""
         if not self.github:
             log.warning("No github client, skipping comment post")
             return
@@ -661,14 +661,6 @@ class T0Orchestrator:
         body = unified.get("body", "")
         if not body:
             return
-        
-        # Validate review has required sections
-        from riptide.review_pipeline import validate_review
-        is_valid, missing = validate_review(body)
-        if not is_valid:
-            log.warning(f"Review missing required sections: {missing}")
-            # Add a note about missing sections
-            body += f"\n\n<!-- Review validation: missing sections: {', '.join(missing)} -->"
         
         for attempt in range(1, _MAX_COMMENT_RETRIES + 1):
             try:
