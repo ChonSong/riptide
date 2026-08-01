@@ -13,7 +13,9 @@ Riptide Review (Bot 2) runs via cron polling in deepthink.py — not here.
 """
 import os
 import json
+import time
 import logging
+import threading
 import traceback
 from pathlib import Path
 from typing import Optional
@@ -47,6 +49,30 @@ logging.basicConfig(
 log = logging.getLogger("riptide.webhook")
 
 app = FastAPI(title="Riptide Webhook Server")
+
+# ── Synchronize rate limiting ───────────────────────────────────────────────
+# Track last synchronize time per PR to avoid T0 flooding on frequent pushes
+_SYNCHRONIZE_TIMESTAMPS: dict[str, float] = {}
+_SYNCHRONIZE_LOCK = threading.Lock()
+_SYNCHRONIZE_MIN_INTERVAL = 60.0  # seconds between synchronize processing
+
+
+def _should_process_synchronize(owner: str, repo: str, pr_number: int) -> bool:
+    """Check if enough time has passed since the last synchronize for this PR."""
+    key = f"{owner}/{repo}#{pr_number}"
+    now = time.time()
+    with _SYNCHRONIZE_LOCK:
+        last_time = _SYNCHRONIZE_TIMESTAMPS.get(key, 0)
+        if now - last_time < _SYNCHRONIZE_MIN_INTERVAL:
+            return False
+        _SYNCHRONIZE_TIMESTAMPS[key] = now
+        # Clean old entries (simple GC)
+        if len(_SYNCHRONIZE_TIMESTAMPS) > 1000:
+            cutoff = now - 3600  # 1 hour
+            _SYNCHRONIZE_TIMESTAMPS = {
+                k: v for k, v in _SYNCHRONIZE_TIMESTAMPS.items() if v > cutoff
+            }
+        return True
 
 # ── State store (webhook idempotency) ──────────────────────────────────────
 _state_store = None
@@ -155,6 +181,12 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
     log.info(
         f"[{delivery_id}] PR {action}: {repo_full}#{pr_number}"
     )
+
+    # Rate limit: skip 'synchronize' if one happened recently for this PR
+    if action == "synchronize":
+        if not _should_process_synchronize(owner, repo_name, pr_number):
+            log.info(f"[{delivery_id}] synchronize rate-limited for {repo_full}#{pr_number}")
+            return Response(status_code=200)
 
     # PR opened/reopened/synchronize → T0 orchestrator review
     if action in ("opened", "reopened", "synchronize"):

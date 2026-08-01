@@ -11,21 +11,35 @@ Architecture:
   T1 = deepthink (Hermes cron, multi-file analysis) — on-demand via _spawn_deepthink
   T2 = companion quick summary (TL;DR for small PRs)
   T3 visual = proofshot (UI evidence capture)
-  T3 arch = excalidraw (architecture diagram)
+
+Concurrency:
+  - Class-level semaphore caps concurrent T0 reviews (default: 3)
+  - SQLite WAL mode for concurrent reads/writes
+  - Non-blocking T1 dispatch via asyncio.create_subprocess_exec
 """
 
 import os
 import time
 import sqlite3
+import asyncio
 import threading
 import logging
 import subprocess
 from pathlib import Path
 from typing import Optional
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
 log = logging.getLogger("riptide.orchestrator")
+
+# ── Concurrency limits ───────────────────────────────────────────────────────
+
+# Max concurrent T0 reviews (prevents Ollama flooding + thread explosion)
+_T0_SEMAPHORE = threading.Semaphore(int(os.environ.get("RIPTIDE_T0_MAX_CONCURRENT", "3")))
+# Max retries for posting a comment
+_MAX_COMMENT_RETRIES = 3
+# GitHub comment length limit
+_MAX_COMMENT_LENGTH = 60000
 
 
 # ── Task Classification ──────────────────────────────────────────────────────
@@ -140,7 +154,12 @@ class ResultValidator:
 # ── State Store ──────────────────────────────────────────────────────────────
 
 class StateStore:
-    """SQLite-backed state for tracking parallel job completion and dedup."""
+    """
+    SQLite-backed state for tracking parallel job completion and dedup.
+    
+    Uses WAL mode for concurrent reads/writes and a single shared connection
+    per thread to avoid "database is locked" errors.
+    """
     
     def __init__(self, db_path: str = "/tmp/riptide_state.db"):
         self.db_path = db_path
@@ -150,11 +169,14 @@ class StateStore:
     @property
     def _conn(self):
         if not hasattr(self._local, "conn"):
-            self._local.conn = sqlite3.connect(self.db_path)
+            self._local.conn = sqlite3.connect(self.db_path, timeout=30)
+            self._local.conn.execute("PRAGMA journal_mode=WAL")
+            self._local.conn.execute("PRAGMA busy_timeout=5000")
         return self._local.conn
     
     def _init_db(self):
         conn = sqlite3.connect(self.db_path)
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY,
@@ -176,7 +198,9 @@ class StateStore:
     
     def reserve_delivery(self, delivery_id: str) -> bool:
         """Try to reserve a delivery ID. Returns False if already processed."""
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         try:
             conn.execute(
                 "INSERT INTO deliveries (delivery_id, received_at) VALUES (?, ?)",
@@ -190,7 +214,9 @@ class StateStore:
             conn.close()
     
     def create_job(self, job_id: str, pr_number: int, tier: str):
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         try:
             conn.execute(
                 "INSERT INTO jobs (id, pr_number, tier, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
@@ -201,7 +227,9 @@ class StateStore:
             conn.close()
     
     def mark_complete(self, job_id: str):
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         try:
             conn.execute(
                 "UPDATE jobs SET status='complete', completed_at=? WHERE id=?",
@@ -212,7 +240,9 @@ class StateStore:
             conn.close()
     
     def mark_failed(self, job_id: str):
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         try:
             conn.execute(
                 "UPDATE jobs SET status='failed', completed_at=? WHERE id=?",
@@ -228,6 +258,10 @@ class StateStore:
 class T0Orchestrator:
     """
     Top-level dispatcher. Classifies PR and dispatches to review tiers.
+    
+    Concurrency:
+      - Class-level semaphore (_T0_SEMAPHORE) caps concurrent T0 reviews
+      - review_pr() acquires on entry, releases on exit
     
     Usage:
         orch = T0Orchestrator(companion=companion, github_client=github_client())
@@ -253,65 +287,84 @@ class T0Orchestrator:
         Returns:
             dict with unified review result
         """
-        log.info(f"T0 reviewing {profile.owner}/{profile.repo}#{profile.pr_number} (mode={mode})")
+        # Concurrency cap: wait if too many T0 reviews are running
+        acquired = _T0_SEMAPHORE.acquire(blocking=True, timeout=30)
+        if not acquired:
+            log.warning(f"T0 semaphore timeout for {profile.owner}/{profile.repo}#{profile.pr_number} — skipping")
+            return {"status": "skipped", "reason": "concurrency_limit"}
         
-        # T2 first — always generate TL;DR (quick, cheap)
-        t2_result = self._dispatch_t2(profile)
-        
-        if mode == "parallel":
-            results = self._parallel_review(profile, t2_result)
-        else:
-            results = self._serial_review(profile, t2_result)
-        
-        # Post unified comment
-        unified = self._synthesize(results, profile)
-        self._post_comment(profile, unified)
-        
-        return unified
+        try:
+            log.info(f"T0 reviewing {profile.owner}/{profile.repo}#{profile.pr_number} (mode={mode})")
+            
+            # T2 first — always generate TL;DR (quick, cheap)
+            t2_result = self._dispatch_t2(profile)
+            
+            if mode == "parallel":
+                results = self._parallel_review(profile, t2_result)
+            else:
+                results = self._serial_review(profile, t2_result)
+            
+            # Post unified comment
+            unified = self._synthesize(results, profile)
+            self._post_comment(profile, unified)
+            
+            return unified
+        finally:
+            _T0_SEMAPHORE.release()
     
     def _parallel_review(self, profile: TaskProfile, t2_result: dict) -> dict:
         """Dispatch T1 + T3 simultaneously (production)."""
         results = {"t2": t2_result}
         
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            future_to_tier = {}
-            
-            if profile.needs_t1:
-                job_id = f"{profile.pr_number}-t1"
-                self.state.create_job(job_id, profile.pr_number, "t1")
-                future = executor.submit(self._dispatch_t1, profile)
-                future_to_tier[future] = ("t1", job_id)
-            
-            if profile.needs_t3_visual:
-                job_id = f"{profile.pr_number}-t3-visual"
-                self.state.create_job(job_id, profile.pr_number, "t3_visual")
+        # T1 is non-blocking — dispatch without waiting
+        if profile.needs_t1:
+            job_id = f"{profile.pr_number}-t1"
+            self.state.create_job(job_id, profile.pr_number, "t1")
+            # Non-blocking: fire-and-forget via thread
+            t1_thread = threading.Thread(
+                target=self._dispatch_t1_async,
+                args=(profile, job_id),
+                daemon=True,
+                name=f"t1-{profile.pr_number}",
+            )
+            t1_thread.start()
+            results["t1"] = {"status": "dispatched", "tier": "t1", "body": "Deep review dispatched (async)"}
+        
+        # T3 visual can be slow — run in thread with timeout
+        if profile.needs_t3_visual:
+            job_id = f"{profile.pr_number}-t3-visual"
+            self.state.create_job(job_id, profile.pr_number, "t3_visual")
+            with ThreadPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(self._dispatch_t3_visual, profile)
-                future_to_tier[future] = ("t3_visual", job_id)
-            
-            if profile.needs_t3_arch:
-                job_id = f"{profile.pr_number}-t3-arch"
-                self.state.create_job(job_id, profile.pr_number, "t3_arch")
-                future = executor.submit(self._dispatch_t3_arch, profile)
-                future_to_tier[future] = ("t3_arch", job_id)
-            
-            # Wait with timeout
-            for future, (tier, job_id) in future_to_tier.items():
                 try:
-                    result = future.result(timeout=self.t3_timeout)
-                    results[tier] = result
+                    results["t3_visual"] = future.result(timeout=self.t3_timeout)
                     self.state.mark_complete(job_id)
                 except FuturesTimeout:
-                    results[tier] = {
+                    results["t3_visual"] = {
                         "status": "timeout",
-                        "body": f"⏰ {tier} timed out after {self.t3_timeout}s — results partial",
+                        "body": f"⏰ Visual evidence timed out after {self.t3_timeout}s",
                     }
                     self.state.mark_failed(job_id)
                 except Exception as e:
-                    results[tier] = {
+                    results["t3_visual"] = {
                         "status": "error",
-                        "body": f"❌ {tier} failed: {str(e)}",
+                        "body": f"❌ Visual evidence failed: {str(e)}",
                     }
                     self.state.mark_failed(job_id)
+        
+        # T3 arch: dispatch via deepthink cron (not a stub anymore)
+        if profile.needs_t3_arch:
+            job_id = f"{profile.pr_number}-t3-arch"
+            self.state.create_job(job_id, profile.pr_number, "t3_arch")
+            # Dispatch to deepthink with excalidraw skill (already has --skill excalidraw)
+            t3a_thread = threading.Thread(
+                target=self._dispatch_t1_async,  # Same dispatch path — deepthink handles excalidraw
+                args=(profile, job_id),
+                daemon=True,
+                name=f"t3a-{profile.pr_number}",
+            )
+            t3a_thread.start()
+            results["t3_arch"] = {"status": "dispatched", "tier": "t3_arch", "body": "Architecture diagram dispatched"}
         
         return results
     
@@ -319,7 +372,7 @@ class T0Orchestrator:
         """Dispatch tier-by-tier, verify before escalating (verification)."""
         results = {"t2": t2_result}
         
-        # T1 next (multi-file analysis)
+        # T1 next (multi-file analysis) — non-blocking
         if profile.needs_t1:
             t1_result = self._dispatch_t1(profile)
             report = self.validator.validate(t1_result)
@@ -386,6 +439,18 @@ class T0Orchestrator:
             "body": tldr or "",
         }
     
+    def _dispatch_t1_async(self, profile: TaskProfile, job_id: str):
+        """Non-blocking T1 dispatch (fire-and-forget with state tracking)."""
+        try:
+            result = self._dispatch_t1(profile)
+            if result.get("status") == "dispatched":
+                self.state.mark_complete(job_id)
+            else:
+                self.state.mark_failed(job_id)
+        except Exception as e:
+            self.state.mark_failed(job_id)
+            log.warning(f"T1 async dispatch failed for job {job_id}: {e}")
+    
     def _dispatch_t1(self, profile: TaskProfile) -> dict:
         """Dispatch to T1 (deepthink via Hermes cron)."""
         try:
@@ -443,9 +508,24 @@ class T0Orchestrator:
             return {"status": "error", "tier": "t3_visual", "body": f"Visual capture failed: {str(e)}"}
     
     def _dispatch_t3_arch(self, profile: TaskProfile) -> dict:
-        """Dispatch to T3 (excalidraw architecture diagram)."""
-        # Architecture diagram via deepthink's excalidraw skill
-        return {"status": "dispatched", "tier": "t3_arch", "body": "Architecture diagram dispatched"}
+        """Dispatch to T3 (excalidraw architecture diagram via deepthink)."""
+        # Architecture diagram via deepthink's excalidraw skill (already in spawn args)
+        try:
+            from riptide.deepthink import _spawn_deepthink
+            result = _spawn_deepthink(
+                profile.owner, profile.repo, profile.pr_number,
+                f"[ARCHITECTURE DIAGRAM] {profile.title}", profile.author, profile.total_loc,
+                head_sha=profile.head_sha,
+            )
+            return {
+                "status": "dispatched" if result else "failed",
+                "tier": "t3_arch",
+                "body": "Architecture diagram dispatched" if result else "Architecture diagram dispatch failed",
+                "spawned": result,
+            }
+        except Exception as e:
+            log.warning(f"T3 arch dispatch failed: {e}")
+            return {"status": "error", "tier": "t3_arch", "body": f"Architecture diagram failed: {str(e)}"}
     
     def _synthesize(self, results: dict, profile: TaskProfile) -> dict:
         """Aggregate all tier results into unified comment."""
@@ -497,27 +577,40 @@ class T0Orchestrator:
         # Sign-off
         parts.append("\n\n---\n_Reviewed by Riptide T0 · `@riptide-bot review` for re-review_")
         
+        # Enforce comment length limit
+        body = "\n".join(parts)
+        if len(body) > _MAX_COMMENT_LENGTH:
+            body = body[:_MAX_COMMENT_LENGTH - 100] + "\n\n... (truncated)"
+        
         return {
             "status": "complete",
             "pr_number": profile.pr_number,
-            "body": "\n".join(parts),
+            "body": body,
             "tiers_used": list(results.keys()),
             "emoji": emoji,
         }
     
     def _post_comment(self, profile: TaskProfile, unified: dict):
-        """Post unified comment to PR."""
+        """Post unified comment to PR with retry."""
         if not self.github:
             log.warning("No github client, skipping comment post")
             return
         
-        try:
-            body = unified.get("body", "")
-            if body:
+        body = unified.get("body", "")
+        if not body:
+            return
+        
+        for attempt in range(1, _MAX_COMMENT_RETRIES + 1):
+            try:
                 self.github.post_pr_comment(
                     profile.installation_id,
                     profile.owner, profile.repo, profile.pr_number, body
                 )
                 log.info(f"Posted unified comment on {profile.owner}/{profile.repo}#{profile.pr_number}")
-        except Exception as e:
-            log.error(f"Failed to post comment: {e}")
+                return
+            except Exception as e:
+                log.warning(f"Comment post attempt {attempt}/{_MAX_COMMENT_RETRIES} failed: {e}")
+                if attempt < _MAX_COMMENT_RETRIES:
+                    time.sleep(2 * attempt)  # Exponential backoff
+        
+        log.error(f"Failed to post comment after {_MAX_COMMENT_RETRIES} attempts")
