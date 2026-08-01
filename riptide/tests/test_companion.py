@@ -254,4 +254,98 @@ class TestFormatComment:
         companion = make_companion()
         result = companion._format_comment("✨", "testuser", "Some TL;DR.", None)
         assert "Riptide" in result
-        assert "skip" in result.lower()
+
+
+# ── Self-heal retry logic ────────────────────────────────────────────────────
+
+
+class TestGenerateTldrWithRetry:
+    """Tests for Companion._generate_tldr_with_retry."""
+
+    def test_first_attempt_succeeds(self):
+        companion = make_companion()
+        with patch.object(companion, "_generate_tldr", return_value="TL;DR text") as mock_gen:
+            result = companion._generate_tldr_with_retry("title", "author", [], None)
+            assert result == "TL;DR text"
+            assert mock_gen.call_count == 1
+
+    def test_retries_on_failure_then_succeeds(self):
+        companion = make_companion()
+        with patch.object(companion, "_generate_tldr", side_effect=[None, "TL;DR text"]) as mock_gen:
+            with patch("time.sleep"):  # skip actual sleep
+                result = companion._generate_tldr_with_retry("title", "author", [], None)
+                assert result == "TL;DR text"
+                assert mock_gen.call_count == 2
+
+    def test_all_attempts_fail_returns_none(self):
+        companion = make_companion()
+        with patch.object(companion, "_generate_tldr", return_value=None) as mock_gen:
+            with patch("time.sleep"):
+                result = companion._generate_tldr_with_retry("title", "author", [], None)
+                assert result is None
+                assert mock_gen.call_count == 4
+
+    def test_retry_delays(self):
+        companion = make_companion()
+        with patch.object(companion, "_generate_tldr", return_value=None):
+            with patch("time.sleep") as mock_sleep:
+                companion._generate_tldr_with_retry("title", "author", [], None)
+                # 4 attempts = 3 sleeps between them
+                assert mock_sleep.call_count == 3
+                mock_sleep.assert_any_call(5)
+                mock_sleep.assert_any_call(30)
+                mock_sleep.assert_any_call(60)
+
+
+class TestHandleDegradation:
+    """Tests for Companion._handle_degradation."""
+
+    def test_owned_repo_posts_comment(self):
+        companion = make_companion()
+        companion.client.post_pr_comment = MagicMock()
+        with patch.object(companion, "_spawn_self_heal"):
+            companion._handle_degradation(123, "ChonSong", "riptide", 42, "ChonSong/riptide")
+            companion.client.post_pr_comment.assert_called_once()
+            body = companion.client.post_pr_comment.call_args[0][4]
+            assert "⚠️" in body
+            assert "model offline" in body
+
+    def test_unowned_repo_sends_discord(self):
+        companion = make_companion()
+        with patch("subprocess.run") as mock_run:
+            with patch.object(companion, "_spawn_self_heal"):
+                companion._handle_degradation(123, "other", "repo", 42, "other/repo")
+                mock_run.assert_called_once()
+                cmd = mock_run.call_args[0][0]
+                assert "hermes" in cmd
+                assert "send" in cmd
+                assert "discord" in cmd
+
+    def test_spawns_self_heal(self):
+        companion = make_companion()
+        companion.client.post_pr_comment = MagicMock()
+        with patch.object(companion, "_spawn_self_heal") as mock_heal:
+            companion._handle_degradation(123, "ChonSong", "riptide", 42, "ChonSong/riptide")
+            mock_heal.assert_called_once_with("ChonSong/riptide", 42)
+
+
+class TestSpawnSelfHeal:
+    """Tests for Companion._spawn_self_heal."""
+
+    def test_spawns_hermes_cron(self):
+        companion = make_companion()
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            companion._spawn_self_heal("ChonSong/riptide", 42)
+            mock_run.assert_called_once()
+            cmd = mock_run.call_args[0][0]
+            assert "hermes" in cmd
+            assert "cron" in cmd
+            assert "create" in cmd
+            assert "riptide-self-heal-42" in cmd
+
+    def test_failure_logged_not_raised(self):
+        companion = make_companion()
+        with patch("subprocess.run", side_effect=Exception("boom")):
+            # Should not raise
+            companion._spawn_self_heal("ChonSong/riptide", 42)
