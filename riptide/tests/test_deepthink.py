@@ -17,6 +17,8 @@ from riptide.deepthink import (
     _load_state,
     _save_state,
     _was_reviewed_today,
+    _gather_review_data,
+    _build_orchestrator_prompt,
     MIN_LOC_CHANGED,
     STALENESS_MINUTES,
     STATE_FILE,
@@ -29,16 +31,34 @@ from riptide.deepthink import (
 class TestSpawnDeepthink:
     """Tests for _spawn_deepthink function."""
 
+    def _success_result(self):
+        r = MagicMock()
+        r.returncode = 0
+        r.stdout = "cron-id-123"
+        r.stderr = ""
+        return r
+
+    def _gather_data_mock(self, *args, **kwargs):
+        return {
+            "files_changed": [{"filename": "test.py", "additions": 100, "deletions": 50}],
+            "diff_raw": "+ line 1\n- line 2\n",
+            "repo_tree": ["test.py", "main.py"],
+            "god_nodes": [{"name": "test.py", "edges": 5}],
+            "communities": [{"name": "core", "members": ["test.py"]}],
+            "graph_context": {"raw": "test.py affects main.py"},
+        }
+
     def test_spawn_builds_correct_command(self, mock_hermes_cron):
-        _spawn_deepthink(
-            owner="ChonSong",
-            repo="riptide",
-            pr_number=42,
-            pr_title="feat: add bar",
-            pr_author="test-user",
-            total_loc=200,
-            head_sha="abc123def456",
-        )
+        with patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock):
+            _spawn_deepthink(
+                owner="ChonSong",
+                repo="riptide",
+                pr_number=42,
+                pr_title="feat: add bar",
+                pr_author="test-user",
+                total_loc=200,
+                head_sha="abc123def456",
+            )
 
         call_args = mock_hermes_cron.call_args
         cmd = call_args[0][0]
@@ -51,10 +71,8 @@ class TestSpawnDeepthink:
         # Verify --skill flags
         assert "--skill" in cmd
         skills = [cmd[i + 1] for i, x in enumerate(cmd) if x == "--skill"]
-        assert "github-pr-lifecycle" in skills
         assert "deep-think" in skills
         assert "excalidraw" in skills
-        assert "brooks-lint" in skills
 
         # Verify --deliver and --name
         assert "--deliver" in cmd
@@ -63,16 +81,10 @@ class TestSpawnDeepthink:
         name_idx = cmd.index("--name")
         assert cmd[name_idx + 1] == "riptide-review-ChonSong-riptide-42"
 
-    def _success_result(self):
-        r = MagicMock()
-        r.returncode = 0
-        r.stdout = "cron-id-123"
-        r.stderr = ""
-        return r
-
     def test_spawn_success_returns_true(self):
         with patch("subprocess.run", return_value=self._success_result()) as mock_run, \
-             patch("riptide.deepthink._is_cron_available", return_value=True):
+             patch("riptide.deepthink._is_cron_available", return_value=True), \
+             patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock):
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
             assert result is True
             mock_run.assert_called_once()
@@ -80,7 +92,8 @@ class TestSpawnDeepthink:
     def test_spawn_failure_returns_false_after_retries(self):
         with patch("subprocess.run", return_value=MagicMock(returncode=1, stderr="boom")) as mock_run, \
              patch("time.sleep") as mock_sleep, \
-             patch("riptide.deepthink._is_cron_available", return_value=True):
+             patch("riptide.deepthink._is_cron_available", return_value=True), \
+             patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock):
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
             assert result is False
             assert mock_run.call_count == 3
@@ -88,14 +101,16 @@ class TestSpawnDeepthink:
     def test_spawn_timeout_returns_false_after_retries(self):
         with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="hermes", timeout=15)) as mock_run, \
              patch("time.sleep") as mock_sleep, \
-             patch("riptide.deepthink._is_cron_available", return_value=True):
+             patch("riptide.deepthink._is_cron_available", return_value=True), \
+             patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock):
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
             assert result is False
             assert mock_run.call_count == 3
 
     def test_spawn_includes_pr_details_in_prompt(self):
         with patch("subprocess.run", return_value=self._success_result()) as mock_hermes_cron, \
-             patch("riptide.deepthink._is_cron_available", return_value=True):
+             patch("riptide.deepthink._is_cron_available", return_value=True), \
+             patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock):
             _spawn_deepthink(
                 "ChonSong", "riptide", 42, "feat: important change", "test-author", 250, "abc123def456789",
             )
@@ -275,3 +290,132 @@ class TestWasReviewedToday:
         with patch("riptide.deepthink.STATE_FILE", state_file):
             _save_state({})
             assert _was_reviewed_today("ChonSong", "riptide", 42) is False
+
+
+# ── _gather_review_data tests ────────────────────────────────────────────────
+
+
+class TestGatherReviewData:
+    """Tests for _gather_review_data function."""
+
+    def test_returns_default_structure_on_failure(self):
+        with patch("subprocess.run", side_effect=Exception("boom")):
+            result = _gather_review_data("ChonSong", "riptide", 42, "abc123")
+            assert result["files_changed"] == []
+            assert result["diff_raw"] == ""
+            assert result["repo_tree"] == []
+            assert result["god_nodes"] == []
+            assert result["communities"] == []
+
+    def test_fetches_diff_successfully(self):
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "+ new line\n- old line\n"
+        with patch("subprocess.run", return_value=mock_result):
+            result = _gather_review_data("ChonSong", "riptide", 42, "abc123")
+            assert result["diff_raw"] == "+ new line\n- old line\n"
+
+    def test_fetches_files_successfully(self):
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = '{"files": [{"filename": "test.py", "additions": 10, "deletions": 5}]}'
+        with patch("subprocess.run", return_value=mock_result):
+            result = _gather_review_data("ChonSong", "riptide", 42, "abc123")
+            assert result["files_changed"] == [{"filename": "test.py", "additions": 10, "deletions": 5}]
+
+    def test_caps_diff_at_50k_chars(self):
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "x" * 60000
+        with patch("subprocess.run", return_value=mock_result):
+            result = _gather_review_data("ChonSong", "riptide", 42, "abc123")
+            assert len(result["diff_raw"]) == 50000
+
+
+# ── _build_orchestrator_prompt tests ─────────────────────────────────────────
+
+
+class TestBuildOrchestratorPrompt:
+    """Tests for _build_orchestrator_prompt function."""
+
+    def test_includes_pr_details(self):
+        data = {
+            "files_changed": [{"filename": "test.py", "additions": 100, "deletions": 50}],
+            "diff_raw": "+ line\n",
+            "repo_tree": ["test.py"],
+            "god_nodes": [{"name": "test.py", "edges": 5}],
+            "communities": [{"name": "core", "members": []}],
+            "graph_context": {"raw": "test.py affects main.py"},
+        }
+        prompt = _build_orchestrator_prompt(
+            "ChonSong", "riptide", 42, "feat: test", "author", 150, "abc123", data
+        )
+        assert "42" in prompt
+        assert "ChonSong/riptide" in prompt
+        assert "feat: test" in prompt
+        assert "author" in prompt
+        assert "150" in prompt
+
+    def test_includes_files_changed(self):
+        data = {
+            "files_changed": [{"filename": "main.py", "additions": 200, "deletions": 100}],
+            "diff_raw": "",
+            "repo_tree": [],
+            "god_nodes": [],
+            "communities": [],
+            "graph_context": {},
+        }
+        prompt = _build_orchestrator_prompt(
+            "ChonSong", "riptide", 42, "feat: test", "author", 300, "abc123", data
+        )
+        assert "main.py" in prompt
+        assert "200" in prompt
+        assert "100" in prompt
+
+    def test_includes_graphify_data(self):
+        data = {
+            "files_changed": [],
+            "diff_raw": "",
+            "repo_tree": [],
+            "god_nodes": [{"name": "hub.py", "edges": 10}],
+            "communities": [{"name": "auth", "members": ["login.py"]}],
+            "graph_context": {"raw": "hub.py is a god node"},
+        }
+        prompt = _build_orchestrator_prompt(
+            "ChonSong", "riptide", 42, "feat: test", "author", 300, "abc123", data
+        )
+        assert "hub.py" in prompt
+        assert "10" in prompt
+        assert "auth" in prompt
+
+    def test_handles_empty_data(self):
+        data = {
+            "files_changed": [],
+            "diff_raw": "",
+            "repo_tree": [],
+            "god_nodes": [],
+            "communities": [],
+            "graph_context": {},
+        }
+        prompt = _build_orchestrator_prompt(
+            "ChonSong", "riptide", 42, "feat: test", "author", 300, "abc123", data
+        )
+        assert "No graphify analysis available" in prompt
+        assert "Delegate Inline Review" in prompt
+        assert "Delegate Excalidraw Diagram" in prompt
+
+    def test_includes_subagent_instructions(self):
+        data = {
+            "files_changed": [],
+            "diff_raw": "",
+            "repo_tree": [],
+            "god_nodes": [],
+            "communities": [],
+            "graph_context": {},
+        }
+        prompt = _build_orchestrator_prompt(
+            "ChonSong", "riptide", 42, "feat: test", "author", 300, "abc123", data
+        )
+        assert "Spawn a subagent" in prompt
+        assert "Excalidraw" in prompt
+        assert "Riptide Review via Hermes" in prompt

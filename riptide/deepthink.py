@@ -153,6 +153,9 @@ def _spawn_deepthink(
 ) -> bool:
     """Spawn a Hermes cron session for deep-think review on this PR.
 
+    Uses pre-gathered data and a small orchestrator prompt that delegates
+    to subagents for inline review and Excalidraw diagram generation.
+
     Retries up to 3 times with exponential backoff (5s/15s/30s).
     Only records state on successful spawn.
     Returns True if spawned successfully, False otherwise.
@@ -162,148 +165,26 @@ def _spawn_deepthink(
     name = f"riptide-review-{owner}-{repo}-{pr_number}"
     run_at = (datetime.now() + timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%S")
 
-    prompt = (
-        f"PR #{pr_number} in {owner}/{repo} has >100 LOC changed ({total_loc} LOC total) "
-        f"and has been stable for 30+ minutes. You are performing a **Riptide Review** — "
-        f"an autonomous deep-think code review.\n\n"
-        f"## PR Details\n"
-        f"- Title: {pr_title}\n"
-        f"- Author: {pr_author}\n"
-        f"- Changes: {total_loc} LOC\n"
-        f"- HEAD SHA: {head_sha[:12]}\n\n"
-        f"## Your Task\n"
-        f"You are a senior engineer. Use **graphify** to understand the current implementation "
-        f"and **deep-think** to advise next steps.\n\n"
-        f"### Step 1: Understand the Implementation (Graphify)\n"
-        f"1. Fetch the PR diff: `gh pr diff {pr_number} --repo {owner}/{repo}`\n"
-        f"2. If this repo has graphify-out/ (check ~/workspace/{repo}/graphify-out/), run:\n"
-        f"   `cd ~/workspace/{repo} && graphify update . && graphify query 'what does this PR affect?'`\n"
-        f"3. Read the GRAPH_REPORT.md or graphify analysis for cross-file relationships.\n\n"
-        f"### Step 2: Deep-Think Analysis (Mandatory)\n"
-        f"Load the deep-think skill with `skill_view('deep-think')` and run the full loop:\n"
-        f"1. SURFACE — Restate what this PR changes and why.\n"
-        f"2. EXPLORE — What code paths are affected? Edge cases? Blast radius from graphify?\n"
-        f"3. CHALLENGE — Could this change have side effects? Simpler approach? Missing tests?\n"
-        f"4. SYNTHESIZE — Advise next steps (approve, request changes, suggest follow-ups).\n"
-        f"5. VALIDATE — If claims are testable, run the test suite.\n\n"
-        f"### Step 3: Post Inline Review Comments with Suggestions\n"
-        f"For each substantive issue, post an **inline review comment** with a **GitHub suggestion block** "
-        f"so the author can apply your change with one click.\n\n"
-        f"**Suggestion format** (wrap proposed code in triple backticks with `suggestion` language tag):\n"
-        f"```suggestion\n"
-        f"proposed new code here\n"
-        f"```\n\n"
-        f"**To post an inline comment:**\n"
-        f"```\n"
-        f"gh api repos/{owner}/{repo}/pulls/{pr_number}/comments \\\\\n"
-        f"  --method POST \\\\\n"
-        f"  -f body='**🔴 Critical:** explanation here\\\\n```suggestion\\\\nproposed code here\\\\n```' \\\\\n"
-        f"  -f commit_id='{head_sha}' \\\\\n"
-        f"  -f path='<file_path>' \\\\\n"
-        f"  -F line=<line_number> \\\\\n"
-        f"  -f side='RIGHT'\n"
-        f"```\n\n"
-        f"**How to calculate line numbers:**\n"
-        f"Parse the `@@` hunk headers from `gh pr diff`. Each hunk looks like "
-        f"`@@ -old_start,old_count +new_start,new_count @@`. The `new_start` is the first "
-        f"line number in the modified file. Count forward from there for added/modified lines.\n\n"
-        f"**Comment format:**\n"
-        f"```suggestion\n"
-        f"proposed replacement code\n"
-        f"```\n"
-        f"Prepend a severity marker before the suggestion:\n"
-        f"- `**CRITICAL:**` — definite bug, security issue, data loss risk\n"
-        f"- `**WARNING:**` — potential issue, performance concern, code smell\n"
-        f"- `**SUGGESTION:**` — style improvement, minor refactor, nitpick\n\n"
-        f"Post inline comments for substantive findings only (1-3 per PR maximum). "
-        f"Focus on real issues — do not comment on every line or nitpick style.\n\n"
-        f"### Step 4: Generate Excalidraw Diagram\n"
-        f"After all inline review comments are posted, generate an Excalidraw diagram "
-        f"visualizing your findings using the **excalidraw_renderer** module.\n\n"
-        f"The diagram is a flowing narrative: Codebase Landscape (all modules with PR files "
-        f"highlighted) -> PR Scope -> Graphify Analysis (god nodes + communities) -> "
-        f"Code Chunks with WHY -> Human-Readable Narrative -> Findings with Severity -> "
-        f"Suggested Changes -> Legend. All sections connected by arrows.\n\n"
-        f"```python\n"
-        f"import sys\n"
-        f"sys.path.insert(0, '/home/sc/workspace')\n"
-        f"from riptide.grafiphy.excalidraw_renderer import render_review, upload_excalidraw\n"
-        f"\n"
-        f"findings = [\n"
-        f"    dict(severity='critical', title='...', detail='...', file='...', line=...),\n"
-        f"    dict(severity='warning', title='...', detail='...', file='...'),\n"
-        f"]\n"
-        f"\n"
-        f"graph_data = dict(\n"
-        f"    god_nodes=[dict(name=..., edges=..., why=...)],\n"
-        f"    communities=[dict(name=..., members=[...], why=...)],\n"
-        f")\n"
-        f"\n"
-        f"# NEW: Collect full repo graph for codebase landscape\n"
-        f"repo_graph = [\n"
-        f"    dict(name='routes.py', type='module', file='api/routes.py', why='HTTP routing'),\n"
-        f"    dict(name='models.py', type='module', file='api/models.py', why='Core data models'),\n"
-        f"]\n"
-        f"\n"
-        f"# NEW: Suggestions from inline review comments (Bot 2)\n"
-        f"suggestions = [\n"
-        f"    dict(file='api/draft.py', line=42, old_code='old', new_code='new',\n"
-        f"         severity='critical', reasoning='Avoids null pointer'),\n"
-        f"]\n"
-        f"\n"
-        f"# NEW: Distance map for network-radius layout\n"
-        f"distance_map = {{\n"
-        f"    'companion.py': dict(hops=0, relation='epicenter', community='github_webhook', degree=0),\n"
-        f"    'webhook.py': dict(hops=1, relation='affected by companion.py', community='github_webhook', degree=8),\n"
-        f"}}\n"
-        f"\n"
-        f"url = upload_excalidraw(\n"
-        f"    render_review(\n"
-        f"        pr_data=dict(number={pr_number}, title=\"{pr_title[:50]}\",\n"
-        f"                    repo=\"{owner}/{repo}\", loc={total_loc}),\n"
-        f"        findings=findings,\n"
-        f"        graph_data=graph_data,\n"
-        f"        repo_graph=repo_graph,     # NEW: landscape view\n"
-        f"        suggestions=suggestions,   # NEW: suggestion blocks\n"
-        f"        distance_map=distance_map, # NEW: distance-radius layout\n"
-        f"        output_path='/tmp/review.excalidraw',\n"
-        f"    )\n"
-        f")\n"
-        f"print(f'Excalidraw: {{url}}')\\n"
-        f"```\n\n"
-        f"The renderer creates 9 connected sections: distance-radius network map (nodes arranged "
-        f"by network distance from PR changes), codebase landscape (all modules with "
-        f"PR files highlighted), PR scope, graphify analysis (god nodes + communities with WHY), "
-        f"code chunks with detailed WHY, human-readable narrative, findings with severity colors, "
-        f"suggested changes (code diffs), and legend.\n"
-        f"Include the returned URL in your summary.\n\n"
-        f"### Step 5: Post Summary Review\n"
-        f"After posting all inline comments and generating the Excalidraw, post a **summary review**:\n"
-        f"`gh pr comment {pr_number} --repo {owner}/{repo} --body '<review>'`\n\n"
-        f"Structure your review as:\n"
-        f"- **Summary**: What this PR does (1-2 sentences, no filler)\n"
-        f"- **Findings**: Only real issues (not style nits or hypotheticals)\n"
-        f"- **Inline Comments**: N findings posted (see specific lines)\n"
-        f"- **Excalidraw**: Link to visual evidence diagram\n"
-        f"- **Next Steps**: Specific actionable advice (max 3 items)\n\n"
-        f"**Quality gate**: If you have no critical/warning findings, say so briefly — "
-        f"do not invent problems or pad the review.\n\n"
-        f"**Sign-off**: End your summary with:\n"
-        f"```\n"
-        f"---\n"
-        f"<sub>Riptide Review via Hermes</sub>\n"
-        f"```\n\n"
-        f"REPO PATH: ~/workspace/{repo}/\n"
+    # Pre-gather data in Python (cheaper than having the agent do it)
+    data = _gather_review_data(owner, repo, pr_number, head_sha)
+
+    prompt = _build_orchestrator_prompt(
+        owner=owner,
+        repo=repo,
+        pr_number=pr_number,
+        pr_title=pr_title,
+        pr_author=pr_author,
+        total_loc=total_loc,
+        head_sha=head_sha,
+        data=data,
     )
 
     cmd = [
         "hermes", "cron", "create", run_at,
         prompt,
         "--name", name,
-        "--skill", "github-pr-lifecycle",
         "--skill", "deep-think",
         "--skill", "excalidraw",
-        "--skill", "brooks-lint",
         "--deliver", "origin",
     ]
 
@@ -335,6 +216,231 @@ def _spawn_deepthink(
 
     log.error(f"All {max_retries} attempts failed for {owner}/{repo}#{pr_number}")
     return False
+
+
+def _gather_review_data(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    head_sha: str,
+) -> dict:
+    """Pre-gather review data in Python before spawning the Hermes session.
+
+    Returns a dict with:
+    - files_changed: list of {filename, additions, deletions}
+    - diff_raw: raw diff text (capped at 50k chars)
+    - repo_tree: list of file paths
+    - god_nodes: list of {name, edges}
+    - communities: list of {name, members}
+    - graph_context: raw graphify output
+    """
+    data = {
+        "files_changed": [],
+        "diff_raw": "",
+        "repo_tree": [],
+        "god_nodes": [],
+        "communities": [],
+        "graph_context": {},
+    }
+
+    # 1. Fetch PR diff
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "diff", str(pr_number), "--repo", f"{owner}/{repo}"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            data["diff_raw"] = result.stdout[:50000]
+    except Exception as e:
+        log.warning(f"Failed to fetch diff: {e}")
+
+    # 2. Fetch PR files
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", str(pr_number), "--repo", f"{owner}/{repo}",
+             "--json", "files"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            files_data = json.loads(result.stdout)
+            data["files_changed"] = files_data.get("files", [])
+    except Exception as e:
+        log.warning(f"Failed to fetch PR files: {e}")
+
+    # 3. Fetch repo tree (from local workspace if available)
+    workspace = Path.home() / "workspace" / repo
+    if workspace.is_dir():
+        try:
+            result = subprocess.run(
+                ["git", "ls-tree", "-r", "--name-only", head_sha],
+                capture_output=True, text=True, timeout=30,
+                cwd=str(workspace),
+            )
+            if result.returncode == 0:
+                data["repo_tree"] = result.stdout.strip().split("\n")
+        except Exception as e:
+            log.warning(f"Failed to fetch repo tree: {e}")
+
+        # 4. Run graphify if available
+        graphify_dir = workspace / "graphify-out"
+        if graphify_dir.is_dir():
+            try:
+                # Update graphify
+                subprocess.run(
+                    ["graphify", "update", "."],
+                    capture_output=True, text=True, timeout=60,
+                    cwd=str(workspace),
+                )
+                # Query for PR impact
+                result = subprocess.run(
+                    ["graphify", "query", f"what does PR #{pr_number} affect?"],
+                    capture_output=True, text=True, timeout=30,
+                    cwd=str(workspace),
+                )
+                if result.returncode == 0:
+                    data["graph_context"] = {"raw": result.stdout.strip()}
+
+                # Get god nodes
+                result = subprocess.run(
+                    ["graphify", "god-nodes", "--top", "10"],
+                    capture_output=True, text=True, timeout=30,
+                    cwd=str(workspace),
+                )
+                if result.returncode == 0:
+                    # Parse god nodes from output
+                    for line in result.stdout.strip().split("\n"):
+                        match = re.match(r"\s*\d+\.\s+(.+?)\s+-\s+(\d+)\s+edges", line)
+                        if match:
+                            data["god_nodes"].append({
+                                "name": match.group(1),
+                                "edges": int(match.group(2)),
+                            })
+
+                # Get communities
+                result = subprocess.run(
+                    ["graphify", "query", "list communities"],
+                    capture_output=True, text=True, timeout=30,
+                    cwd=str(workspace),
+                )
+                if result.returncode == 0:
+                    # Parse communities from output
+                    for line in result.stdout.strip().split("\n"):
+                        if line.strip().startswith("- "):
+                            comm_name = line.strip()[2:].strip()
+                            data["communities"].append({"name": comm_name, "members": []})
+
+            except Exception as e:
+                log.warning(f"Graphify failed: {e}")
+
+    return data
+
+
+def _build_orchestrator_prompt(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    pr_title: str,
+    pr_author: str,
+    total_loc: int,
+    head_sha: str,
+    data: dict,
+) -> str:
+    """Build a small orchestrator prompt that delegates to subagents.
+
+    The prompt is ~40 lines instead of ~280 lines.
+    All data is pre-gathered in Python and passed as structured context.
+    """
+    # Format files changed
+    files_str = "\n".join(
+        f"  - {f.get('filename', '?')} (+{f.get('additions', 0)}/-{f.get('deletions', 0)})"
+        for f in data["files_changed"][:20]
+    )
+
+    # Format diff summary (first 2000 chars)
+    diff_summary = data["diff_raw"][:2000]
+    if len(data["diff_raw"]) > 2000:
+        diff_summary += f"\n  ... ({len(data['diff_raw'])} chars total)"
+
+    # Format graphify context
+    graph_str = ""
+    if data["god_nodes"]:
+        graph_str += "God Nodes:\n"
+        for node in data["god_nodes"][:5]:
+            graph_str += f"  - {node['name']} ({node['edges']} edges)\n"
+    if data["communities"]:
+        graph_str += "Communities:\n"
+        for comm in data["communities"][:5]:
+            graph_str += f"  - {comm['name']}\n"
+    if not graph_str:
+        graph_str = "(No graphify analysis available)"
+
+    return f"""PR #{pr_number} in {owner}/{repo} — {total_loc} LOC changed.
+
+## Context (pre-gathered)
+- Title: {pr_title}
+- Author: {pr_author}
+- HEAD SHA: {head_sha[:12]}
+
+### Files Changed
+{files_str}
+
+### Diff Summary
+```
+{diff_summary}
+```
+
+### Graphify Analysis
+{graph_str}
+
+## Your Task: Orchestrate Review
+
+You are a senior engineer. Delegate review tasks to subagents, then synthesize.
+
+### Step 1: Delegate Inline Review
+Spawn a subagent with:
+- Role: Code reviewer
+- Skills: deep-think
+- Task: Analyze the PR diff, post 1-3 inline review comments with GitHub suggestion blocks
+- Output: JSON list of findings [{{file, line, severity, title, detail}}]
+
+### Step 2: Delegate Excalidraw Diagram
+Spawn a subagent with (parallel to Step 1):
+- Role: Architecture diagram generator
+- Skills: excalidraw
+- Task: Generate a diagram from the findings + graphify data
+- Output: Excalidraw URL
+
+### Step 3: Post Summary Review
+After both subagents complete, post a summary comment:
+
+```
+## 🎯 Summary
+(1-2 sentences: what this PR does)
+
+## 🔍 Findings
+| Severity | File | Line | Issue |
+|----------|------|------|-------|
+| 🟡 Warning | file.py | 42 | Issue description |
+
+## 🔗 Diagram
+[Visual Review Diagram](<URL from Step 2>)
+
+## 📌 Next Steps
+(max 3 actionable items)
+
+---
+<sub>Riptide Review via Hermes</sub>
+```
+
+Use `gh pr comment {pr_number} --repo {owner}/{repo} --body '<review>'` to post.
+
+### Rules
+- Max 3 inline comments, real issues only
+- Do not invent problems or pad the review
+- Reference inline comments in the summary
+
+REPO PATH: ~/workspace/{repo}/
+"""
 
 
 def _spawn_deepthink_with_prompt(
