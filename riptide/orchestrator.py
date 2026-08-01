@@ -219,7 +219,7 @@ class StateStore:
         conn.execute("PRAGMA busy_timeout=5000")
         try:
             conn.execute(
-                "INSERT INTO jobs (id, pr_number, tier, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
+                "INSERT OR IGNORE INTO jobs (id, pr_number, tier, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
                 (job_id, pr_number, tier, time.time()),
             )
             conn.commit()
