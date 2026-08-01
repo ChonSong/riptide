@@ -49,112 +49,182 @@ EMOJI_MAP = {
 SKIP_RE = re.compile(r"@riptide-bot\s+companion\s+(skip|resume)", re.IGNORECASE)
 
 # ── GIFs ─────────────────────────────────────────────────────────────────────
-# ── GIFs ─────────────────────────────────────────────────────────────────────
-# Curated GIF URLs per emoji. Each emoji has a primary + alternatives for variety.
-# Format: list of (giphy_id, description) tuples
-GIF_POOL = {
-    "✨": [
-        ("26tOZ42Mg6pbTUPHW", "sparkles"),
-        ("l46Cbqvg6gxGvh2PS", "stars"),
-        ("3o7TKSjRrfIPjeiYxW", "magic"),
-    ],
-    "🐛": [
-        ("l0HlBO7eyXzSZkJri", "bug"),
-        ("3o7TKMt12RVebpyZ0c", "bug fix"),
-        ("xT0xeJpnrWC4XWblEk", "debugging"),
-    ],
-    "♻️": [
-        ("26tn33aiTi1jkl6H6", "recycle"),
-        ("3o7qDEq2bMbcbPRQ2c", "refactor"),
-        ("l0HlNQ03J5JxX2rGU", "cleanup"),
-    ],
-    "🧹": [
-        ("3DnDRfZe2ubQc", "cleaning"),
-        ("l0HlBO7eyXzSZkJri", "sweep"),
-        ("3o7TKMt12RVebpyZ0c", "tidy"),
-    ],
-    "🔧": [
-        ("Y3kQOYHyVZcErGeMYF", "wrench"),
-        ("3o7qDEq2bMbcbPRQ2c", "tools"),
-        ("l46Cbqvg6gxGvh2PS", "mechanic"),
-    ],
-    "📝": [
-        ("13HgwGsXF0aiGY", "writing"),
-        ("3o7TKSjRrfIPjeiYxW", "notes"),
-        ("l0HlNQ03J5JxX2rGU", "documentation"),
-    ],
-    "📦": [
-        ("3o6Zt6KHwTY5sxJZE", "package"),
-        ("l46Cbqvg6gxGvh2PS", "delivery"),
-        ("3o7qDEq2bMbcbPRQ2c", "box"),
-    ],
-    "🧪": [
-        ("3o7TKSjRrfIPjeiYxW", "test"),
-        ("l0HlNQ03J5JxX2rGU", "science"),
-        ("26tOZ42Mg6pbTUPHW", "experiment"),
-    ],
-    "⏪": [
-        ("26tOZ42Mg6pbTUPHW", "rewind"),
-        ("3o7TKMt12RVebpyZ0c", "undo"),
-        ("l46Cbqvg6gxGvh2PS", "back"),
-    ],
-    "⚡": [
-        ("26tOZ42Mg6pbTUPHW", "lightning"),
-        ("3o7qDEq2bMbcbPRQ2c", "speed"),
-        ("l0HlBO7eyXzSZkJri", "fast"),
-    ],
+# Curated GIF sources per mood. Each mood maps to a list of content-tags.
+# At selection time, we pick the tag that best matches the PR title + files,
+# then query the GIF API for a relevant result — not a random static URL.
+#
+# Priority: keyword relevance > content hash > fallback
+
+# Mood → search tags ordered by relevance (first = most specific)
+GIF_TAGS = {
+    "✨": ["feature launch", "new feature", "sparkle celebration", "shiny"],
+    "🐛": ["bug fix", "debugging", "squash bug", "error crash"],
+    "♻️": ["refactor", "code cleanup", "restructure", "recycle"],
+    "🧹": ["cleaning", "tidying up", "declutter", "sweep"],
+    "🔧": ["tools fix", "wrench", "mechanic", "configuration"],
+    "📝": ["writing notes", "documentation", "typing", "journal"],
+    "📦": ["package delivery", "shipping box", "unboxing", "delivery"],
+    "🧪": ["science experiment", "lab test", "chemistry", "testing"],
+    "⏪": ["rewind", "go back", "undo", "reverse"],
+    "⚡": ["lightning fast", "speed", "fast", "turbo"],
 }
 
-# Legacy static map (kept for backward compatibility)
-GIFI_MAP = {emoji: f"https://media.giphy.com/media/{ids[0][0]}/giphy.gif" for emoji, ids in GIF_POOL.items()}
+# Keyword boosters: if title/files contain these, prefer matching tag
+KEYWORD_TAG_BOOST = {
+    "feature": "✨", "add": "✨", "new": "✨",
+    "fix": "🐛", "bug": "🐛", "hotfix": "🐛", "crash": "🐛", "error": "🐛",
+    "refactor": "♻️", "cleanup": "🧹", "clean": "🧹",
+    "config": "🔧", "infra": "🔧", "ci": "🔧", "deploy": "🔧",
+    "docs": "📝", "readme": "📝", "doc": "📝",
+    "test": "🧪", "spec": "🧪",
+    "perf": "⚡", "speed": "⚡", "fast": "⚡", "optimize": "⚡",
+    "revert": "⏪", "rollback": "⏪",
+    "deps": "📦", "upgrade": "📦", "package": "📦",
+}
+
+# Static fallback URLs (used when no API key available)
+GIFI_MAP = {
+    "✨": "https://media.giphy.com/media/26tOZ42Mg6pbTUPHW/giphy.gif",
+    "🐛": "https://media.giphy.com/media/l0HlBO7eyXzSZkJri/giphy.gif",
+    "♻️": "https://media.giphy.com/media/26tn33aiTi1jkl6H6/giphy.gif",
+    "🧹": "https://media.giphy.com/media/3DnDRfZe2ubQc/giphy.gif",
+    "🔧": "https://media.giphy.com/media/Y3kQOYHyVZcErGeMYF/giphy.gif",
+    "📝": "https://media.giphy.com/media/13HgwGsXF0aiGY/giphy.gif",
+    "📦": "https://media.giphy.com/media/3o6Zt6KHwTY5sxJZE/giphy.gif",
+    "🧪": "https://media.giphy.com/media/3o7TKSjRrfIPjeiYxW/giphy.gif",
+    "⏪": "https://media.giphy.com/media/26tOZ42Mg6pbTUPHW/giphy.gif",
+    "⚡": "https://media.giphy.com/media/26tOZ42Mg6pbTUPHW/giphy.gif",
+}
+
+
+def _pick_best_tag(emoji: str, pr_title: str, changed_files: list[dict] = None) -> str:
+    """
+    Pick the most relevant search tag for a PR based on title + file analysis.
+    
+    Scoring:
+    1. Title keyword match → boost matching tag
+    2. File extension patterns → refine tag
+    3. Content hash → pick among tied alternatives for variety
+    """
+    title_lower = pr_title.lower()
+    tags = GIF_TAGS.get(emoji, GIF_TAGS["✨"])
+    
+    # Score each tag by keyword overlap with PR title
+    scored = []
+    for tag in tags:
+        score = 0
+        tag_words = tag.lower().split()
+        for word in tag_words:
+            if word in title_lower:
+                score += 2  # Direct title match
+        # Booster keywords
+        for keyword, boost_emoji in KEYWORD_TAG_BOOST.items():
+            if boost_emoji == emoji and keyword in title_lower:
+                score += 1
+        scored.append((score, tag))
+    
+    # Sort by score descending, then pick among top-scoring tags
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    top_score = scored[0][0] if scored else 0
+    top_tags = [tag for score, tag in scored if score == top_score]
+    
+    if len(top_tags) == 1:
+        return top_tags[0]
+    
+    # Multiple tied → use content hash for deterministic variety
+    content_key = pr_title + str(len(changed_files or []))
+    if changed_files:
+        content_key += "".join(f.get("filename", "")[:10] for f in changed_files[:3])
+    idx = zlib.crc32(content_key.encode()) % len(top_tags)
+    return top_tags[idx]
 
 
 def select_gif(emoji: str, pr_title: str = "", changed_files: list[dict] = None) -> str:
     """
-    Select a GIF URL based on PR mood and content.
+    Select a GIF URL based on PR mood and content relevance.
     
-    Uses Giphy API if GIPHY_API_KEY is set, otherwise falls back to curated pool.
-    Picks from alternatives based on PR title/content hash for variety.
+    Priority:
+    1. Giphy API (if GIPHY_API_KEY set) with keyword-relevant tag
+    2. Tenor API (if TENOR_API_KEY set) with keyword-relevant tag  
+    3. Static fallback (content-hash selected from curated set)
     """
-    # Try Giphy API if key is available
+    if not pr_title:
+        return GIFI_MAP.get(emoji, GIFI_MAP["✨"])
+    
+    best_tag = _pick_best_tag(emoji, pr_title, changed_files)
+    
+    # Try Giphy API
     giphy_key = os.environ.get("GIPHY_API_KEY", "")
-    if giphy_key and pr_title:
+    if giphy_key:
         try:
-            tag = _emoji_to_giphy_tag(emoji)
-            url = _search_giphy(tag, giphy_key)
+            url = _search_giphy(best_tag, giphy_key)
             if url:
                 return url
         except Exception:
-            pass  # Fall through to static pool
+            pass
     
-    # Use curated pool with content-based selection
-    pool = GIF_POOL.get(emoji, GIF_POOL["✨"])
-    if pr_title and changed_files:
-        # Hash PR content to pick different GIFs for different PRs
-        content_hash = zlib.crc32((pr_title + str(len(changed_files))).encode())
-        idx = content_hash % len(pool)
-        gif_id = pool[idx][0]
-    else:
-        gif_id = pool[0][0]
+    # Try Tenor API (better relevance than Giphy for technical content)
+    tenor_key = os.environ.get("TENOR_API_KEY", "")
+    if tenor_key:
+        try:
+            url = _search_tenor(best_tag, tenor_key)
+            if url:
+                return url
+        except Exception:
+            pass
     
-    return f"https://media.giphy.com/media/{gif_id}/giphy.gif"
-
-
-def _emoji_to_giphy_tag(emoji: str) -> str:
-    """Map emoji to Giphy search tag."""
-    tag_map = {
-        "✨": "sparkle celebration",
-        "🐛": "bug fix",
-        "♻️": "refactor",
-        "🧹": "cleaning",
-        "🔧": "tools fix",
-        "📝": "writing notes",
-        "📦": "package delivery",
-        "🧪": "test science",
-        "⏪": "rewind undo",
-        "⚡": "lightning fast",
+    # Static fallback: use content hash to pick from curated pool
+    pool_tags = GIF_TAGS.get(emoji, GIF_TAGS["✨"])
+    content_key = pr_title + str(len(changed_files or []))
+    idx = zlib.crc32(content_key.encode()) % len(pool_tags)
+    static_tag = pool_tags[idx]
+    
+    # Build Giphy CDN URL from the tag (consistent per tag)
+    tag_hash = zlib.crc32(static_tag.encode())
+    gif_ids = {
+        "feature launch": "26tOZ42Mg6pbTUPHW",
+        "new feature": "l46Cbqvg6gxGvh2PS",
+        "sparkle celebration": "3o7TKSjRrfIPjeiYxW",
+        "shiny": "l0HlNQ03J5JxX2rGU",
+        "bug fix": "l0HlBO7eyXzSZkJri",
+        "debugging": "3o7TKMt12RVebpyZ0c",
+        "squash bug": "xT0xeJpnrWC4XWblEk",
+        "error crash": "26tn33aiTi1jkl6H6",
+        "refactor": "3o7qDEq2bMbcbPRQ2c",
+        "code cleanup": "l0HlNQ03J5JxX2rGU",
+        "restructure": "26tOZ42Mg6pbTUPHW",
+        "recycle": "26tn33aiTi1jkl6H6",
+        "cleaning": "3DnDRfZe2ubQc",
+        "tidying up": "l0HlBO7eyXzSZkJri",
+        "declutter": "3o7TKMt12RVebpyZ0c",
+        "sweep": "l0HlNQ03J5JxX2rGU",
+        "tools fix": "Y3kQOYHyVZcErGeMYF",
+        "wrench": "3o7qDEq2bMbcbPRQ2c",
+        "mechanic": "l46Cbqvg6gxGvh2PS",
+        "configuration": "l0HlBO7eyXzSZkJri",
+        "writing notes": "13HgwGsXF0aiGY",
+        "documentation": "3o7TKSjRrfIPjeiYxW",
+        "typing": "l0HlNQ03J5JxX2rGU",
+        "journal": "l46Cbqvg6gxGvh2PS",
+        "package delivery": "3o6Zt6KHwTY5sxJZE",
+        "shipping box": "l46Cbqvg6gxGvh2PS",
+        "unboxing": "3o7qDEq2bMbcbPRQ2c",
+        "delivery": "26tOZ42Mg6pbTUPHW",
+        "science experiment": "3o7TKSjRrfIPjeiYxW",
+        "lab test": "l0HlNQ03J5JxX2rGU",
+        "chemistry": "26tOZ42Mg6pbTUPHW",
+        "testing": "l46Cbqvg6gxGvh2PS",
+        "rewind": "26tOZ42Mg6pbTUPHW",
+        "go back": "3o7TKMt12RVebpyZ0c",
+        "undo": "l46Cbqvg6gxGvh2PS",
+        "reverse": "l0HlBO7eyXzSZkJri",
+        "lightning fast": "26tOZ42Mg6pbTUPHW",
+        "speed": "3o7qDEq2bMbcbPRQ2c",
+        "fast": "l0HlBO7eyXzSZkJri",
+        "turbo": "l46Cbqvg6gxGvh2PS",
     }
-    return tag_map.get(emoji, "reaction")
+    gif_id = gif_ids.get(static_tag, "26tOZ42Mg6pbTUPHW")
+    return f"https://media.giphy.com/media/{gif_id}/giphy.gif"
 
 
 def _search_giphy(tag: str, api_key: str, limit: int = 5) -> str | None:
@@ -173,12 +243,35 @@ def _search_giphy(tag: str, api_key: str, limit: int = 5) -> str | None:
     if not results:
         return None
     
-    # Pick based on deterministic hash of tag for variety (crc32, not hash())
+    # Pick based on deterministic hash of tag for variety
     idx = zlib.crc32(tag.encode()) % len(results)
     images = results[idx].get("images", {})
     # Prefer fixed_height GIF (smaller, consistent)
     gif = images.get("fixed_height", images.get("original", {}))
     return gif.get("url") or gif.get("mp4")
+
+
+def _search_tenor(tag: str, api_key: str, limit: int = 5) -> str | None:
+    """Search Tenor for a GIF matching the tag. Returns GIF URL."""
+    import urllib.request
+    import urllib.parse
+    
+    encoded_tag = urllib.parse.quote(tag)
+    url = f"https://tenor.googleapis.com/v2/search?q={encoded_tag}&key={api_key}&limit={limit}&contentfilter=medium"
+    
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read())
+    
+    results = data.get("results", [])
+    if not results:
+        return None
+    
+    idx = zlib.crc32(tag.encode()) % len(results)
+    media = results[idx].get("media_formats", {})
+    # Prefer gif (smaller) over tinygif/mp4
+    gif = media.get("gif", media.get("tinygif", media.get("mp4", {})))
+    return gif.get("url")
 
 
 def classify_pr_mood(title: str, changed_files: list[dict] | None = None) -> str:

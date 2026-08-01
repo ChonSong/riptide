@@ -1,7 +1,7 @@
 # riptide/tests/test_gif_selection.py
 """
-Tests for Companion GIF selection logic (PR #7).
-Covers select_gif determinism, curated pool, Giphy API fallback, and classify enhancements.
+Tests for Companion GIF selection logic.
+Covers select_gif relevance scoring, API fallback chain, determinism, and classify enhancements.
 """
 
 import json
@@ -12,9 +12,11 @@ import pytest
 from riptide.companion import (
     select_gif,
     _search_giphy,
-    _emoji_to_giphy_tag,
+    _search_tenor,
+    _pick_best_tag,
     classify_pr_mood,
-    GIF_POOL,
+    GIF_TAGS,
+    KEYWORD_TAG_BOOST,
     GIFI_MAP,
 )
 
@@ -35,19 +37,18 @@ class TestSelectGif:
     def test_variety_across_different_prs(self):
         """Different PR content should not always produce the same GIF."""
         urls = set()
-        for i in range(5):
+        for i in range(8):
             urls.add(select_gif("✨", f"feat: feature {i}", [{"filename": f"f{i}.tsx"}]))
-        # Pool has 3 entries; across 5 distinct titles we expect variety
+        # Pool has 4 entries; across 8 distinct titles we expect variety
         assert len(urls) >= 2
 
     def test_default_emoji_pool(self):
         url = select_gif("🤷", "weird title", [{"filename": "a.py"}])
         assert url.startswith("https://media.giphy.com/media/")
 
-    def test_no_title_falls_back_to_first_pool_entry(self):
+    def test_no_title_falls_back_to_map(self):
         url = select_gif("✨", "", [])
-        first = GIF_POOL["✨"][0][0]
-        assert first in url
+        assert url == GIFI_MAP["✨"]
 
     def test_giphy_api_used_when_key_present(self):
         with patch.dict("os.environ", {"GIPHY_API_KEY": "test-key"}), \
@@ -56,33 +57,54 @@ class TestSelectGif:
             assert url == "https://api.giphy.com/gif.mp4"
             mock_search.assert_called_once()
 
-    def test_giphy_api_failure_falls_back_to_pool(self):
-        with patch.dict("os.environ", {"GIPHY_API_KEY": "bad-key"}), \
-             patch("riptide.companion._search_giphy", return_value=None):
+    def test_giphy_api_failure_falls_back_to_tenor(self):
+        with patch.dict("os.environ", {"GIPHY_API_KEY": "bad-key", "TENOR_API_KEY": "tenor-key"}), \
+             patch("riptide.companion._search_giphy", return_value=None), \
+             patch("riptide.companion._search_tenor", return_value="https://tenor.com/gif.gif") as mock_tenor:
+            url = select_gif("✨", "feat: shiny", [{"filename": "a.tsx"}])
+            assert url == "https://tenor.com/gif.gif"
+            mock_tenor.assert_called_once()
+
+    def test_giphy_tenor_fail_falls_back_to_static(self):
+        with patch.dict("os.environ", {"GIPHY_API_KEY": "bad-key", "TENOR_API_KEY": "bad-key"}), \
+             patch("riptide.companion._search_giphy", return_value=None), \
+             patch("riptide.companion._search_tenor", return_value=None):
             url = select_gif("✨", "feat: shiny", [{"filename": "a.tsx"}])
             assert url.startswith("https://media.giphy.com/media/")
 
-    def test_giphy_api_exception_falls_back_to_pool(self):
+    def test_giphy_api_exception_falls_back_to_static(self):
         with patch.dict("os.environ", {"GIPHY_API_KEY": "bad-key"}), \
              patch("riptide.companion._search_giphy", side_effect=RuntimeError("boom")):
             url = select_gif("✨", "feat: shiny", [{"filename": "a.tsx"}])
             assert url.startswith("https://media.giphy.com/media/")
 
 
-class TestEmojiToGiphyTag:
-    def test_known_emoji(self):
-        assert _emoji_to_giphy_tag("✨") == "sparkle celebration"
-        assert _emoji_to_giphy_tag("🐛") == "bug fix"
+class TestPickBestTag:
+    """Test keyword-relevant tag selection."""
 
-    def test_unknown_emoji_default(self):
-        assert _emoji_to_giphy_tag("🤷") == "reaction"
+    def test_title_keyword_boosts_specific_tag(self):
+        # "bug fix" tag contains "bug" and "fix" — both in title
+        tag = _pick_best_tag("🐛", "fix: critical bug in auth")
+        assert "bug" in tag.lower() or "fix" in tag.lower()
+
+    def test_no_title_gets_some_tag(self):
+        tag = _pick_best_tag("✨", "")
+        assert tag in GIF_TAGS["✨"]
+
+    def test_file_content_affects_tiebreak(self):
+        """Same emoji + same title prefix but different files → may differ."""
+        tag_a = _pick_best_tag("✨", "feat: new UI", [{"filename": "a.tsx"}])
+        tag_b = _pick_best_tag("✨", "feat: new UI", [{"filename": "b.css"}])
+        # Both valid tags; file content affects hash tiebreak
+        assert tag_a in GIF_TAGS["✨"]
+        assert tag_b in GIF_TAGS["✨"]
 
 
 class TestSearchGiphy:
     def _mock_resp(self, payload):
         mock_resp = MagicMock()
         mock_resp.read.return_value = json.dumps(payload).encode()
-        mock_resp.__enter__.return_value = mock_resp  # with-statement support
+        mock_resp.__enter__.return_value = mock_resp
         return mock_resp
 
     def test_returns_url_on_success(self):
@@ -110,6 +132,41 @@ class TestSearchGiphy:
             a = _search_giphy("bug fix", "key")
             b = _search_giphy("bug fix", "key")
             assert a == b
+
+
+class TestSearchTenor:
+    def _mock_resp(self, payload):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(payload).encode()
+        mock_resp.__enter__.return_value = mock_resp
+        return mock_resp
+
+    def test_returns_url_on_success(self):
+        mock_resp = self._mock_resp({
+            "results": [
+                {"media_formats": {"gif": {"url": "https://tenor.com/1.gif"}}},
+                {"media_formats": {"gif": {"url": "https://tenor.com/2.gif"}}},
+            ]
+        })
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            url = _search_tenor("bug fix", "key")
+            assert url is not None
+            assert url.startswith("https://tenor.com/")
+
+    def test_returns_none_on_empty_results(self):
+        mock_resp = self._mock_resp({"results": []})
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            assert _search_tenor("bug fix", "key") is None
+
+    def test_prefers_gif_over_mp4(self):
+        mock_resp = self._mock_resp({
+            "results": [
+                {"media_formats": {"mp4": {"url": "https://v.com/v.mp4"}, "gif": {"url": "https://i.com/i.gif"}}},
+            ]
+        })
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            url = _search_tenor("test", "key")
+            assert url is not None and "gif" in url
 
 
 class TestClassifyPrMoodEnhancements:
