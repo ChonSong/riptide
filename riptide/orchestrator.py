@@ -239,23 +239,47 @@ class StateStore:
         finally:
             conn.close()
 
-    def has_pending_job(self, pr_number: int, tier: Optional[str] = None) -> bool:
-        """Check if there's already a pending job for this PR."""
+    @staticmethod
+    def _escape_like(pattern: str) -> str:
+        """Escape SQLite LIKE wildcards (% and _) in a prefix string."""
+        return pattern.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+    def has_pending_job(self, name_prefix: str) -> bool:
+        """Check if any pending job matches this owner/repo/pr prefix.
+
+        Uses LIKE prefix match on job id (format: riptide-review-{owner}-{repo}-{pr_number}-...)
+        and ignores rows older than 2 hours (TTL) to avoid blocking on crashed sessions.
+        """
         conn = sqlite3.connect(self.db_path, timeout=30)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
         try:
-            if tier:
-                row = conn.execute(
-                    "SELECT COUNT(*) FROM jobs WHERE pr_number=? AND tier=? AND status='pending'",
-                    (pr_number, tier),
-                ).fetchone()
-            else:
-                row = conn.execute(
-                    "SELECT COUNT(*) FROM jobs WHERE pr_number=? AND status='pending'",
-                    (pr_number,),
-                ).fetchone()
+            cutoff = time.time() - 7200  # 2-hour TTL
+            escaped = f"{self._escape_like(name_prefix)}%"
+            row = conn.execute(
+                "SELECT COUNT(*) FROM jobs WHERE id LIKE ? ESCAPE '\\' AND status='pending' AND created_at > ?",
+                (escaped, cutoff),
+            ).fetchone()
             return row[0] > 0
+        finally:
+            conn.close()
+
+    def cleanup_stale_pending(self, max_age_seconds: int = 7200):
+        """Mark stale pending jobs as failed (e.g., crashed Hermes sessions).
+
+        This prevents stale rows from permanently blocking _spawn_deepthink
+        from returning True for a PR.
+        """
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        try:
+            cutoff = time.time() - max_age_seconds
+            conn.execute(
+                "UPDATE jobs SET status='failed', completed_at=? WHERE status='pending' AND created_at < ?",
+                (time.time(), cutoff),
+            )
+            conn.commit()
         finally:
             conn.close()
 

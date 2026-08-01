@@ -73,6 +73,7 @@ class TestSpawnDeepthink:
         # Verify --skill flags
         assert "--skill" in cmd
         skills = [cmd[i + 1] for i, x in enumerate(cmd) if x == "--skill"]
+        assert "github-pr-lifecycle" in skills
         assert "deep-think" in skills
         assert "excalidraw" in skills
 
@@ -334,7 +335,7 @@ class TestGatherReviewData:
     def test_fetches_files_successfully(self):
         mock_result = MagicMock()
         mock_result.returncode = 0
-        mock_result.stdout = '{"files": [{"filename": "test.py", "additions": 10, "deletions": 5}]}'
+        mock_result.stdout = '{"files": [{"path": "test.py", "additions": 10, "deletions": 5}]}'
         with patch("subprocess.run", return_value=mock_result):
             result = _gather_review_data("ChonSong", "riptide", 42, "abc123")
             assert result["files_changed"] == [{"filename": "test.py", "additions": 10, "deletions": 5}]

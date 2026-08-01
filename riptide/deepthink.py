@@ -165,10 +165,11 @@ def _spawn_deepthink(
     name = f"riptide-review-{owner}-{repo}-{pr_number}"
     run_at = (datetime.now() + timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%S")
 
-    # Cross-session awareness: check if a review is already pending
+    # Cross-session awareness: clean up stale jobs, then check for pending
     from riptide.orchestrator import StateStore
     state = StateStore()
-    if state.has_pending_job(pr_number, "t1"):
+    state.cleanup_stale_pending()
+    if state.has_pending_job(name):
         log.info(f"Skipping {owner}/{repo}#{pr_number} — review already pending")
         return False
 
@@ -190,6 +191,7 @@ def _spawn_deepthink(
         "hermes", "cron", "create", run_at,
         prompt,
         "--name", name,
+        "--skill", "github-pr-lifecycle",
         "--skill", "deep-think",
         "--skill", "excalidraw",
         "--deliver", "origin",
@@ -212,11 +214,12 @@ def _spawn_deepthink(
                 cmd, capture_output=True, text=True, timeout=15
             )
             if result.returncode == 0:
-                # Record job for cross-session awareness
+                # Record job for cross-session awareness (unique ID per spawn)
+                job_id = f"{name}-{head_sha[:12]}-{int(time.time())}"
                 try:
-                    state.create_job(name, pr_number, "t1")
-                except Exception:
-                    pass  # Non-critical, dedup will catch duplicates
+                    state.create_job(job_id, pr_number, "t1")
+                except Exception as e:
+                    log.warning(f"Failed to record job {job_id}: {e}")
                 log.info(f"✓ Spawned deep-think for {owner}/{repo}#{pr_number}: {result.stdout[:200]}")
                 return True
             else:
@@ -275,7 +278,16 @@ def _gather_review_data(
         )
         if result.returncode == 0:
             files_data = json.loads(result.stdout)
-            data["files_changed"] = files_data.get("files", [])
+            # Normalize: gh returns {path, additions, deletions}; we use "filename"
+            raw_files = files_data.get("files", [])
+            data["files_changed"] = [
+                {
+                    "filename": f.get("path", "?"),
+                    "additions": f.get("additions", 0),
+                    "deletions": f.get("deletions", 0),
+                }
+                for f in raw_files
+            ]
     except Exception as e:
         log.warning(f"Failed to fetch PR files: {e}")
 
@@ -293,17 +305,47 @@ def _gather_review_data(
         except Exception as e:
             log.warning(f"Failed to fetch repo tree: {e}")
 
-        # 4. Run graphify if available
+        # 4. Run graphify if available (skip if fresh to avoid dirtying workspace)
         graphify_dir = workspace / "graphify-out"
         if graphify_dir.is_dir():
+            graph_json = graphify_dir / "graph.json"
+            if graph_json.exists():
+                age_minutes = (time.time() - graph_json.stat().st_mtime) / 60
+                if age_minutes < 15:
+                    log.info("Skipping graphify update — graph is fresh (<15 min)")
+                    # Still read existing data without updating
+                    try:
+                        result = subprocess.run(
+                            ["graphify", "query", f"what does PR #{pr_number} affect?"],
+                            capture_output=True, text=True, timeout=30,
+                            cwd=str(workspace),
+                        )
+                        if result.returncode == 0:
+                            data["graph_context"] = {"raw": result.stdout.strip()}
+                    except Exception as e:
+                        log.warning(f"Graphify query failed: {e}")
+                else:
+                    try:
+                        subprocess.run(
+                            ["graphify", "update", "."],
+                            capture_output=True, text=True, timeout=60,
+                            cwd=str(workspace),
+                        )
+                    except Exception as e:
+                        log.warning(f"Graphify update failed: {e}")
+            else:
+                # No graph yet — run update
+                try:
+                    subprocess.run(
+                        ["graphify", "update", "."],
+                        capture_output=True, text=True, timeout=60,
+                        cwd=str(workspace),
+                    )
+                except Exception as e:
+                    log.warning(f"Graphify update failed: {e}")
+
+            # Query for PR impact (runs regardless of update path)
             try:
-                # Update graphify
-                subprocess.run(
-                    ["graphify", "update", "."],
-                    capture_output=True, text=True, timeout=60,
-                    cwd=str(workspace),
-                )
-                # Query for PR impact
                 result = subprocess.run(
                     ["graphify", "query", f"what does PR #{pr_number} affect?"],
                     capture_output=True, text=True, timeout=30,
@@ -319,7 +361,6 @@ def _gather_review_data(
                     cwd=str(workspace),
                 )
                 if result.returncode == 0:
-                    # Parse god nodes from output
                     for line in result.stdout.strip().split("\n"):
                         match = re.match(r"\s*\d+\.\s+(.+?)\s+-\s+(\d+)\s+edges", line)
                         if match:
@@ -335,7 +376,6 @@ def _gather_review_data(
                     cwd=str(workspace),
                 )
                 if result.returncode == 0:
-                    # Parse communities from output
                     for line in result.stdout.strip().split("\n"):
                         if line.strip().startswith("- "):
                             comm_name = line.strip()[2:].strip()
@@ -368,9 +408,9 @@ def _build_orchestrator_prompt(
         for f in data["files_changed"][:20]
     )
 
-    # Format diff summary (first 2000 chars)
-    diff_summary = data["diff_raw"][:2000]
-    if len(data["diff_raw"]) > 2000:
+    # Format diff summary (first 12k chars)
+    diff_summary = data["diff_raw"][:12000]
+    if len(data["diff_raw"]) > 12000:
         diff_summary += f"\n  ... ({len(data['diff_raw'])} chars total)"
 
     # Format graphify context
@@ -397,9 +437,9 @@ def _build_orchestrator_prompt(
 {files_str}
 
 ### Diff Summary
-```
+````
 {diff_summary}
-```
+````
 
 ### Graphify Analysis
 {graph_str}
@@ -411,15 +451,13 @@ You are a senior engineer. Delegate review tasks to subagents, then synthesize.
 ### Step 1: Delegate Inline Review
 Spawn a subagent with:
 - Role: Code reviewer
-- Skills: deep-think
-- Task: Analyze the PR diff, post 1-3 inline review comments with GitHub suggestion blocks
+- Task: Call `skill_view('deep-think')` first, then analyze the PR diff, post 1-3 inline review comments with GitHub suggestion blocks
 - Output: JSON list of findings [{{file, line, severity, title, detail}}]
 
 ### Step 2: Delegate Excalidraw Diagram
 Spawn a subagent with (parallel to Step 1):
 - Role: Architecture diagram generator
-- Skills: excalidraw
-- Task: Generate a diagram from the findings + graphify data
+- Task: Call `skill_view('excalidraw')` first, then generate a diagram from the findings + graphify data
 - Output: Excalidraw URL
 
 ### Step 3: Post Summary Review
