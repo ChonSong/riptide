@@ -337,6 +337,70 @@ def _spawn_deepthink(
     return False
 
 
+def _spawn_deepthink_with_prompt(
+    owner: str, repo: str, pr_number: int,
+    pr_title: str, pr_author: str, total_loc: int,
+    head_sha: str = "", custom_prompt: str = "",
+) -> bool:
+    """
+    Spawn deep-think with a custom prompt (from review_pipeline).
+    
+    Uses the structured prompt from render_review_prompt() instead of
+    building one from scratch. This ensures all gathered data (repo tree,
+    code chunks, graphify context) is included.
+    """
+    max_retries = 3
+    base_delay = 5  # seconds
+    name = f"riptide-review-{owner}-{repo}-{pr_number}"
+    run_at = (datetime.now() + timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%S")
+
+    # Use the custom prompt if provided, otherwise build default
+    if custom_prompt:
+        prompt = custom_prompt
+    else:
+        # Fallback to default prompt
+        prompt = f"PR #{pr_number} in {owner}/{repo} has >100 LOC changed ({total_loc} LOC total) and has been stable for 30+ minutes."
+
+    cmd = [
+        "hermes", "cron", "create", run_at,
+        prompt,
+        "--name", name,
+        "--skill", "github-pr-lifecycle",
+        "--skill", "deep-think",
+        "--skill", "excalidraw",
+        "--skill", "brooks-lint",
+        "--deliver", "origin",
+    ]
+
+    for attempt in range(max_retries):
+        if attempt > 0:
+            delay = base_delay * (2 ** attempt)
+            log.info(f"Retry {attempt+1}/{max_retries} for {owner}/{repo}#{pr_number} in {delay}s...")
+            time.sleep(delay)
+
+        if not _is_cron_available():
+            log.warning(f"hermes not available on attempt {attempt+1}")
+            continue
+
+        log.info(f"Spawning (custom prompt): hermes cron create {run_at} --name {name} (attempt {attempt+1})")
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=15
+            )
+            if result.returncode == 0:
+                log.info(f"✓ Spawned deep-think (custom) for {owner}/{repo}#{pr_number}")
+                return True
+            else:
+                log.error(f"✗ Spawn failed (attempt {attempt+1}): {result.stderr[:300]}")
+        except subprocess.TimeoutExpired:
+            log.warning(f"Timeout spawning deep-think (attempt {attempt+1})")
+        except Exception as e:
+            log.error(f"Error spawning deep-think (attempt {attempt+1}): {e}")
+
+    log.error(f"All {max_retries} attempts failed for {owner}/{repo}#{pr_number}")
+    return False
+
+
 def run():
     """Poll watched repos and spawn deep-think sessions on qualifying PRs."""
     if not _is_cron_available():

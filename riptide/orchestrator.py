@@ -27,7 +27,7 @@ import logging
 import subprocess
 from pathlib import Path
 from typing import Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
 log = logging.getLogger("riptide.orchestrator")
@@ -253,7 +253,52 @@ class StateStore:
             conn.close()
 
 
-# ── T0 Orchestrator ──────────────────────────────────────────────────────────
+# ── Review Data Collection ───────────────────────────────────────────────────
+
+@dataclass
+class CodeChunk:
+    """A code block from the PR diff with context."""
+    file: str
+    line_start: int
+    line_end: int
+    content: str
+    change_type: str  # "added", "removed", "context"
+    why: str = ""  # filled by deepthink
+
+
+@dataclass
+class ReviewData:
+    """All data needed for a PR review — gathered by T0, consumed by template + deepthink."""
+    # PR identity
+    pr_number: int
+    title: str
+    author: str
+    owner: str
+    repo: str
+    head_sha: str
+    base_sha: str = ""
+    
+    # PR scope
+    files_changed: list = field(default_factory=list)
+    total_loc: int = 0
+    total_additions: int = 0
+    total_deletions: int = 0
+    
+    # Repository context
+    repo_tree: list = field(default_factory=list)  # directory tree from git ls-files
+    
+    # Code analysis
+    code_chunks: list = field(default_factory=list)  # CodeChunk objects
+    diff_raw: str = ""  # full PR diff text
+    
+    # Graphify context
+    graph_context: dict = field(default_factory=dict)
+    god_nodes: list = field(default_factory=list)
+    communities: list = field(default_factory=list)
+    
+    # Classification
+    mood_emoji: str = "\u2728"
+
 
 class T0Orchestrator:
     """
@@ -454,11 +499,28 @@ class T0Orchestrator:
     def _dispatch_t1(self, profile: TaskProfile) -> dict:
         """Dispatch to T1 (deepthink via Hermes cron)."""
         try:
-            from riptide.deepthink import _spawn_deepthink
-            result = _spawn_deepthink(
+            # Collect review context (repo tree, code chunks, diff)
+            from riptide.review_pipeline import collect_review_context, render_review_prompt
+            review_ctx = collect_review_context(
+                pr_number=profile.pr_number,
+                title=profile.title,
+                author=profile.author,
+                owner=profile.owner,
+                repo=profile.repo,
+                head_sha=profile.head_sha,
+                files_changed=profile.files,
+                total_loc=profile.total_loc,
+                graph_context=profile.__dict__.get("graph_context", {}),
+                mood_emoji="✨",
+            )
+            prompt = render_review_prompt(review_ctx)
+            
+            from riptide.deepthink import _spawn_deepthink_with_prompt
+            result = _spawn_deepthink_with_prompt(
                 profile.owner, profile.repo, profile.pr_number,
                 profile.title, profile.author, profile.total_loc,
                 head_sha=profile.head_sha,
+                custom_prompt=prompt,
             )
             return {
                 "status": "dispatched" if result else "failed",
@@ -591,7 +653,7 @@ class T0Orchestrator:
         }
     
     def _post_comment(self, profile: TaskProfile, unified: dict):
-        """Post unified comment to PR with retry."""
+        """Post unified comment to PR with retry + validation."""
         if not self.github:
             log.warning("No github client, skipping comment post")
             return
@@ -599,6 +661,14 @@ class T0Orchestrator:
         body = unified.get("body", "")
         if not body:
             return
+        
+        # Validate review has required sections
+        from riptide.review_pipeline import validate_review
+        is_valid, missing = validate_review(body)
+        if not is_valid:
+            log.warning(f"Review missing required sections: {missing}")
+            # Add a note about missing sections
+            body += f"\n\n<!-- Review validation: missing sections: {', '.join(missing)} -->"
         
         for attempt in range(1, _MAX_COMMENT_RETRIES + 1):
             try:
