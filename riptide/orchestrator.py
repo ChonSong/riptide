@@ -355,28 +355,35 @@ class T0Orchestrator:
         if not self.companion:
             return {"status": "skipped", "tier": "t2", "body": ""}
         
+        # Always compute emoji + GIF first (cheap, no network)
+        emoji = "✨"
+        gif_url = ""
         try:
             emoji = self.companion.classify_pr_mood(profile.title, profile.files)
             gif_url = self.companion.select_gif(emoji, profile.title, profile.files)
+        except Exception as e:
+            log.warning(f"T2 emoji/GIF classification failed: {e}")
+        
+        # Generate TL;DR (local Ollama call — may fail if model down)
+        tldr = None
+        graph_context = None
+        try:
             graph_context = self.companion._get_graph_context(profile.files)
-            
-            # Generate TL;DR (non-blocking, local Ollama call)
             tldr = self.companion._generate_tldr(
                 profile.title, profile.author, profile.files, graph_context
             )
-            
-            return {
-                "status": "complete",
-                "tier": "t2",
-                "emoji": emoji,
-                "gif_url": gif_url,
-                "tldr": tldr,
-                "graph_context": graph_context,
-                "body": tldr or "",
-            }
         except Exception as e:
-            log.warning(f"T2 generation failed: {e}")
-            return {"status": "error", "tier": "t2", "body": "", "error": str(e)}
+            log.warning(f"T2 TL;DR generation failed: {e}")
+        
+        return {
+            "status": "complete" if tldr else "partial",
+            "tier": "t2",
+            "emoji": emoji,
+            "gif_url": gif_url,
+            "tldr": tldr,
+            "graph_context": graph_context,
+            "body": tldr or "",
+        }
     
     def _dispatch_t1(self, profile: TaskProfile) -> dict:
         """Dispatch to T1 (deepthink via Hermes cron)."""
