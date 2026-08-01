@@ -74,7 +74,7 @@ def _should_process_synchronize(owner: str, repo: str, pr_number: int) -> bool:
             }
         return True
 
-# ── State store (webhook idempotency) ──────────────────────────────────────
+
 _state_store = None
 
 
