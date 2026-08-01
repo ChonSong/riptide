@@ -356,11 +356,12 @@ class T0Orchestrator:
             return {"status": "skipped", "tier": "t2", "body": ""}
         
         # Always compute emoji + GIF first (cheap, no network)
+        from riptide.companion import classify_pr_mood, select_gif
         emoji = "✨"
         gif_url = ""
         try:
-            emoji = self.companion.classify_pr_mood(profile.title, profile.files)
-            gif_url = self.companion.select_gif(emoji, profile.title, profile.files)
+            emoji = classify_pr_mood(profile.title, profile.files)
+            gif_url = select_gif(emoji, profile.title, profile.files)
         except Exception as e:
             log.warning(f"T2 emoji/GIF classification failed: {e}")
         
