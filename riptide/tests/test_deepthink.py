@@ -49,7 +49,9 @@ class TestSpawnDeepthink:
         }
 
     def test_spawn_builds_correct_command(self, mock_hermes_cron):
-        with patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock):
+        with patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
+             patch("riptide.orchestrator.StateStore") as mock_state:
+            mock_state.return_value.has_pending_job.return_value = False
             _spawn_deepthink(
                 owner="ChonSong",
                 repo="riptide",
@@ -84,7 +86,9 @@ class TestSpawnDeepthink:
     def test_spawn_success_returns_true(self):
         with patch("subprocess.run", return_value=self._success_result()) as mock_run, \
              patch("riptide.deepthink._is_cron_available", return_value=True), \
-             patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock):
+             patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
+             patch("riptide.orchestrator.StateStore") as mock_state:
+            mock_state.return_value.has_pending_job.return_value = False
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
             assert result is True
             mock_run.assert_called_once()
@@ -93,7 +97,9 @@ class TestSpawnDeepthink:
         with patch("subprocess.run", return_value=MagicMock(returncode=1, stderr="boom")) as mock_run, \
              patch("time.sleep") as mock_sleep, \
              patch("riptide.deepthink._is_cron_available", return_value=True), \
-             patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock):
+             patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
+             patch("riptide.orchestrator.StateStore") as mock_state:
+            mock_state.return_value.has_pending_job.return_value = False
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
             assert result is False
             assert mock_run.call_count == 3
@@ -102,7 +108,9 @@ class TestSpawnDeepthink:
         with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="hermes", timeout=15)) as mock_run, \
              patch("time.sleep") as mock_sleep, \
              patch("riptide.deepthink._is_cron_available", return_value=True), \
-             patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock):
+             patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
+             patch("riptide.orchestrator.StateStore") as mock_state:
+            mock_state.return_value.has_pending_job.return_value = False
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
             assert result is False
             assert mock_run.call_count == 3
@@ -110,7 +118,9 @@ class TestSpawnDeepthink:
     def test_spawn_includes_pr_details_in_prompt(self):
         with patch("subprocess.run", return_value=self._success_result()) as mock_hermes_cron, \
              patch("riptide.deepthink._is_cron_available", return_value=True), \
-             patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock):
+             patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
+             patch("riptide.orchestrator.StateStore") as mock_state:
+            mock_state.return_value.has_pending_job.return_value = False
             _spawn_deepthink(
                 "ChonSong", "riptide", 42, "feat: important change", "test-author", 250, "abc123def456789",
             )
@@ -125,6 +135,12 @@ class TestSpawnDeepthink:
             assert "feat: important change" in prompt
             assert "test-author" in prompt
             assert "250" in prompt
+
+    def test_skips_when_review_already_pending(self):
+        with patch("riptide.orchestrator.StateStore") as mock_state:
+            mock_state.return_value.has_pending_job.return_value = True
+            result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
+            assert result is False
 
 
 # ── _is_cron_available tests ────────────────────────────────────────────────

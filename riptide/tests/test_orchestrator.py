@@ -150,6 +150,31 @@ class TestStateStore:
         assert failed == 1
         conn.close()
 
+    def test_has_pending_job_returns_true_when_pending(self):
+        self.store.create_job("job-pending", 42, "t1")
+        assert self.store.has_pending_job(42, "t1") is True
+        assert self.store.has_pending_job(42) is True
+
+    def test_has_pending_job_returns_false_when_complete(self):
+        self.store.create_job("job-done", 42, "t1")
+        self.store.mark_complete("job-done")
+        assert self.store.has_pending_job(42, "t1") is False
+
+    def test_has_pending_job_returns_false_when_no_job(self):
+        assert self.store.has_pending_job(99) is False
+
+    def test_get_job_status_returns_latest(self):
+        self.store.create_job("job-old", 42, "t1")
+        self.store.mark_complete("job-old")
+        self.store.create_job("job-new", 42, "t1")
+        status = self.store.get_job_status(42)
+        assert status is not None
+        assert status["id"] == "job-new"
+        assert status["status"] == "pending"
+
+    def test_get_job_status_returns_none_when_no_jobs(self):
+        assert self.store.get_job_status(99) is None
+
 
 class TestT0Orchestrator:
     """Test T0 orchestrator with both modes."""

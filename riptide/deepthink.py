@@ -165,6 +165,13 @@ def _spawn_deepthink(
     name = f"riptide-review-{owner}-{repo}-{pr_number}"
     run_at = (datetime.now() + timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%S")
 
+    # Cross-session awareness: check if a review is already pending
+    from riptide.orchestrator import StateStore
+    state = StateStore()
+    if state.has_pending_job(pr_number, "t1"):
+        log.info(f"Skipping {owner}/{repo}#{pr_number} — review already pending")
+        return False
+
     # Pre-gather data in Python (cheaper than having the agent do it)
     data = _gather_review_data(owner, repo, pr_number, head_sha)
 
@@ -205,6 +212,11 @@ def _spawn_deepthink(
                 cmd, capture_output=True, text=True, timeout=15
             )
             if result.returncode == 0:
+                # Record job for cross-session awareness
+                try:
+                    state.create_job(name, pr_number, "t1")
+                except Exception:
+                    pass  # Non-critical, dedup will catch duplicates
                 log.info(f"✓ Spawned deep-think for {owner}/{repo}#{pr_number}: {result.stdout[:200]}")
                 return True
             else:

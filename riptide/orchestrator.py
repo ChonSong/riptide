@@ -238,6 +238,49 @@ class StateStore:
             conn.commit()
         finally:
             conn.close()
+
+    def has_pending_job(self, pr_number: int, tier: Optional[str] = None) -> bool:
+        """Check if there's already a pending job for this PR."""
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        try:
+            if tier:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM jobs WHERE pr_number=? AND tier=? AND status='pending'",
+                    (pr_number, tier),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM jobs WHERE pr_number=? AND status='pending'",
+                    (pr_number,),
+                ).fetchone()
+            return row[0] > 0
+        finally:
+            conn.close()
+
+    def get_job_status(self, pr_number: int) -> Optional[dict]:
+        """Get the latest job status for a PR (for cross-session awareness)."""
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        try:
+            row = conn.execute(
+                "SELECT id, tier, status, created_at, completed_at FROM jobs "
+                "WHERE pr_number=? ORDER BY created_at DESC LIMIT 1",
+                (pr_number,),
+            ).fetchone()
+            if row:
+                return {
+                    "id": row[0],
+                    "tier": row[1],
+                    "status": row[2],
+                    "created_at": row[3],
+                    "completed_at": row[4],
+                }
+            return None
+        finally:
+            conn.close()
     
     def mark_failed(self, job_id: str):
         conn = sqlite3.connect(self.db_path, timeout=30)
