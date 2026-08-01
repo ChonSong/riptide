@@ -810,4 +810,4 @@ ELI5:"""
             parts.append("</sub>")
 
         return "".join(parts)
-// test: verify gif selection end-to-end
+// real commit
