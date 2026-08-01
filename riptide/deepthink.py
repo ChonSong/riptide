@@ -269,7 +269,7 @@ def _spawn_deepthink(
         f"        output_path='/tmp/review.excalidraw',\n"
         f"    )\n"
         f")\n"
-        f"print(f'Excalidraw: {url}')\n"
+        f"print(f'Excalidraw: {{url}}')\\n"
         f"```\n\n"
         f"The renderer creates 9 connected sections: distance-radius network map (nodes arranged "
         f"by network distance from PR changes), codebase landscape (all modules with "
