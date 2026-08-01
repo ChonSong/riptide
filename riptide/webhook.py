@@ -59,6 +59,7 @@ _SYNCHRONIZE_MIN_INTERVAL = 60.0  # seconds between synchronize processing
 
 def _should_process_synchronize(owner: str, repo: str, pr_number: int) -> bool:
     """Check if enough time has passed since the last synchronize for this PR."""
+    global _SYNCHRONIZE_TIMESTAMPS
     key = f"{owner}/{repo}#{pr_number}"
     now = time.time()
     with _SYNCHRONIZE_LOCK:
