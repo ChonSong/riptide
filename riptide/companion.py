@@ -117,10 +117,14 @@ def _pick_best_tag(emoji: str, pr_title: str, changed_files: list[dict] = None) 
         for word in tag_words:
             if word in title_lower:
                 score += 2  # Direct title match
-        # Booster keywords
+        # Specific keyword boosts (tag-specific, not emoji-wide)
         for keyword, boost_emoji in KEYWORD_TAG_BOOST.items():
             if boost_emoji == emoji and keyword in title_lower:
-                score += 1
+                # Boost matching tags more than non-matching ones
+                if keyword in tag_words:
+                    score += 3  # Specific match
+                else:
+                    score += 1  # General emoji match
         scored.append((score, tag))
     
     # Sort by score descending, then pick among top-scoring tags
@@ -146,7 +150,7 @@ def select_gif(emoji: str, pr_title: str = "", changed_files: list[dict] = None)
     Priority:
     1. Giphy API (if GIPHY_API_KEY set) with keyword-relevant tag
     2. Tenor API (if TENOR_API_KEY set) with keyword-relevant tag  
-    3. Static fallback (content-hash selected from curated set)
+    3. Static fallback (uses tag from _pick_best_tag for relevance)
     """
     if not pr_title:
         return GIFI_MAP.get(emoji, GIFI_MAP["✨"])
@@ -173,58 +177,76 @@ def select_gif(emoji: str, pr_title: str = "", changed_files: list[dict] = None)
         except Exception:
             pass
     
-    # Static fallback: use content hash to pick from curated pool
-    pool_tags = GIF_TAGS.get(emoji, GIF_TAGS["✨"])
-    content_key = pr_title + str(len(changed_files or []))
-    idx = zlib.crc32(content_key.encode()) % len(pool_tags)
-    static_tag = pool_tags[idx]
-    
-    # Build Giphy CDN URL from the tag (consistent per tag)
-    tag_hash = zlib.crc32(static_tag.encode())
-    gif_ids = {
-        "feature launch": "26tOZ42Mg6pbTUPHW",
-        "new feature": "l46Cbqvg6gxGvh2PS",
-        "sparkle celebration": "3o7TKSjRrfIPjeiYxW",
-        "shiny": "l0HlNQ03J5JxX2rGU",
+    # Static fallback: use the specific tag to pick a relevant GIF
+    return _static_gif_for_tag(emoji, best_tag)
+
+
+def _static_gif_for_tag(emoji: str, tag: str) -> str:
+    """
+    Map a specific tag to a deterministic static GIF URL.
+    Each unique tag gets its own GIF — so "bug fix" and "debugging"
+    produce different results even within the same emoji.
+    """
+    # Canonical tag → Giphy ID mapping
+    TAG_GIF_MAP = {
+        # 🐛 bug
         "bug fix": "l0HlBO7eyXzSZkJri",
         "debugging": "3o7TKMt12RVebpyZ0c",
         "squash bug": "xT0xeJpnrWC4XWblEk",
         "error crash": "26tn33aiTi1jkl6H6",
+        # ✨ feature
+        "feature launch": "26tOZ42Mg6pbTUPHW",
+        "new feature": "l46Cbqvg6gxGvh2PS",
+        "sparkle celebration": "3o7TKSjRrfIPjeiYxW",
+        "shiny": "l0HlNQ03J5JxX2rGU",
+        # ♻️ refactor
         "refactor": "3o7qDEq2bMbcbPRQ2c",
         "code cleanup": "l0HlNQ03J5JxX2rGU",
         "restructure": "26tOZ42Mg6pbTUPHW",
         "recycle": "26tn33aiTi1jkl6H6",
+        # 🧹 cleanup
         "cleaning": "3DnDRfZe2ubQc",
         "tidying up": "l0HlBO7eyXzSZkJri",
         "declutter": "3o7TKMt12RVebpyZ0c",
         "sweep": "l0HlNQ03J5JxX2rGU",
+        # 🔧 config
         "tools fix": "Y3kQOYHyVZcErGeMYF",
         "wrench": "3o7qDEq2bMbcbPRQ2c",
         "mechanic": "l46Cbqvg6gxGvh2PS",
         "configuration": "l0HlBO7eyXzSZkJri",
+        # 📝 docs
         "writing notes": "13HgwGsXF0aiGY",
         "documentation": "3o7TKSjRrfIPjeiYxW",
         "typing": "l0HlNQ03J5JxX2rGU",
         "journal": "l46Cbqvg6gxGvh2PS",
+        # 📦 deps
         "package delivery": "3o6Zt6KHwTY5sxJZE",
         "shipping box": "l46Cbqvg6gxGvh2PS",
         "unboxing": "3o7qDEq2bMbcbPRQ2c",
         "delivery": "26tOZ42Mg6pbTUPHW",
+        # 🧪 test
         "science experiment": "3o7TKSjRrfIPjeiYxW",
         "lab test": "l0HlNQ03J5JxX2rGU",
         "chemistry": "26tOZ42Mg6pbTUPHW",
         "testing": "l46Cbqvg6gxGvh2PS",
+        # ⏪ revert
         "rewind": "26tOZ42Mg6pbTUPHW",
         "go back": "3o7TKMt12RVebpyZ0c",
         "undo": "l46Cbqvg6gxGvh2PS",
         "reverse": "l0HlBO7eyXzSZkJri",
+        # ⚡ perf
         "lightning fast": "26tOZ42Mg6pbTUPHW",
         "speed": "3o7qDEq2bMbcbPRQ2c",
         "fast": "l0HlBO7eyXzSZkJri",
         "turbo": "l46Cbqvg6gxGvh2PS",
     }
-    gif_id = gif_ids.get(static_tag, "26tOZ42Mg6pbTUPHW")
-    return f"https://media.giphy.com/media/{gif_id}/giphy.gif"
+    
+    gif_id = TAG_GIF_MAP.get(tag)
+    if gif_id:
+        return f"https://media.giphy.com/media/{gif_id}/giphy.gif"
+    
+    # Unknown tag → fallback to emoji default
+    return GIFI_MAP.get(emoji, GIFI_MAP["✨"])
 
 
 def _search_giphy(tag: str, api_key: str, limit: int = 5) -> str | None:
