@@ -1,0 +1,77 @@
+#!/bin/bash
+# Pre-commit hook: block commits where agent config files reference directories
+# that no longer exist in the repo. Scans ONLY added lines via git diff --cached.
+set -e
+
+ROOT=$(git rev-parse --show-toplevel)
+ERRORS=""
+EC=0
+
+# Files to scan — only if they changed in the staging area
+FILES=$(git diff --cached --name-only | grep -E '(AGENTS\.md|CLAUDE\.md|SOUL\.md|SKILL\.md|\.claude/[^/]+\.md|\.cursor/rules/[^/]+\.md)$' || true)
+[ -z "$FILES" ] && exit 0
+
+while IFS= read -r FILE; do
+    [ -z "$FILE" ] && continue
+
+    # Get only added lines from the staged diff
+    LINES=$(git diff --cached -U0 -- "$FILE" | grep '^+' | grep -v '^+++' | sed 's/^+//' || true)
+    [ -z "$LINES" ] && continue
+
+    while IFS= read -r LINE; do
+        [ -z "$LINE" ] && continue
+        # Skip markdown table rows, URLs, shebangs
+        echo "$LINE" | grep -qE '^\|' && continue
+
+        # --- Pattern A: directory-tree lines (├──, └──, │── ) ---
+        if echo "$LINE" | grep -qE '[├└│]── '; then
+            # Extract the path that follows the tree-drawing character
+            P=$(echo "$LINE" | sed 's/.*[├└│]── *//' | sed 's/ *$//' | sed 's/ *#.*$//')
+            [ -z "$P" ] && continue
+
+            # If path contains a /, check its leading directory component
+            if echo "$P" | grep -q '/'; then
+                D=$(echo "$P" | sed 's|/[^/]*$||')
+                [ -z "$D" ] && continue
+                if [ ! -d "$ROOT/$D" ]; then
+                    ERRORS="$ERRORS\n  $FILE: directory '$D' (from '$P') does not exist"
+                    EC=$((EC+1))
+                fi
+            elif echo "$P" | grep -q '/$'; then
+                D=$(echo "$P" | sed 's|/$||')
+                if [ ! -d "$ROOT/$D" ]; then
+                    ERRORS="$ERRORS\n  $FILE: directory '$D' does not exist"
+                    EC=$((EC+1))
+                fi
+            fi
+            # plain filename without / → skip (not a directory ref)
+        fi
+
+        # --- Pattern B: inline relative paths (./path, ../relative) ---
+        for W in $(echo "$LINE" | grep -oE '(\.\.?/[a-zA-Z0-9_./-]+)' || true); do
+            # If it looks like a directory (ends in /), check it directly
+            if echo "$W" | grep -qE '/$'; then
+                D=$(echo "$W" | sed 's|/$||')
+                if [ ! -d "$ROOT/$D" ]; then
+                    ERRORS="$ERRORS\n  $FILE: directory '$D' does not exist"
+                    EC=$((EC+1))
+                fi
+            elif echo "$W" | grep -qE '^\.\.?/[a-zA-Z0-9_.-]+/'; then
+                # Has a directory component (not just ./foo)
+                D=$(echo "$W" | sed 's|/[^/]*$||')
+                [ -z "$D" ] && continue
+                [ "$D" = "." ] || [ "$D" = ".." ] && continue
+                if [ ! -d "$ROOT/$D" ]; then
+                    ERRORS="$ERRORS\n  $FILE: directory '$D' (from '$W') does not exist"
+                    EC=$((EC+1))
+                fi
+            fi
+        done
+    done <<< "$LINES"
+done <<< "$FILES"
+
+if [ "$EC" -gt 0 ]; then
+    echo "ERROR: Stale directory references found in changed agent config files:$ERRORS"
+    exit 1
+fi
+exit 0
