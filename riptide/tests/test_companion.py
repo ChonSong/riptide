@@ -1,0 +1,257 @@
+# riptide/tests/test_companion.py
+"""
+Tests for Riptide Companion bot (Bot 1).
+Covers PR classification, UI detection, TL;DR generation, and Ollama edge cases.
+"""
+
+import os
+from unittest.mock import patch, MagicMock
+
+import pytest
+
+from riptide.companion import Companion, classify_pr_mood
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+
+def make_companion(tmp_path=None):
+    """Create a Companion instance with mocked github client and disabled warm-up."""
+    client = MagicMock()
+    with patch("threading.Thread"):
+        companion = Companion(client)
+    return companion
+
+
+# ── classify_pr_mood ────────────────────────────────────────────────────────
+
+
+class TestClassifyPrMood:
+    """Tests for the module-level classify_pr_mood function."""
+
+    @pytest.mark.parametrize(
+        "title,expected_emoji",
+        [
+            ("feat: implement new button component", "✨"),
+            ("add: support for dark mode", "✨"),
+            ("feature: implement caching", "✨"),
+            ("fix: resolve crash on startup", "🐛"),
+            ("bug: null pointer in handler", "🐛"),
+            ("hotfix: emergency patch", "🐛"),
+            ("refactor: extract helper function", "♻️"),
+            ("cleanup: remove dead code", "🧹"),
+            ("tech debt: migrate to v2", "🧹"),
+            ("perf: improve query speed", "⚡"),
+            ("performance: reduce memory usage", "⚡"),
+            ("docs: update README", "📝"),
+            ("documentation: update api guide", "📝"),
+            ("config: update settings", "🔧"),
+            ("infra: migrate to new server", "🔧"),
+            ("deps: bump lodash", "📦"),
+            ("upgrade: react 19", "📦"),
+            ("test: verify login flow", "🧪"),
+            ("testing: verify edge cases", "🧪"),
+            ("revert: undo bad commit", "⏪"),
+            ("rollback: undo last change", "⏪"),
+        ],
+    )
+    def test_classification(self, title, expected_emoji):
+        assert classify_pr_mood(title, []) == expected_emoji
+
+    def test_default_emoji_for_unknown_title(self):
+        assert classify_pr_mood("misc: random changes", []) == "✨"
+
+    def test_empty_title_defaults_to_sparkles(self):
+        assert classify_pr_mood("", []) == "✨"
+
+    def test_case_insensitive_matching(self):
+        assert classify_pr_mood("FIX: resolve bug", []) == "🐛"
+        assert classify_pr_mood("Feat: new feature", []) == "✨"
+        assert classify_pr_mood("DOCS: update", []) == "📝"
+
+
+# ── _is_valid ────────────────────────────────────────────────────────────────
+
+
+class TestIsValid:
+    """Tests for Companion._is_valid static method."""
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "I cannot summarize this PR.",
+            "I can't help with this.",
+            "As an AI, I cannot provide...",
+            "I'm sorry, but I cannot...",
+            "I am sorry, I cannot do that.",
+            "Unable to process this request.",
+            "cannot provide a summary",
+            "can't summarize this",
+            "Please send a private message for help.",
+            "PRIVATE MESSAGE me for details",
+        ],
+    )
+    def test_rejects_bad_responses(self, text):
+        assert Companion._is_valid(text) is False
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "This PR adds a new authentication middleware.",
+            "Refactored the database layer to use connection pooling.",
+            "Fixed a race condition in the event handler.",
+            "Updated documentation with new API examples.",
+            "Adds performance optimizations to the query builder.",
+        ],
+    )
+    def test_accepts_good_responses(self, text):
+        assert Companion._is_valid(text) is True
+
+    def test_empty_string_is_valid(self):
+        assert Companion._is_valid("") is True
+
+    def test_case_insensitive_rejection(self):
+        assert Companion._is_valid("I CANNOT summarize this.") is False
+        assert Companion._is_valid("AS AN AI language model...") is False
+
+
+# ── _generate_tldr with Ollama mocking ────────────────────────────────────────
+
+
+class TestGenerateTldr:
+    """Tests for Companion._generate_tldr with mocked Ollama."""
+
+    def test_successful_tldr_generation(self, mock_ollama):
+        companion = make_companion()
+        files = [
+            {"filename": "src/utils/helper.py", "patch": "+def helper(): pass", "additions": 1, "deletions": 0, "status": "added"},
+        ]
+        result = companion._generate_tldr("feat: add helper", "testuser", files, None)
+        assert result is not None
+        assert isinstance(result, str)
+        assert len(result) > 0
+
+    def test_tldr_with_failure_returns_none(self, mock_ollama_failure):
+        companion = make_companion()
+        files = [
+            {"filename": "src/utils/helper.py", "patch": "+def helper(): pass", "additions": 1, "deletions": 0, "status": "added"},
+        ]
+        result = companion._generate_tldr("feat: add helper", "testuser", files, None)
+        assert result is None
+
+    def test_tldr_with_malformed_json_returns_none(self, mock_ollama_malformed):
+        companion = make_companion()
+        files = [
+            {"filename": "src/utils/helper.py", "patch": "+def helper(): pass", "additions": 1, "deletions": 0, "status": "added"},
+        ]
+        result = companion._generate_tldr("feat: add helper", "testuser", files, None)
+        assert result is None
+
+    def test_tldr_with_refusal_returns_none(self, mock_ollama_refusal):
+        companion = make_companion()
+        files = [
+            {"filename": "src/utils/helper.py", "patch": "+def helper(): pass", "additions": 1, "deletions": 0, "status": "added"},
+        ]
+        result = companion._generate_tldr("feat: add helper", "testuser", files, None)
+        assert result is None
+
+    def test_tldr_with_truncated_output(self, mock_ollama_truncated):
+        companion = make_companion()
+        files = [
+            {"filename": "src/utils/helper.py", "patch": "+def helper(): pass", "additions": 1, "deletions": 0, "status": "added"},
+        ]
+        result = companion._generate_tldr("feat: add helper", "testuser", files, None)
+        assert result is not None
+        assert result == "This PR adds a"
+
+    def test_tldr_with_graph_context(self, mock_ollama):
+        companion = make_companion()
+        files = [
+            {"filename": "src/utils/helper.py", "patch": "+def helper(): pass", "additions": 1, "deletions": 0, "status": "added"},
+        ]
+        graph_context = {"raw": "helper.py → utils.py", "nodes": 2, "files_checked": 1}
+        result = companion._generate_tldr("feat: add helper", "testuser", files, graph_context)
+        assert result is not None
+
+
+# ── _ollama_call edge cases ───────────────────────────────────────────────────
+
+
+class TestOllamaCall:
+    """Tests for Companion._ollama_call method."""
+
+    def test_timeout_returns_none(self):
+        companion = make_companion()
+        with patch("requests.post", side_effect=__import__("requests").exceptions.Timeout("timed out")):
+            result = companion._ollama_call("test prompt")
+            assert result is None
+
+    def test_connection_error_returns_none(self):
+        companion = make_companion()
+        with patch("requests.post", side_effect=__import__("requests").exceptions.ConnectionError("refused")):
+            result = companion._ollama_call("test prompt")
+            assert result is None
+
+    def test_non_200_returns_none(self, mock_ollama_failure):
+        companion = make_companion()
+        result = companion._ollama_call("test prompt")
+        assert result is None
+
+    def test_valid_response_returned(self, mock_ollama):
+        companion = make_companion()
+        result = companion._ollama_call("test prompt")
+        assert result is not None
+        assert isinstance(result, str)
+
+
+# ── _format_comment ──────────────────────────────────────────────────────────
+
+
+class TestFormatComment:
+    """Tests for Companion._format_comment method."""
+
+    def test_emoji_included_in_output(self):
+        companion = make_companion()
+        result = companion._format_comment("✨", "testuser", "This PR adds feature X.", None)
+        assert "✨" in result
+
+    def test_tldr_included_in_output(self):
+        companion = make_companion()
+        tldr = "This PR adds a new authentication layer."
+        result = companion._format_comment("✨", "testuser", tldr, None)
+        assert tldr in result
+
+    def test_author_mention_included(self):
+        companion = make_companion()
+        result = companion._format_comment("✨", "testuser", "Some TL;DR.", None)
+        assert "@testuser" in result
+
+    def test_graph_context_included(self):
+        companion = make_companion()
+        graph_context = {"raw": "helper.py → utils.py", "nodes": 3, "files_checked": 2}
+        result = companion._format_comment("✨", "testuser", "Some TL;DR.", graph_context)
+        assert "Blast Radius" in result
+
+    def test_eli5_included(self):
+        companion = make_companion()
+        result = companion._format_comment("✨", "testuser", "Some TL;DR.", None, eli5="It's like adding a new room to a house.")
+        assert "ELI5" in result
+        assert "It's like adding a new room to a house." in result
+
+    def test_proofshot_for_ui_files(self):
+        companion = make_companion()
+        ui_files = [{"filename": "src/components/Button.tsx"}]
+        result = companion._format_comment("✨", "testuser", "Some TL;DR.", None, ui_files=ui_files)
+        assert "ProofShot" in result
+        assert "Button.tsx" in result
+
+    def test_delta_prefix(self):
+        companion = make_companion()
+        result = companion._format_comment("✨", "testuser", "Some TL;DR.", None, is_delta=True)
+        assert "🔄" in result
+
+    def test_sign_off_included(self):
+        companion = make_companion()
+        result = companion._format_comment("✨", "testuser", "Some TL;DR.", None)
+        assert "Riptide" in result
+        assert "skip" in result.lower()
