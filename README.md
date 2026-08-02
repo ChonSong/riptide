@@ -310,7 +310,7 @@ hermes cron create "*/10 * * * *" \
 | `RIPTIDE_COMPANION_REPOS` | Comma-separated `owner/repo` list | (disabled) |
 | `RIPTIDE_COMPANION_MODEL` | Ollama model for TLDR generation | `qwen2.5-coder:7b` |
 | `COMPANION_ENABLE_GRAPHIFY` | Enable blast radius analysis | `1` |
-| `OLLAMA_BASE_URL` | Ollama API endpoint | `http://localhost:43311` |
+| `OLLAMA_BASE_URL` | Ollama API endpoint | `http://localhost:11434` |
 | `GIPHY_API_KEY` | Giphy API key for dynamic GIF lookup | (none) |
 | `TENOR_API_KEY` | Tenor API key for dynamic GIF lookup | (none) |
 
