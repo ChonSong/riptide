@@ -222,7 +222,7 @@ def _spawn_deepthink(
                 cmd, capture_output=True, text=True, timeout=15
             )
             if result.returncode == 0:
-                state.mark_complete(job_id)
+                # Reservation stays pending — the scheduled worker marks it complete when done
                 log.info(f"✓ Spawned deep-think for {owner}/{repo}#{pr_number}: {result.stdout[:200]}")
                 return True
             else:
