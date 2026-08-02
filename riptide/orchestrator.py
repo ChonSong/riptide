@@ -193,6 +193,10 @@ class StateStore:
                 received_at REAL
             )
         """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_jobs_pr_status
+            ON jobs (pr_number, status)
+        """)
         conn.commit()
         conn.close()
     
