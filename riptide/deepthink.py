@@ -22,6 +22,7 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
@@ -157,7 +158,8 @@ def _spawn_deepthink(
     to subagents for inline review and Excalidraw diagram generation.
 
     Retries up to 3 times with exponential backoff (5s/15s/30s).
-    Only records state on successful spawn.
+    Reserves a pending job before spawning the review; marks the job as
+    complete on success or failed if all attempts fail.
     Returns True if spawned successfully, False otherwise.
     """
     max_retries = 3
@@ -169,24 +171,29 @@ def _spawn_deepthink(
     from riptide.orchestrator import StateStore
     state = StateStore()
     state.cleanup_stale_pending()
-    job_id = f"{name}-{head_sha[:12]}-{int(time.time())}"
+    job_id = f"{name}-{head_sha[:12]}-{uuid.uuid4().hex[:12]}"
     if not state.reserve_job(job_id, pr_number, "t1", name):
         log.info(f"Skipping {owner}/{repo}#{pr_number} — review already pending")
         return False
 
-    # Pre-gather data in Python (cheaper than having the agent do it)
-    data = _gather_review_data(owner, repo, pr_number, head_sha)
+    try:
+        # Pre-gather data in Python (cheaper than having the agent do it)
+        data = _gather_review_data(owner, repo, pr_number, head_sha)
 
-    prompt = _build_orchestrator_prompt(
-        owner=owner,
-        repo=repo,
-        pr_number=pr_number,
-        pr_title=pr_title,
-        pr_author=pr_author,
-        total_loc=total_loc,
-        head_sha=head_sha,
-        data=data,
-    )
+        prompt = _build_orchestrator_prompt(
+            owner=owner,
+            repo=repo,
+            pr_number=pr_number,
+            pr_title=pr_title,
+            pr_author=pr_author,
+            total_loc=total_loc,
+            head_sha=head_sha,
+            data=data,
+        )
+    except Exception as e:
+        state.mark_failed(job_id)
+        log.error(f"Failed to gather data or build prompt for {owner}/{repo}#{pr_number}: {e}")
+        return False
 
     cmd = [
         "hermes", "cron", "create", run_at,
@@ -215,6 +222,7 @@ def _spawn_deepthink(
                 cmd, capture_output=True, text=True, timeout=15
             )
             if result.returncode == 0:
+                state.mark_complete(job_id)
                 log.info(f"✓ Spawned deep-think for {owner}/{repo}#{pr_number}: {result.stdout[:200]}")
                 return True
             else:

@@ -185,14 +185,31 @@ class TestStateStore:
         assert self.store.has_pending_job("riptide-review-ChonSong-riptide-42") is False
         assert self.store.has_pending_job("riptide-review-ChonSong-riptide-420") is True
 
-    def test_reserve_job_atomic_no_duplicate(self):
-        """Concurrent reserve_job calls must create only one reservation."""
+    def test_reserve_job_concurrent_only_one_wins(self):
+        """Concurrent reserve_job calls from two threads: exactly one succeeds."""
+        import threading
+
         prefix = "riptide-review-ChonSong-riptide-42"
-        # First reservation succeeds
-        assert self.store.reserve_job(f"{prefix}-job-a", 42, "t1", prefix) is True
-        # Second reservation for same PR fails (already pending)
-        assert self.store.reserve_job(f"{prefix}-job-b", 42, "t1", prefix) is False
-        # Verify only one row exists
+        results = []
+        barrier = threading.Barrier(2)
+
+        def reserve(job_id):
+            # Wait for both threads to be ready, then race
+            barrier.wait()
+            results.append(self.store.reserve_job(f"{prefix}-{job_id}", 42, "t1", prefix))
+
+        t1 = threading.Thread(target=reserve, args=("a",))
+        t2 = threading.Thread(target=reserve, args=("b",))
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        # Exactly one reservation should succeed
+        assert results.count(True) == 1, f"Expected exactly 1 True, got {results}"
+        assert results.count(False) == 1, f"Expected exactly 1 False, got {results}"
+
+        # Verify only one pending row exists for this prefix
         conn = sqlite3.connect(self.db_path)
         count = conn.execute("SELECT COUNT(*) FROM jobs WHERE status='pending'").fetchone()[0]
         conn.close()
