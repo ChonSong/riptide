@@ -272,6 +272,8 @@ class StateStore:
         """Atomically check for existing pending job and reserve a new pending row.
 
         Uses a single conditional INSERT to avoid TOCTOU race between check and insert.
+        Uses BEGIN IMMEDIATE to acquire a write lock immediately, preventing concurrent
+        transactions from creating duplicate reservations.
         Returns True if reservation was created, False if already pending.
 
         Args:
@@ -284,6 +286,8 @@ class StateStore:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
         try:
+            # BEGIN IMMEDIATE: acquire write lock now to prevent concurrent reservations
+            conn.execute("BEGIN IMMEDIATE")
             cutoff = time.time() - 7200  # 2-hour TTL
             escaped = f"{self._escape_like(name_prefix)}-%"
             # Atomically insert only if no matching pending job exists
@@ -297,6 +301,9 @@ class StateStore:
             )
             conn.commit()
             return conn.total_changes > 0
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
