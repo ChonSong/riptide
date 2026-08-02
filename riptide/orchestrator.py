@@ -73,7 +73,7 @@ class TaskProfile:
         """Architecture diagram needed."""
         arch_patterns = ("server.", "webhook.", "orchestrator.", "deepthink.", "companion.")
         return any(
-            any(p in f.get("filename", "") for p in arch_patterns)
+            any(p in (f.get("filename", "") or f.get("path", "")) for p in arch_patterns)
             for f in self.files
         )
 
@@ -337,7 +337,6 @@ class StateStore:
             return None
         finally:
             conn.close()
-    
     def mark_failed(self, job_id: str):
         conn = sqlite3.connect(self.db_path, timeout=30)
         conn.execute("PRAGMA journal_mode=WAL")
@@ -350,53 +349,6 @@ class StateStore:
             conn.commit()
         finally:
             conn.close()
-
-
-# ── Review Data Collection ───────────────────────────────────────────────────
-
-@dataclass
-class CodeChunk:
-    """A code block from the PR diff with context."""
-    file: str
-    line_start: int
-    line_end: int
-    content: str
-    change_type: str  # "added", "removed", "context"
-    why: str = ""  # filled by deepthink
-
-
-@dataclass
-class ReviewData:
-    """All data needed for a PR review — gathered by T0, consumed by template + deepthink."""
-    # PR identity
-    pr_number: int
-    title: str
-    author: str
-    owner: str
-    repo: str
-    head_sha: str
-    base_sha: str = ""
-    
-    # PR scope
-    files_changed: list = field(default_factory=list)
-    total_loc: int = 0
-    total_additions: int = 0
-    total_deletions: int = 0
-    
-    # Repository context
-    repo_tree: list = field(default_factory=list)  # directory tree from git ls-files
-    
-    # Code analysis
-    code_chunks: list = field(default_factory=list)  # CodeChunk objects
-    diff_raw: str = ""  # full PR diff text
-    
-    # Graphify context
-    graph_context: dict = field(default_factory=dict)
-    god_nodes: list = field(default_factory=list)
-    communities: list = field(default_factory=list)
-    
-    # Classification
-    mood_emoji: str = "\u2728"
 
 
 class T0Orchestrator:
