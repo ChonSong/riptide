@@ -448,8 +448,8 @@ Spawn a subagent with:
 - Task: Call `skill_view('deep-think')` first, then analyze the PR diff, post 1-3 inline review comments with GitHub suggestion blocks
 - Output: JSON list of findings [{{file, line, severity, title, detail}}]
 
-### Step 2: Delegate Excalidraw Diagram
-Spawn a subagent with (parallel to Step 1):
+### Step 2: Delegate Excalidraw Diagram (sequential — after Step 1 completes)
+Once the inline review subagent finishes, spawn a subagent with:
 - Role: Architecture diagram generator
 - Task: Call `skill_view('excalidraw')` first, then generate a diagram from the findings + graphify data
 - Output: Excalidraw URL
