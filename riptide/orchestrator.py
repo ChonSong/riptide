@@ -73,7 +73,7 @@ class TaskProfile:
         """Architecture diagram needed."""
         arch_patterns = ("server.", "webhook.", "orchestrator.", "deepthink.", "companion.")
         return any(
-            any(p in f.get("filename", "") for p in arch_patterns)
+            any(p in (f.get("filename", "") or f.get("path", "")) for p in arch_patterns)
             for f in self.files
         )
 
@@ -193,6 +193,10 @@ class StateStore:
                 received_at REAL
             )
         """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_jobs_pr_status
+            ON jobs (pr_number, status)
+        """)
         conn.commit()
         conn.close()
     
@@ -238,7 +242,112 @@ class StateStore:
             conn.commit()
         finally:
             conn.close()
-    
+
+    @staticmethod
+    def _escape_like(pattern: str) -> str:
+        """Escape SQLite LIKE wildcards (% and _) in a prefix string."""
+        return pattern.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+    def has_pending_job(self, name_prefix: str) -> bool:
+        """Check if any pending job matches this owner/repo/pr prefix.
+
+        Uses LIKE prefix match on job id (format: riptide-review-{owner}-{repo}-{pr_number}-...)
+        and ignores rows older than 2 hours (TTL) to avoid blocking on crashed sessions.
+        """
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        try:
+            cutoff = time.time() - 7200  # 2-hour TTL
+            escaped = f"{self._escape_like(name_prefix)}-%"
+            row = conn.execute(
+                "SELECT COUNT(*) FROM jobs WHERE id LIKE ? ESCAPE '\\' AND status='pending' AND created_at > ?",
+                (escaped, cutoff),
+            ).fetchone()
+            return row[0] > 0
+        finally:
+            conn.close()
+
+    def reserve_job(self, job_id: str, pr_number: int, tier: str, name_prefix: str) -> bool:
+        """Atomically check for existing pending job and reserve a new pending row.
+
+        Uses a single conditional INSERT to avoid TOCTOU race between check and insert.
+        Uses BEGIN IMMEDIATE to acquire a write lock immediately, preventing concurrent
+        transactions from creating duplicate reservations.
+        Returns True if reservation was created, False if already pending.
+
+        Args:
+            job_id: Unique job identifier (e.g., riptide-review-owner-repo-42-sha-time)
+            pr_number: PR number
+            tier: Job tier (e.g., "t1")
+            name_prefix: Prefix for matching (e.g., riptide-review-owner-repo-42)
+        """
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        try:
+            # BEGIN IMMEDIATE: acquire write lock now to prevent concurrent reservations
+            conn.execute("BEGIN IMMEDIATE")
+            cutoff = time.time() - 7200  # 2-hour TTL
+            escaped = f"{self._escape_like(name_prefix)}-%"
+            # Atomically insert only if no matching pending job exists
+            conn.execute(
+                """INSERT INTO jobs (id, pr_number, tier, status, created_at)
+                   SELECT ?, ?, ?, 'pending', ?
+                   WHERE NOT EXISTS (
+                       SELECT 1 FROM jobs WHERE id LIKE ? ESCAPE '\\' AND status='pending' AND created_at > ?
+                   )""",
+                (job_id, pr_number, tier, time.time(), escaped, cutoff),
+            )
+            conn.commit()
+            return conn.total_changes > 0
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def cleanup_stale_pending(self, max_age_seconds: int = 7200):
+        """Mark stale pending jobs as failed (e.g., crashed Hermes sessions).
+
+        This prevents stale rows from permanently blocking _spawn_deepthink
+        from returning True for a PR.
+        """
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        try:
+            cutoff = time.time() - max_age_seconds
+            conn.execute(
+                "UPDATE jobs SET status='failed', completed_at=? WHERE status='pending' AND created_at < ?",
+                (time.time(), cutoff),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_job_status(self, pr_number: int) -> Optional[dict]:
+        """Get the latest job status for a PR (for cross-session awareness)."""
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        try:
+            row = conn.execute(
+                "SELECT id, tier, status, created_at, completed_at FROM jobs "
+                "WHERE pr_number=? ORDER BY created_at DESC LIMIT 1",
+                (pr_number,),
+            ).fetchone()
+            if row:
+                return {
+                    "id": row[0],
+                    "tier": row[1],
+                    "status": row[2],
+                    "created_at": row[3],
+                    "completed_at": row[4],
+                }
+            return None
+        finally:
+            conn.close()
     def mark_failed(self, job_id: str):
         conn = sqlite3.connect(self.db_path, timeout=30)
         conn.execute("PRAGMA journal_mode=WAL")
@@ -251,53 +360,6 @@ class StateStore:
             conn.commit()
         finally:
             conn.close()
-
-
-# ── Review Data Collection ───────────────────────────────────────────────────
-
-@dataclass
-class CodeChunk:
-    """A code block from the PR diff with context."""
-    file: str
-    line_start: int
-    line_end: int
-    content: str
-    change_type: str  # "added", "removed", "context"
-    why: str = ""  # filled by deepthink
-
-
-@dataclass
-class ReviewData:
-    """All data needed for a PR review — gathered by T0, consumed by template + deepthink."""
-    # PR identity
-    pr_number: int
-    title: str
-    author: str
-    owner: str
-    repo: str
-    head_sha: str
-    base_sha: str = ""
-    
-    # PR scope
-    files_changed: list = field(default_factory=list)
-    total_loc: int = 0
-    total_additions: int = 0
-    total_deletions: int = 0
-    
-    # Repository context
-    repo_tree: list = field(default_factory=list)  # directory tree from git ls-files
-    
-    # Code analysis
-    code_chunks: list = field(default_factory=list)  # CodeChunk objects
-    diff_raw: str = ""  # full PR diff text
-    
-    # Graphify context
-    graph_context: dict = field(default_factory=dict)
-    god_nodes: list = field(default_factory=list)
-    communities: list = field(default_factory=list)
-    
-    # Classification
-    mood_emoji: str = "\u2728"
 
 
 class T0Orchestrator:

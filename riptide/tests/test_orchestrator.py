@@ -4,6 +4,7 @@ T0 Orchestrator: task classification, tier dispatch, result validation.
 """
 
 import os
+import time
 import pytest
 import tempfile
 import sqlite3
@@ -158,6 +159,104 @@ class TestStateStore:
         count = conn.execute("SELECT COUNT(*) FROM jobs WHERE id='job-dup'").fetchone()[0]
         assert count == 1
         conn.close()
+
+    def test_has_pending_job_returns_true_when_pending(self):
+        self.store.create_job("riptide-review-ChonSong-riptide-42-abc123-1234567890", 42, "t1")
+        assert self.store.has_pending_job("riptide-review-ChonSong-riptide-42") is True
+
+    def test_has_pending_job_returns_false_when_complete(self):
+        self.store.create_job("riptide-review-ChonSong-riptide-42-abc123-1234567890", 42, "t1")
+        self.store.mark_complete("riptide-review-ChonSong-riptide-42-abc123-1234567890")
+        assert self.store.has_pending_job("riptide-review-ChonSong-riptide-42") is False
+
+    def test_has_pending_job_returns_false_when_no_job(self):
+        assert self.store.has_pending_job("riptide-review-ChonSong-riptide-99") is False
+
+    def test_has_pending_job_escapes_like_wildcards(self):
+        """Underscores in owner/repo names must be escaped in LIKE query."""
+        self.store.create_job("riptide-review-ChonSong_my-repo-42-abc-123", 42, "t1")
+        assert self.store.has_pending_job("riptide-review-ChonSong_my-repo-42") is True
+        # Should NOT match a different prefix (underscore is literal, not wildcard)
+        assert self.store.has_pending_job("riptide-review-ChonSongXmy-repo-42") is False
+
+    def test_has_pending_job_no_pr_number_collision(self):
+        """PR #42 must not match PR #420 (hyphen delimiter prevents prefix collision)."""
+        self.store.create_job("riptide-review-ChonSong-riptide-420-abc123-1234567890", 420, "t1")
+        assert self.store.has_pending_job("riptide-review-ChonSong-riptide-42") is False
+        assert self.store.has_pending_job("riptide-review-ChonSong-riptide-420") is True
+
+    def test_reserve_job_concurrent_only_one_wins(self):
+        """Concurrent reserve_job calls from two threads: exactly one succeeds."""
+        import threading
+
+        prefix = "riptide-review-ChonSong-riptide-42"
+        results = []
+        barrier = threading.Barrier(2)
+
+        def reserve(job_id):
+            # Wait for both threads to be ready, then race
+            barrier.wait()
+            results.append(self.store.reserve_job(f"{prefix}-{job_id}", 42, "t1", prefix))
+
+        t1 = threading.Thread(target=reserve, args=("a",))
+        t2 = threading.Thread(target=reserve, args=("b",))
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        # Exactly one reservation should succeed
+        assert results.count(True) == 1, f"Expected exactly 1 True, got {results}"
+        assert results.count(False) == 1, f"Expected exactly 1 False, got {results}"
+
+        # Verify only one pending row exists for this prefix
+        conn = sqlite3.connect(self.db_path)
+        count = conn.execute("SELECT COUNT(*) FROM jobs WHERE status='pending'").fetchone()[0]
+        conn.close()
+        assert count == 1
+
+    def test_has_pending_job_returns_false_when_stale(self):
+        """Pending jobs older than 2h are ignored (TTL)."""
+        # Create a job with a created_at timestamp 3 hours ago
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            "INSERT INTO jobs (id, pr_number, tier, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
+            ("riptide-review-ChonSong-riptide-42-abc123-1234567890", 42, "t1", time.time() - 10800),  # 3h ago
+        )
+        conn.commit()
+        conn.close()
+        assert self.store.has_pending_job("riptide-review-ChonSong-riptide-42") is False
+
+    def test_cleanup_stale_pending_marks_old_jobs_failed(self):
+        """Stale pending jobs are marked failed after cleanup."""
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            "INSERT INTO jobs (id, pr_number, tier, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
+            ("riptide-review-ChonSong-riptide-42-abc123-1234567890", 42, "t1", time.time() - 10800),
+        )
+        conn.commit()
+        conn.close()
+        self.store.cleanup_stale_pending()
+        assert self.store.has_pending_job("riptide-review-ChonSong-riptide-42") is False
+        # Verify it's marked failed, not deleted
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        failed = conn.execute("SELECT COUNT(*) FROM jobs WHERE status='failed'").fetchone()[0]
+        conn.close()
+        assert failed == 1
+
+    def test_get_job_status_returns_latest(self):
+        self.store.create_job("job-old", 42, "t1")
+        self.store.mark_complete("job-old")
+        self.store.create_job("job-new", 42, "t1")
+        status = self.store.get_job_status(42)
+        assert status is not None
+        assert status["id"] == "job-new"
+        assert status["status"] == "pending"
+
+    def test_get_job_status_returns_none_when_no_jobs(self):
+        assert self.store.get_job_status(99) is None
 
 
 class TestT0Orchestrator:
