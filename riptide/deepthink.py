@@ -430,6 +430,11 @@ def _build_orchestrator_prompt(
 ### Files Changed
 {files_str}
 
+### Repository Tree
+```
+{format_repo_tree(data.get("repo_tree", []))}
+```
+
 ### Diff Summary
 ````
 {diff_summary}
@@ -466,11 +471,18 @@ After both subagents complete, post a summary comment:
 |----------|------|------|-------|
 | 🟡 Warning | file.py | 42 | Issue description |
 
+## 📊 Code Analysis
+(For each significant file/chunk: WHAT it does, WHY it matters, concerns)
+- `file.py` — description of change and architectural reasoning
+
 ## 🔗 Diagram
 [Visual Review Diagram](<URL from Step 2>)
 
 ## 📌 Next Steps
 (max 3 actionable items)
+
+## 💭 Explanation
+(Trade-offs considered, approach rationale, what was weighed)
 
 ---
 <sub>Riptide Review via Hermes</sub>
@@ -482,9 +494,25 @@ Use `gh pr comment {pr_number} --repo {owner}/{repo} --body '<review>'` to post.
 - Max 3 inline comments, real issues only
 - Do not invent problems or pad the review
 - Reference inline comments in the summary
+- The Code Analysis and Explanation sections are REQUIRED — never omit them
+- If a section has nothing to report, say so explicitly ("No significant findings") rather than omitting it
 
 REPO PATH: ~/workspace/{repo}/
 """
+
+
+def format_repo_tree(repo_tree: list) -> str:
+    """Format a repo file list as an indented directory tree (capped at 500 entries)."""
+    if not repo_tree:
+        return "(No repo tree available)"
+    lines = []
+    for f in repo_tree[:500]:
+        # Show directory structure with 2-space indent per path depth
+        depth = f.count("/") if isinstance(f, str) else 0
+        lines.append("  " * depth + f.rsplit("/", 1)[-1])
+    if len(repo_tree) > 500:
+        lines.append(f"  ... ({len(repo_tree) - 500} more files)")
+    return "\n".join(lines)
 
 
 def _spawn_deepthink_with_prompt(

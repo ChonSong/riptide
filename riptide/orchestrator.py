@@ -559,30 +559,18 @@ class T0Orchestrator:
             log.warning(f"T1 async dispatch failed for job {job_id}: {e}")
     
     def _dispatch_t1(self, profile: TaskProfile) -> dict:
-        """Dispatch to T1 (deepthink via Hermes cron)."""
+        """Dispatch to T1 (deepthink via Hermes cron).
+
+        Uses the refactored _spawn_deepthink which pre-gathers data
+        (diff, files, repo tree, graphify) in Python and builds a small
+        orchestrator prompt that delegates to subagents.
+        """
         try:
-            # Collect review context (repo tree, code chunks, diff)
-            from riptide.review_pipeline import collect_review_context, render_review_prompt
-            review_ctx = collect_review_context(
-                pr_number=profile.pr_number,
-                title=profile.title,
-                author=profile.author,
-                owner=profile.owner,
-                repo=profile.repo,
-                head_sha=profile.head_sha,
-                files_changed=profile.files,
-                total_loc=profile.total_loc,
-                graph_context=profile.__dict__.get("graph_context", {}),
-                mood_emoji="✨",
-            )
-            prompt = render_review_prompt(review_ctx)
-            
-            from riptide.deepthink import _spawn_deepthink_with_prompt
-            result = _spawn_deepthink_with_prompt(
+            from riptide.deepthink import _spawn_deepthink
+            result = _spawn_deepthink(
                 profile.owner, profile.repo, profile.pr_number,
                 profile.title, profile.author, profile.total_loc,
-                head_sha=profile.head_sha,
-                custom_prompt=prompt,
+                profile.head_sha,
             )
             return {
                 "status": "dispatched" if result else "failed",
