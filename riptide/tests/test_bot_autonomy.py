@@ -41,7 +41,7 @@ class TestSpawnRetry:
              patch("riptide.deepthink._is_cron_available", return_value=True), \
              patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
              patch("riptide.orchestrator.StateStore") as mock_state:
-            mock_state.return_value.has_pending_job.return_value = False
+            mock_state.return_value.reserve_job.return_value = True
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
             assert result is True
             assert mock_run.call_count == 1
@@ -56,7 +56,7 @@ class TestSpawnRetry:
              patch("riptide.deepthink._is_cron_available", return_value=True), \
              patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
              patch("riptide.orchestrator.StateStore") as mock_state:
-            mock_state.return_value.has_pending_job.return_value = False
+            mock_state.return_value.reserve_job.return_value = True
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
             assert result is True
             assert mock_run.call_count == 3
@@ -72,7 +72,7 @@ class TestSpawnRetry:
              patch("riptide.deepthink._is_cron_available", return_value=True), \
              patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
              patch("riptide.orchestrator.StateStore") as mock_state:
-            mock_state.return_value.has_pending_job.return_value = False
+            mock_state.return_value.reserve_job.return_value = True
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
             assert result is False
             assert mock_run.call_count == 3
@@ -85,7 +85,7 @@ class TestSpawnRetry:
              patch("riptide.deepthink._is_cron_available", side_effect=[False, True]), \
              patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
              patch("riptide.orchestrator.StateStore") as mock_state:
-            mock_state.return_value.has_pending_job.return_value = False
+            mock_state.return_value.reserve_job.return_value = True
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
             assert result is True
             # First attempt skipped (no subprocess), second attempt ran
@@ -100,7 +100,7 @@ class TestSpawnRetry:
              patch("riptide.deepthink._is_cron_available", return_value=True), \
              patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
              patch("riptide.orchestrator.StateStore") as mock_state:
-            mock_state.return_value.has_pending_job.return_value = False
+            mock_state.return_value.reserve_job.return_value = True
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
             assert result is True
             assert mock_run.call_count == 3
@@ -108,7 +108,7 @@ class TestSpawnRetry:
     def test_skips_when_review_already_pending(self):
         """If a review is already pending, don't spawn another."""
         with patch("riptide.orchestrator.StateStore") as mock_state:
-            mock_state.return_value.has_pending_job.return_value = True
+            mock_state.return_value.reserve_job.return_value = False
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
             assert result is False
 

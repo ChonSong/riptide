@@ -179,6 +179,25 @@ class TestStateStore:
         # Should NOT match a different prefix (underscore is literal, not wildcard)
         assert self.store.has_pending_job("riptide-review-ChonSongXmy-repo-42") is False
 
+    def test_has_pending_job_no_pr_number_collision(self):
+        """PR #42 must not match PR #420 (hyphen delimiter prevents prefix collision)."""
+        self.store.create_job("riptide-review-ChonSong-riptide-420-abc123-1234567890", 420, "t1")
+        assert self.store.has_pending_job("riptide-review-ChonSong-riptide-42") is False
+        assert self.store.has_pending_job("riptide-review-ChonSong-riptide-420") is True
+
+    def test_reserve_job_atomic_no_duplicate(self):
+        """Concurrent reserve_job calls must create only one reservation."""
+        prefix = "riptide-review-ChonSong-riptide-42"
+        # First reservation succeeds
+        assert self.store.reserve_job(f"{prefix}-job-a", 42, "t1", prefix) is True
+        # Second reservation for same PR fails (already pending)
+        assert self.store.reserve_job(f"{prefix}-job-b", 42, "t1", prefix) is False
+        # Verify only one row exists
+        conn = sqlite3.connect(self.db_path)
+        count = conn.execute("SELECT COUNT(*) FROM jobs WHERE status='pending'").fetchone()[0]
+        conn.close()
+        assert count == 1
+
     def test_has_pending_job_returns_false_when_stale(self):
         """Pending jobs older than 2h are ignored (TTL)."""
         # Create a job with a created_at timestamp 3 hours ago

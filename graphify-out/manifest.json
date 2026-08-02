@@ -1,82 +1,222 @@
 {
   "riptide/__init__.py": {
-    "mtime": 1784733644.817256,
+    "mtime": 1785231164.1927695,
     "ast_hash": "45ef72c0f4e47d8f3fec0c4de72af216",
     "semantic_hash": "45ef72c0f4e47d8f3fec0c4de72af216"
   },
   "riptide/github_app.py": {
-    "mtime": 1785069418.6970415,
-    "ast_hash": "d26b1b7129a737b1d591bce3a2dd9cf6",
+    "mtime": 1785544677.3897426,
+    "ast_hash": "fb8986626a57a4f9c1587bd68c2c5cf6",
     "semantic_hash": ""
   },
   "riptide/webhook.py": {
-    "mtime": 1785204261.326464,
-    "ast_hash": "c2e1027c41068bb0b6d3a949f8916631",
+    "mtime": 1785561639.488556,
+    "ast_hash": "e0c8fc156d59d0de51befb3f03f8ca71",
     "semantic_hash": ""
   },
   "server.py": {
-    "mtime": 1785129986.358303,
-    "ast_hash": "6e82e95056a40ac07933cbb0417eb737",
+    "mtime": 1785544929.3910213,
+    "ast_hash": "54e07da66814a5f4b214f834002f496f",
     "semantic_hash": ""
   },
   "riptide/companion.py": {
-    "mtime": 1785211612.1306374,
-    "ast_hash": "a36ee17386fda7f2cf217bb234db7685",
+    "mtime": 1785575772.970933,
+    "ast_hash": "709a30518a79015e8577124af2f78c2d",
     "semantic_hash": ""
   },
   "start.sh": {
-    "mtime": 1785036152.6242442,
-    "ast_hash": "674286b49b79eecac8a247aa2e2914d2",
+    "mtime": 1785544929.3910213,
+    "ast_hash": "37c6fd9064c8717ba69e11d03ef68c49",
     "semantic_hash": ""
   },
   "README.md": {
-    "mtime": 1785130083.8063054,
-    "ast_hash": "cd26692364a561e1eb5526389707a42a",
+    "mtime": 1785569110.9885736,
+    "ast_hash": "ca8bfb79137ade1bd71ef1d9cc409b14",
     "semantic_hash": ""
   },
   "SKILL.md": {
-    "mtime": 1785130035.7743044,
-    "ast_hash": "9bebc66b0f90dfbfe3072145cb578f52",
+    "mtime": 1785569110.9925735,
+    "ast_hash": "382769bae0fe8ad405ce771fb2a97b0d",
     "semantic_hash": ""
   },
   "docker-compose.yml": {
-    "mtime": 1785130003.0223036,
-    "ast_hash": "c59f6d0f118f59b065aeb5d54ec9a38f",
+    "mtime": 1785544929.3910213,
+    "ast_hash": "1eb0abdadffbf429a0f0268429d3be42",
     "semantic_hash": ""
   },
   "requirements.txt": {
-    "mtime": 1785129992.6863031,
-    "ast_hash": "ba7e64f1d69293f60e3d1a3ebcc49e2a",
+    "mtime": 1785544929.3910213,
+    "ast_hash": "bd3a0bd82f009a6d495c484e08deaec7",
     "semantic_hash": ""
   },
   "test_pr_file.txt": {
-    "mtime": 1785050572.8067038,
+    "mtime": 1785231164.2007694,
     "ast_hash": "e27cc56d4bc4e2c90b98b7968032b8f1",
     "semantic_hash": ""
   },
   "riptide/deepthink.py": {
-    "mtime": 1785222691.5786054,
-    "ast_hash": "ecab02e95dfa81d072ed0a01bf939ed2",
+    "mtime": 1785631418.3021274,
+    "ast_hash": "c6223abc224fbab8f7772252e4d6d030",
     "semantic_hash": ""
   },
   "riptide/grafiphy/__init__.py": {
-    "mtime": 1785165816.877703,
+    "mtime": 1785231164.1967695,
     "ast_hash": "a938fce2991eaf8d03ced7374b3141c3",
     "semantic_hash": ""
   },
   "riptide/grafiphy/labeler.py": {
-    "mtime": 1785165816.877703,
+    "mtime": 1785231164.1967695,
     "ast_hash": "4608ed21c62ecb6e4d422457a83c2f55",
     "semantic_hash": ""
   },
   "riptide/grafiphy/orchestrator.py": {
-    "mtime": 1785211760.405106,
-    "ast_hash": "12eff0c022b48528fe7dc57d21947b9a",
+    "mtime": 1785543811.345424,
+    "ast_hash": "4bec59edf91ba21f3a664917ddd61fce",
     "semantic_hash": ""
   },
   "riptide/grafiphy/ARCHITECTURE.md": {
-    "mtime": 1785211876.7194386,
+    "mtime": 1785231164.1927695,
     "ast_hash": "35acaa221f81cec528983f438d47d5a5",
+    "semantic_hash": ""
+  },
+  ".codex/hooks.json": {
+    "mtime": 1785544929.3910213,
+    "ast_hash": "924729d8eeff2e92b29da8aa361a33cb",
+    "semantic_hash": ""
+  },
+  ".githooks/pre-commit": {
+    "mtime": 1785544929.3910213,
+    "ast_hash": "42afe6355b496f944d2f8bda67f95e4b",
+    "semantic_hash": ""
+  },
+  "proofshot.config.example.json": {
+    "mtime": 1785544929.3910213,
+    "ast_hash": "52e75ceedaee68eef260be1a328f4ff6",
+    "semantic_hash": ""
+  },
+  "pyproject.toml": {
+    "mtime": 1785544367.100933,
+    "ast_hash": "ded8572d991fdc5139f40717c1a54b5e",
+    "semantic_hash": ""
+  },
+  "riptide/grafiphy/excalidraw_renderer.py": {
+    "mtime": 1785543811.345424,
+    "ast_hash": "7db60e9ceeeecc08aa4b32a7be7be5bb",
+    "semantic_hash": ""
+  },
+  "riptide/orchestrator.py": {
+    "mtime": 1785631359.2202404,
+    "ast_hash": "35442f7ec9b5c8bf428a4182fd3b4e7c",
+    "semantic_hash": ""
+  },
+  "riptide/proofshotter.py": {
+    "mtime": 1785544929.3910213,
+    "ast_hash": "bbee5cf1436db8ea02cf22eef7485158",
+    "semantic_hash": ""
+  },
+  "riptide/resources/label-definitions.json": {
+    "mtime": 1785544929.3910213,
+    "ast_hash": "7fa1aab21e7ab73ac2075d7f89783b8d",
+    "semantic_hash": ""
+  },
+  "riptide/review_pipeline.py": {
+    "mtime": 1785561639.4845557,
+    "ast_hash": "60194bca85d17e23e24a538f50320c42",
+    "semantic_hash": ""
+  },
+  "riptide/tests/__init__.py": {
+    "mtime": 1785544367.100933,
+    "ast_hash": "321ddc806dde69104f9be2ea33cb9fb1",
+    "semantic_hash": ""
+  },
+  "riptide/tests/conftest.py": {
+    "mtime": 1785544929.3910213,
+    "ast_hash": "b42273c5c8cea86e888b6f027f542fb5",
+    "semantic_hash": ""
+  },
+  "riptide/tests/test_agentlint_config.py": {
+    "mtime": 1785544929.3910213,
+    "ast_hash": "85355367779e3e5b0aa0113977ffea0b",
+    "semantic_hash": ""
+  },
+  "riptide/tests/test_bot_autonomy.py": {
+    "mtime": 1785580185.211809,
+    "ast_hash": "1e748572f2415478ef368e3bd3d4b257",
+    "semantic_hash": ""
+  },
+  "riptide/tests/test_companion.py": {
+    "mtime": 1785575772.9749331,
+    "ast_hash": "e112033957c5b39fdaae4d2d927d3d42",
+    "semantic_hash": ""
+  },
+  "riptide/tests/test_deepthink.py": {
+    "mtime": 1785591675.690449,
+    "ast_hash": "a5d2160a54e22dea52246aa2ecd2029b",
+    "semantic_hash": ""
+  },
+  "riptide/tests/test_gif_selection.py": {
+    "mtime": 1785551169.9318447,
+    "ast_hash": "00b087bc8f5fe5f963f23bee666bab51",
+    "semantic_hash": ""
+  },
+  "riptide/tests/test_github_app.py": {
+    "mtime": 1785544929.3910213,
+    "ast_hash": "d11e4e327a791b134925f5e76a357c7d",
+    "semantic_hash": ""
+  },
+  "riptide/tests/test_health.py": {
+    "mtime": 1785544367.100933,
+    "ast_hash": "c35a0718173c9377e7e18206c53a5af7",
+    "semantic_hash": ""
+  },
+  "riptide/tests/test_orchestrator.py": {
+    "mtime": 1785631442.9028509,
+    "ast_hash": "37ae2d0ca33cbae0efe7d2a6910f0117",
+    "semantic_hash": ""
+  },
+  "riptide/tests/test_webhook_endpoint.py": {
+    "mtime": 1785544929.3910213,
+    "ast_hash": "e126c3188ad87f12dad3bf3101d69dc6",
+    "semantic_hash": ""
+  },
+  "riptide/tests/test_webhook_signature.py": {
+    "mtime": 1785544929.3910213,
+    "ast_hash": "e7dea1cc399841299b381ee9faad8d61",
+    "semantic_hash": ""
+  },
+  "AGENTS.md": {
+    "mtime": 1785544929.3910213,
+    "ast_hash": "24c4c46299484ab3ad1c44a4df44382a",
+    "semantic_hash": ""
+  },
+  "CHANGELOG.md": {
+    "mtime": 1785544367.100933,
+    "ast_hash": "9bec76ce9d6f52349477d7bd1d7cac85",
+    "semantic_hash": ""
+  },
+  "CLAUDE.md": {
+    "mtime": 1785569110.9885736,
+    "ast_hash": "a5bd56e2d61599047cbb5effbb99b69c",
+    "semantic_hash": ""
+  },
+  "HANDOFF.md": {
+    "mtime": 1785569110.9885736,
+    "ast_hash": "9430ed952bfeafec13de17f6702720e4",
+    "semantic_hash": ""
+  },
+  "ISSUE-model-detection.md": {
+    "mtime": 1785544929.3910213,
+    "ast_hash": "636b27905e203ce9e21b4cc22b073aba",
+    "semantic_hash": ""
+  },
+  "SECURITY.md": {
+    "mtime": 1785544367.100933,
+    "ast_hash": "d3fabaf559234558ba0313f4100d9f30",
+    "semantic_hash": ""
+  },
+  "agentlint.yml": {
+    "mtime": 1785544929.3910213,
+    "ast_hash": "93a1e0e59ea3aa8cd08094b2f2309821",
     "semantic_hash": ""
   }
 }

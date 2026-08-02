@@ -165,11 +165,12 @@ def _spawn_deepthink(
     name = f"riptide-review-{owner}-{repo}-{pr_number}"
     run_at = (datetime.now() + timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%S")
 
-    # Cross-session awareness: clean up stale jobs, then check for pending
+    # Cross-session awareness: clean up stale jobs, then atomically reserve
     from riptide.orchestrator import StateStore
     state = StateStore()
     state.cleanup_stale_pending()
-    if state.has_pending_job(name):
+    job_id = f"{name}-{head_sha[:12]}-{int(time.time())}"
+    if not state.reserve_job(job_id, pr_number, "t1", name):
         log.info(f"Skipping {owner}/{repo}#{pr_number} — review already pending")
         return False
 
@@ -214,12 +215,6 @@ def _spawn_deepthink(
                 cmd, capture_output=True, text=True, timeout=15
             )
             if result.returncode == 0:
-                # Record job for cross-session awareness (unique ID per spawn)
-                job_id = f"{name}-{head_sha[:12]}-{int(time.time())}"
-                try:
-                    state.create_job(job_id, pr_number, "t1")
-                except Exception as e:
-                    log.warning(f"Failed to record job {job_id}: {e}")
                 log.info(f"✓ Spawned deep-think for {owner}/{repo}#{pr_number}: {result.stdout[:200]}")
                 return True
             else:
@@ -229,6 +224,8 @@ def _spawn_deepthink(
         except Exception as e:
             log.error(f"Error spawning deep-think (attempt {attempt+1}): {e}")
 
+    # All attempts failed — mark the reserved job as failed
+    state.mark_failed(job_id)
     log.error(f"All {max_retries} attempts failed for {owner}/{repo}#{pr_number}")
     return False
 
@@ -313,17 +310,6 @@ def _gather_review_data(
                 age_minutes = (time.time() - graph_json.stat().st_mtime) / 60
                 if age_minutes < 15:
                     log.info("Skipping graphify update — graph is fresh (<15 min)")
-                    # Still read existing data without updating
-                    try:
-                        result = subprocess.run(
-                            ["graphify", "query", f"what does PR #{pr_number} affect?"],
-                            capture_output=True, text=True, timeout=30,
-                            cwd=str(workspace),
-                        )
-                        if result.returncode == 0:
-                            data["graph_context"] = {"raw": result.stdout.strip()}
-                    except Exception as e:
-                        log.warning(f"Graphify query failed: {e}")
                 else:
                     try:
                         subprocess.run(

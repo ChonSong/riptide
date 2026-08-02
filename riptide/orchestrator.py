@@ -255,12 +255,44 @@ class StateStore:
         conn.execute("PRAGMA busy_timeout=5000")
         try:
             cutoff = time.time() - 7200  # 2-hour TTL
-            escaped = f"{self._escape_like(name_prefix)}%"
+            escaped = f"{self._escape_like(name_prefix)}-%"
             row = conn.execute(
                 "SELECT COUNT(*) FROM jobs WHERE id LIKE ? ESCAPE '\\' AND status='pending' AND created_at > ?",
                 (escaped, cutoff),
             ).fetchone()
             return row[0] > 0
+        finally:
+            conn.close()
+
+    def reserve_job(self, job_id: str, pr_number: int, tier: str, name_prefix: str) -> bool:
+        """Atomically check for existing pending job and reserve a new pending row.
+
+        Uses a single conditional INSERT to avoid TOCTOU race between check and insert.
+        Returns True if reservation was created, False if already pending.
+
+        Args:
+            job_id: Unique job identifier (e.g., riptide-review-owner-repo-42-sha-time)
+            pr_number: PR number
+            tier: Job tier (e.g., "t1")
+            name_prefix: Prefix for matching (e.g., riptide-review-owner-repo-42)
+        """
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        try:
+            cutoff = time.time() - 7200  # 2-hour TTL
+            escaped = f"{self._escape_like(name_prefix)}-%"
+            # Atomically insert only if no matching pending job exists
+            conn.execute(
+                """INSERT INTO jobs (id, pr_number, tier, status, created_at)
+                   SELECT ?, ?, ?, 'pending', ?
+                   WHERE NOT EXISTS (
+                       SELECT 1 FROM jobs WHERE id LIKE ? ESCAPE '\\' AND status='pending' AND created_at > ?
+                   )""",
+                (job_id, pr_number, tier, time.time(), escaped, cutoff),
+            )
+            conn.commit()
+            return conn.total_changes > 0
         finally:
             conn.close()
 
