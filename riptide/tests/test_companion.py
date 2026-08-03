@@ -265,8 +265,6 @@ class TestFormatComment:
 
 
 class TestGenerateTldrWithRetry:
-    """Tests for Companion._generate_tldr_with_retry."""
-
     def test_first_attempt_succeeds(self):
         companion = make_companion()
         with patch.object(companion, "_generate_tldr", return_value="TL;DR text") as mock_gen:
@@ -277,7 +275,7 @@ class TestGenerateTldrWithRetry:
     def test_retries_on_failure_then_succeeds(self):
         companion = make_companion()
         with patch.object(companion, "_generate_tldr", side_effect=[None, "TL;DR text"]) as mock_gen:
-            with patch("time.sleep"):  # skip actual sleep
+            with patch("time.sleep"):
                 result = companion._generate_tldr_with_retry("title", "author", [], None)
                 assert result == "TL;DR text"
                 assert mock_gen.call_count == 2
@@ -295,7 +293,6 @@ class TestGenerateTldrWithRetry:
         with patch.object(companion, "_generate_tldr", return_value=None):
             with patch("time.sleep") as mock_sleep:
                 companion._generate_tldr_with_retry("title", "author", [], None)
-                # 4 attempts = 3 sleeps between them
                 assert mock_sleep.call_count == 3
                 mock_sleep.assert_any_call(5)
                 mock_sleep.assert_any_call(30)
@@ -303,8 +300,6 @@ class TestGenerateTldrWithRetry:
 
 
 class TestHandleDegradation:
-    """Tests for Companion._handle_degradation."""
-
     def test_owned_repo_posts_comment(self):
         companion = make_companion()
         companion.client.post_pr_comment = MagicMock()
@@ -347,8 +342,6 @@ class TestHandleDegradation:
 
 
 class TestShouldAlert:
-    """Tests for Companion._should_alert cooldown logic."""
-
     def test_first_alert_allowed(self, tmp_path):
         companion = make_companion(tmp_path)
         assert companion._should_alert("ChonSong/riptide") is True
@@ -358,32 +351,31 @@ class TestShouldAlert:
         assert companion._should_alert("ChonSong/riptide") is True
         assert companion._should_alert("ChonSong/riptide") is False
 
+    @pytest.mark.parametrize(
+        "pr1,pr2,expected",
+        [
+            ("ChonSong/riptide", "ChonSong/other", False),  # global blocks
+            ("ChonSong/riptide", "ChonSong/riptide", False),  # per-pr blocks
+        ],
+    )
+    def test_cooldown_blocks(self, tmp_path, pr1, pr2, expected):
+        companion = make_companion(tmp_path)
+        companion._pr_alert_cooldown = 600
+        companion._global_alert_cooldown = 600
+        assert companion._should_alert(pr1) is True
+        assert companion._should_alert(pr2) is expected
+
     def test_different_pr_allowed_after_global_clears(self, tmp_path):
         companion = make_companion(tmp_path)
-        companion._pr_alert_cooldown = 1  # 1 second for test
+        companion._pr_alert_cooldown = 1
         companion._global_alert_cooldown = 1
         assert companion._should_alert("ChonSong/riptide") is True
-        # Same PR suppressed
-        assert companion._should_alert("ChonSong/riptide") is False
-        # Different PR also suppressed (global)
         assert companion._should_alert("ChonSong/other") is False
-        # Wait for cooldown
         time.sleep(1.1)
-        # Now allowed again
         assert companion._should_alert("ChonSong/riptide") is True
-
-    def test_global_cooldown_blocks_all(self, tmp_path):
-        companion = make_companion(tmp_path)
-        companion._global_alert_cooldown = 600
-        companion._pr_alert_cooldown = 0  # no per-PR cooldown
-        assert companion._should_alert("ChonSong/riptide") is True
-        # Global blocks next PR
-        assert companion._should_alert("ChonSong/other") is False
 
 
 class TestSpawnSelfHeal:
-    """Tests for Companion._spawn_self_heal."""
-
     def test_spawns_hermes_cron(self):
         companion = make_companion()
         with patch("subprocess.run") as mock_run:
@@ -401,7 +393,6 @@ class TestSpawnSelfHeal:
     def test_failure_logged_not_raised(self):
         companion = make_companion()
         with patch("subprocess.run", side_effect=Exception("boom")):
-            # Should not raise
             companion._spawn_self_heal("ChonSong/riptide", 42)
 
     def test_owned_org_from_env(self, monkeypatch):

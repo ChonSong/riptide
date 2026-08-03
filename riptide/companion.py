@@ -7,14 +7,8 @@ Pipeline:
   3. Query Graphify for blast radius
   4. Generate TLDR via Ollama (qwen2.5-coder:7b) — with retry
   5. Generate ELI5 via Ollama (or skip)
-  6. Post comment with GIF reaction + model attribution
-
-Self-heal: if Ollama is unreachable after 4 retries (5s/30s/60s):
-  - Owned repo (ChonSong/*) → post degradation comment on the PR (10 min cooldown)
-  - Unowned repo → send alert via Hermes Discord (10 min cooldown)
-  - Always spawn a Hermes cron session to investigate (read-only)
-  - Global cooldown: max 1 alert per 10 min window across all PRs
-  - Per-PR cooldown: max 1 alert per PR per 10 min window
+  -NO TEMPLATE FALLBACKS: if model is down, we don't comment.
+  -Self-heal: 4 retries (5s/30s/60s) then degrade (PR comment / Discord alert + cron investigation)
 """
 
 from __future__ import annotations
@@ -828,36 +822,21 @@ ELI5:"""
         """Check cooldowns before alerting. Returns True if alert should fire."""
         now = time.time()
         with self._alert_lock:
-            data = self._load_alerts()
-            # Global cooldown
-            last_global = data.get("_global", 0)
-            if now - last_global < self._global_alert_cooldown:
+            try:
+                data = json.loads(self._alert_file.read_text()) if self._alert_file.exists() else {}
+            except (json.JSONDecodeError, OSError):
+                data = {}
+            if now - data.get("_global", 0) < self._global_alert_cooldown:
                 return False
-            # Per-PR cooldown
-            last_pr = data.get(full_name, 0)
-            if now - last_pr < self._pr_alert_cooldown:
+            if now - data.get(full_name, 0) < self._pr_alert_cooldown:
                 return False
-            # Update timestamps
             data["_global"] = now
             data[full_name] = now
-            self._save_alerts(data)
+            try:
+                self._alert_file.write_text(json.dumps(data, indent=2))
+            except OSError as e:
+                logger.warning("Failed to save alert timestamps: %s", e)
             return True
-
-    def _load_alerts(self) -> dict:
-        """Load alert cooldown timestamps."""
-        if not self._alert_file.exists():
-            return {}
-        try:
-            return json.loads(self._alert_file.read_text())
-        except (json.JSONDecodeError, OSError):
-            return {}
-
-    def _save_alerts(self, data: dict):
-        """Save alert cooldown timestamps."""
-        try:
-            self._alert_file.write_text(json.dumps(data, indent=2))
-        except OSError as e:
-            logger.warning("Failed to save alert timestamps: %s", e)
 
     def _spawn_self_heal(self, full_name, pr_number):
         """Spawn a Hermes session to investigate the degradation (read-only)."""
