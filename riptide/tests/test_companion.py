@@ -395,9 +395,20 @@ class TestSpawnSelfHeal:
             assert "cron" in cmd
             assert "create" in cmd
             assert "riptide-self-heal-42" in cmd
+            assert "--repeat" in cmd
+            assert "1" in cmd
 
     def test_failure_logged_not_raised(self):
         companion = make_companion()
         with patch("subprocess.run", side_effect=Exception("boom")):
             # Should not raise
             companion._spawn_self_heal("ChonSong/riptide", 42)
+
+    def test_owned_org_from_env(self, monkeypatch):
+        monkeypatch.setenv("RIPTIDE_OWNED_ORG", "other-org")
+        companion = make_companion()
+        companion.client.post_pr_comment = MagicMock()
+        with patch.object(companion, "_should_alert", return_value=True):
+            with patch.object(companion, "_spawn_self_heal"):
+                companion._handle_degradation(123, "other-org", "repo", 42, "other-org/repo")
+                companion.client.post_pr_comment.assert_called_once()

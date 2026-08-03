@@ -384,6 +384,7 @@ class Companion:
         # Cooldown config
         self._pr_alert_cooldown = 600   # 10 min per PR
         self._global_alert_cooldown = 600  # 10 min global
+        self._owned_org = os.environ.get("RIPTIDE_OWNED_ORG", "ChonSong")
 
         logger.info(
             "Companion initialised: model=%s repos=%s",
@@ -791,7 +792,7 @@ ELI5:"""
             logger.info("Degradation alert suppressed (cooldown) for %s#%d", full_name, pr_number)
             return
 
-        is_owned = owner == "ChonSong"
+        is_owned = owner == self._owned_org
         if is_owned:
             # Owned repo — post a comment on the PR
             body = (
@@ -869,7 +870,7 @@ ELI5:"""
                 f"DO NOT write or edit any files — only investigate and report."
             )
             result = subprocess.run(
-                ["hermes", "cron", "create", "5m", prompt, "--name", f"riptide-self-heal-{pr_number}"],
+                ["hermes", "cron", "create", "5m", prompt, "--name", f"riptide-self-heal-{pr_number}", "--repeat", "1"],
                 capture_output=True, text=True, timeout=15
             )
             if result.returncode == 0:
