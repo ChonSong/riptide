@@ -36,12 +36,11 @@ def retry_until(predicate, timeout: float = 30.0, interval: float = 1.0, descrip
         raise ValueError("timeout and interval must be positive")
 
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    while True:
         result = predicate()
         if result:
             return result
-        # Cap the sleep so we don't overshoot the deadline
         remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
         time.sleep(min(interval, remaining))
-
-    return None

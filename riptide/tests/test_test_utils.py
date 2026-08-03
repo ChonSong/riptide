@@ -52,3 +52,18 @@ class TestRetryUntil:
         assert result is None
         # Must return within ~0.3s + small margin, not 5s
         assert elapsed < 1.0, f"overshot deadline: {elapsed:.2f}s"
+
+    def test_negative_remaining_returns_none(self):
+        """If clock jitter makes remaining negative, return None (no negative sleep)."""
+        calls = []
+
+        def predicate():
+            calls.append(1)
+            return None
+
+        # timeout=0.01 with interval=100 — should return almost immediately
+        start = time.monotonic()
+        result = retry_until(predicate, timeout=0.01, interval=100.0)
+        elapsed = time.monotonic() - start
+        assert result is None
+        assert elapsed < 0.5, f"took too long: {elapsed:.2f}s"
