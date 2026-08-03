@@ -185,6 +185,12 @@ def _spawn_deepthink(
         # Pre-gather data in Python (cheaper than having the agent do it)
         data = _gather_review_data(owner, repo, pr_number, head_sha)
 
+        # Classify PR depth to determine skill loading
+        from riptide.review_pipeline import classify_review_depth, select_skills
+        depth = classify_review_depth(data)
+        skills = select_skills(depth)
+        log.info(f"{owner}/{repo}#{pr_number} classified as {depth.value}, skills={skills}")
+
         prompt = _build_orchestrator_prompt(
             owner=owner,
             repo=repo,
@@ -204,13 +210,14 @@ def _spawn_deepthink(
         "hermes", "cron", "create", run_at,
         prompt,
         "--name", name,
-        "--skill", "github-pr-lifecycle",
-        "--skill", "deep-think",
-        "--skill", "excalidraw",
+    ]
+    for skill in skills:
+        cmd.extend(["--skill", skill])
+    cmd.extend([
         "--model", DEEPTHINK_MODEL,
         "--provider", DEEPTHINK_PROVIDER,
         "--deliver", "origin",
-    ]
+    ])
 
     for attempt in range(max_retries):
         if attempt > 0:
