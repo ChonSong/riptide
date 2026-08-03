@@ -4,48 +4,18 @@
 
 # Riptide — Self-Hosted GitHub App (Three Bots)
 
-https://excalidraw.com/#json=xGk0JJ9K3Fj3w-jrNM1kw,iEepj-mogls0LeSUBi03JA
-
 AI-powered code review that runs in your infrastructure. Three bots, zero bloat.
 
-**Bot 1 — Companion:** Posts TL;DR comments on PRs with graphify-informed blast radius.
-**Bot 2 — Riptide Review:** Deep-think autonomous code review for large, settled PRs.
-**Bot 3 — Proofshotter:** Visual verification via Playwright captures on UI changes.
+**Bot 1 — Companion:** Posts TL;DR comments on PRs with graphify-informed blast radius and contextual GIF reactions.
+**Bot 2 — Riptide Review:** Deep-think autonomous code review for large, settled PRs via Hermes cron sessions.
+**Bot 3 — Proofshotter:** Visual verification via Playwright captures for UI changes.
 
 ---
 
-## Architecture
+## Example Outputs
 
-```text
-GitHub Webhook
-  → FastAPI /webhook/github (verify signature, route event)
-      → Companion thread (TL;DR + graphify blast radius)
-  → GitHub API (post TL;DR comment)
+### Bot 1 — Companion TL;DR Comment
 
-Cron (every 15 min)
-  → riptide/deepthink.py (poll open PRs, filter by LOC + staleness)
-  → Hermes cron session (deep-think + graphify analysis)
-  → GitHub API (post review comment)
-
-Cron (every 10 min)
-  → riptide/proofshotter.py (poll open PRs for UI changes)
-  → Playwright captures on dev instance
-  → GitHub API (post visual evidence comment)
-```
-
----
-
-## Bot 1: Companion (Webhook-Triggered)
-
-Every PR triggers a friendly TL;DR comment explaining what changed and why it matters.
-
-```yaml
-Trigger: pull_request (opened, reopened, synchronize)
-Output:  "## ✨ TL;DR" comment with ELI5 + Blast Radius + ProofShot (if UI)
-Model:  qwen2.5-coder:7b (via local Ollama)
-```
-
-Example output:
 ```
 ## ✨ TL;DR
 
@@ -68,6 +38,92 @@ makes it even cooler.
 `@riptide-bot companion skip` to opt out</sub>
 ```
 
+The GIF is auto-selected based on PR mood (✨ feature, 🐛 fix, ♻️ refactor, etc.) using keyword relevance scoring against the PR title and file names. Fallback is a static set of curated GIFs per mood.
+
+### Bot 2 — Riptide Review Comment
+
+Triggered by `@riptide-bot review` or automatically for large settled PRs:
+
+```
+## 🤖 Riptide Review
+
+**Summary**
+This PR refactors the draft persistence layer to use atomic writes. 
+The approach is sound but introduces a race condition in 
+`DraftOptimization.commit()` when two sessions target the same file.
+
+**Graphify Blast Radius**
+- `companion.py:save_draft()` → called from `routes.py:POST /session/:id/draft`
+- `models.py:DraftModel` → referenced by 4 other modules
+- High-risk path: `routes.py` ↔ `models.py` ↔ `persistence.py`
+
+**Findings**
+1. [MED] Race condition: `commit()` does not lock the target file
+2. [LOW] Missing test coverage for concurrent `save_draft()` calls
+
+**Verdict**
+Request changes — address the race condition before merge.
+
+---
+<sub>🤖 Riptide Review via Hermes (graphify + deep-think) · 
+`@riptide-bot review` to re-review</sub>
+```
+
+### Bot 3 — Proofshotter Comment
+
+```
+## 📸 ProofShot
+
+UI files detected in this PR:
+- `src/components/DraftPanel.tsx`
+
+Captured 2 screenshots from `http://localhost:8788`:
+
+**Initial Load**
+![proofshot_initial](attachment.png)
+
+**After Interaction**
+![proofshot_after](attachment.png)
+
+<sub>🤖 Riptide Proofshotter · auto-captured via Playwright</sub>
+```
+
+---
+
+## Architecture
+
+```text
+GitHub Webhook
+  → FastAPI /webhook/github (verify signature, route event)
+      → T0 Orchestrator (classify, dispatch to tiers)
+          → T1: Companion TL;DR thread
+          → T2: Quick summary (small PRs)
+          → T3: Proofshot visual capture (UI PRs)
+  → GitHub API (post TL;DR comment)
+
+Cron (every 15 min)
+  → riptide/deepthink.py (poll open PRs, filter by LOC + staleness)
+  → Hermes cron session (deep-think + graphify analysis)
+  → GitHub API (post review comment)
+
+Cron (every 10 min)
+  → riptide/proofshotter.py (poll open PRs for UI changes)
+  → Playwright captures on dev instance
+  → GitHub API (post visual evidence comment)
+```
+
+---
+
+## Bot 1: Companion (Webhook-Triggered)
+
+Every PR triggers a friendly TL;DR comment explaining what changed and why it matters.
+
+```yaml
+Trigger: pull_request (opened, reopened, synchronize)
+Output:  "## ✨ TL;DR" comment with ELI5 + Blast Radius + GIF reaction
+Model:  qwen2.5-coder:7b (via local Ollama)
+```
+
 ### Commands
 
 Reply to any PR comment with `@riptide-bot`:
@@ -79,6 +135,16 @@ Reply to any PR comment with `@riptide-bot`:
 | `@riptide-bot deepthink` | Same (alias) | Bot 2 |
 | `@riptide-bot companion skip` | Stop companion TLDR on this PR | Bot 1 |
 | `@riptide-bot companion resume` | Re-enable companion TLDR | Bot 1 |
+
+### GIF Selection
+
+Companion auto-selects a GIF reaction based on PR classification:
+
+1. **Mood classification** — PR title + files analyzed for emoji (✨ feature, 🐛 fix, ♻️ refactor, 🧹 cleanup, 🔧 config, 📝 docs, 📦 deps, 🧪 test, ⏪ revert, ⚡ perf)
+2. **Keyword scoring** — best-matching tag selected from curated list per mood
+3. **GIF lookup** — Giphy API → Tenor API → static fallback (in priority order)
+
+Set `GIPHY_API_KEY` or `TENOR_API_KEY` for dynamic GIF lookup. Without API keys, uses curated static GIFs per mood.
 
 ---
 
@@ -114,8 +180,7 @@ Output:  PR comment with GIF + screenshots of UI changes
 Config:  proofshot.config.json (optional — defaults to localhost:8788)
 ```
 
-Proofshotter captures screenshots of the dev instance (default http://localhost:8788)
-and posts them as visual evidence on the PR. Requires Playwright installed on the host.
+Proofshotter captures screenshots of the dev instance (default `http://localhost:8788`) and posts them as visual evidence on the PR. Requires Playwright installed on the host.
 
 ---
 
@@ -125,17 +190,26 @@ and posts them as visual evidence on the PR. Requires Playwright installed on th
 riptide/
 ├── riptide/
 │   ├── github_app.py      # JWT auth, GitHub API client
-│   ├── companion.py       # Bot 1: TL;DR + ELI5 + ProofShot comment generator
+│   ├── companion.py       # Bot 1: TL;DR + ELI5 + GIF reaction + ProofShot comment
+│   ├── orchestrator.py    # T0: classify PR → dispatch to T1/T2/T3 tiers
 │   ├── deepthink.py       # Bot 2: Cron polling + Hermes session spawner
+│   ├── review_pipeline.py # Hybrid review: templates + deepthink + validation
 │   ├── proofshotter.py    # Bot 3: Cron-polled visual verification
 │   ├── webhook.py         # FastAPI server (companion trigger, installation sync)
-│   └── __init__.py
-├── server.py              # Uvicorn entry point
+│   ├── resources/         # Static assets
+│   └── tests/             # pytest suite (11 test files + conftest.py)
+├── server.py              # Uvicorn/gunicorn entry point
 ├── requirements.txt       # fastapi, uvicorn, pydantic, cryptography, requests, graphifyy
 ├── Dockerfile
 ├── docker-compose.yml
+├── proofshot.config.example.json  # Example proofshot config schema
 ├── SKILL.md               # AI agent skill definition
-└── start.sh               # Dev start script
+├── start.sh               # Dev start script
+├── scripts/
+│   └── upload_excalidraw.py
+├── infra/                 # Infrastructure (nginx)
+├── terraform/             # IaC for Cloudflare + GCP
+└── .github/               # Actions, templates, workflows
 ```
 
 ---
@@ -143,9 +217,10 @@ riptide/
 ## Quick Start
 
 ### Prerequisites
-- Python 3.11+
-- Ollama with `qwen2.5-coder:7b` and `nomic-embed-text`
+- Python 3.12+
+- Ollama with `qwen2.5-coder:7b`
 - GitHub App registered with webhook permissions
+- (Optional) Giphy or Tenor API key for dynamic GIF lookup
 
 ### Install
 ```bash
@@ -157,7 +232,6 @@ pip install -r requirements.txt
 
 # Ollama models
 ollama pull qwen2.5-coder:7b
-ollama pull nomic-embed-text
 
 # Graphify (for blast radius analysis)
 pip install graphifyy
@@ -172,16 +246,29 @@ GITHUB_WEBHOOK_SECRET=your_secret
 GITHUB_APP_SLUG=riptide-review
 RIPTIDE_DATA_DIR=/tmp/riptide-data
 
+# Server
+HOST=0.0.0.0
+PORT=8477
+
 # Companion (Bot 1)
 RIPTIDE_COMPANION_REPOS=owner/repo1,owner/repo2
 RIPTIDE_COMPANION_MODEL=qwen2.5-coder:7b
 COMPANION_ENABLE_GRAPHIFY=1
-OLLAMA_BASE_URL=http://localhost:43311
+OLLAMA_BASE_URL=http://localhost:11434
+GIPHY_API_KEY=          # optional — enables dynamic GIF lookup
+TENOR_API_KEY=          # optional — enables dynamic GIF lookup
+
+# Orchestrator
+RIPTIDE_T0_MAX_CONCURRENT=3
 
 # Riptide Review (Bot 2)
 RIPTIDE_WATCHED_REPOS=ChonSong/riptide,ChonSong/hermes-webui
 RIPTIDE_STALENESS_MINUTES=30
 RIPTIDE_MIN_LOC_CHANGED=100
+
+# Proofshotter (Bot 3)
+RIPTIDE_PROOFSHOT_STALENESS_MINUTES=10
+RIPTIDE_PROOFSHOT_CLI=/home/sc/workspace/proofshot/cli.py
 ```
 
 ### Run
@@ -204,19 +291,36 @@ hermes cron create "*/15 * * * *" \
   --script /home/sc/workspace/riptide/riptide/deepthink.py
 ```
 
+### Set Up Bot 3 Cron
+```bash
+# Add to Hermes cron (every 10 minutes)
+hermes cron create "*/10 * * * *" \
+  --name "riptide-proofshot-poll" \
+  --script /home/sc/workspace/riptide/riptide/proofshotter.py
+```
+
 ---
 
-## Companion Configuration
+## Full Configuration Reference
+
+### Companion (Bot 1)
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `RIPTIDE_COMPANION_REPOS` | Comma-separated `owner/repo` list | (disabled) |
 | `RIPTIDE_COMPANION_MODEL` | Ollama model for TLDR generation | `qwen2.5-coder:7b` |
 | `COMPANION_ENABLE_GRAPHIFY` | Enable blast radius analysis | `1` |
+| `OLLAMA_BASE_URL` | Ollama API endpoint | `http://localhost:11434` |
+| `GIPHY_API_KEY` | Giphy API key for dynamic GIF lookup | (none) |
+| `TENOR_API_KEY` | Tenor API key for dynamic GIF lookup | (none) |
 
----
+### Orchestrator (T0)
 
-## Riptide Review Configuration
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `RIPTIDE_T0_MAX_CONCURRENT` | Max concurrent T0 reviews | `3` |
+
+### Riptide Review (Bot 2)
 
 | Variable | Description | Default |
 |----------|-------------|---------|
@@ -225,6 +329,21 @@ hermes cron create "*/15 * * * *" \
 | `RIPTIDE_OUR_ORG` | GitHub org for ownership check | `ChonSong` |
 | `RIPTIDE_STALENESS_MINUTES` | Minutes since last update to qualify | `30` |
 | `RIPTIDE_MIN_LOC_CHANGED` | Minimum LOC changes to trigger | `100` |
+
+### Proofshotter (Bot 3)
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `RIPTIDE_PROOFSHOT_STALENESS_MINUTES` | Minutes since last update to qualify | `10` |
+| `RIPTIDE_PROOFSHOT_CLI` | Path to proofshot CLI script | `/home/sc/workspace/proofshot/cli.py` |
+
+### Server
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `HOST` | Bind address | `0.0.0.0` |
+| `PORT` | Bind port | `8477` |
+| `RIPTIDE_DATA_DIR` | Directory for state files | `/tmp/riptide-data` |
 
 ---
 
@@ -248,26 +367,10 @@ GET /health
 ### GitHub Events Handled
 | Event | Action | Output |
 |-------|--------|--------|
-| `pull_request` opened/reopened/synchronize | Companion TLDR | TL;DR comment |
+| `pull_request` opened/reopened/synchronize | T0 Orchestrator → T1/T2/T3 dispatch | TL;DR comment + ProofShot |
 | `issue_comment` `@riptide-bot companion skip/resume` | Control companion | Confirmation reply |
 | `issue_comment` `@riptide-bot review` / `full review` / `deepthink` | Trigger Bot 2 deep-think | Confirmation reply |
 | `installation` created/deleted | Sync repo list | Metadata DB updated |
-
----
-
-## Comparison with Alternatives
-
-| | **Riptide** | **Octopus** | **CodeRabbit** |
-|---|---|---|---|
-| Stack | Python / FastAPI | Next.js + tRPC | SaaS |
-| Vector store | None (graphify for blast radius) | Qdrant (Docker) | Proprietary |
-| Deployment | Single container | Multi-service | Cloud-only |
-| Auth | GitHub App JWT | JWT + Prisma | OAuth |
-| TLDR Comments | ✅ (Companion) | ❌ | ✅ |
-| ELI5 Explanations | ✅ | ❌ | ❌ |
-| Deep Thinking | ✅ (Bot 2) | ❌ | ❌ |
-| Graphify Blast Radius | ✅ | ❌ | ❌ |
-| Self-Hosted | ✅ | ✅ | ❌ |
 
 ---
 
@@ -276,7 +379,10 @@ GET /health
 ### Run Tests
 ```bash
 # Syntax check
-python -m py_compile riptide/companion.py riptide/deepthink.py riptide/webhook.py riptide/github_app.py
+python -m py_compile riptide/companion.py riptide/deepthink.py riptide/proofshotter.py riptide/webhook.py riptide/github_app.py riptide/orchestrator.py riptide/review_pipeline.py
+
+# Run test suite
+python3 -m pytest riptide/tests/ -v
 ```
 
 ### Simulate Webhook
@@ -293,33 +399,6 @@ requests.post('http://localhost:8477/webhook/github', data=body, headers={'X-Hub
 
 ---
 
-## Local Test
-
-```bash
-# Run unit tests
-source .env 2>/dev/null  # optional — tests with no-op fallback
-python3 -m pytest riptide/tests/ -v
-
-# Manual webhook smoke-test
-python3 -c "
-import requests, json, hmac, hashlib
-payload = {'action': 'opened', 'number': 1, 'pull_request': {'title': 'test', 'user': {'login': 'test'}, 'head': {'sha': 'abc'}},'repository': {'full_name': 'owner/repo', 'name': 'repo'}, 'installation': {'id': 123}}
-body = json.dumps(payload)
-sig = 'sha256=' + hmac.new(b'secret', body.encode(), hashlib.sha256).hexdigest()
-requests.post('http://localhost:8477/webhook/github', data=body, headers={'X-Hub-Signature-256': sig, 'X-GitHub-Event': 'pull_request'})
-"
-
-# Server health check (requires running service)
-curl -s http://localhost:8477/health
-```
-
----
-
 ## License
 
-Modified MIT — see [LICENSE.md](LICENSE.md).
-# Test PR
-
-Test commit for webhook GIF verification.
-# test commit
-# final test
+All rights reserved. Proprietary — internal use only.
