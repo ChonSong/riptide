@@ -185,6 +185,15 @@ def _spawn_deepthink(
         # Pre-gather data in Python (cheaper than having the agent do it)
         data = _gather_review_data(owner, repo, pr_number, head_sha)
 
+        # Pre-generate Excalidraw diagram synchronously (no LLM needed)
+        from riptide.grafiphy.orchestrator import pre_generate_diagram
+        diagram_url = pre_generate_diagram(data, dict(
+            owner=owner, repo=repo, number=pr_number,
+            title=pr_title, author=pr_author, total_loc=total_loc,
+        ))
+        if diagram_url:
+            log.info(f"Pre-generated diagram for {owner}/{repo}#{pr_number}: {diagram_url}")
+
         prompt = _build_orchestrator_prompt(
             owner=owner,
             repo=repo,
@@ -194,6 +203,7 @@ def _spawn_deepthink(
             total_loc=total_loc,
             head_sha=head_sha,
             data=data,
+            diagram_url=diagram_url,
         )
     except Exception as e:
         state.mark_failed(job_id)
@@ -387,7 +397,6 @@ def _gather_review_data(
 
     return data
 
-
 def _build_orchestrator_prompt(
     owner: str,
     repo: str,
@@ -397,11 +406,14 @@ def _build_orchestrator_prompt(
     total_loc: int,
     head_sha: str,
     data: dict,
+    diagram_url: Optional[str] = None,
 ) -> str:
-    """Build a small orchestrator prompt that delegates to subagents.
+    """
+    Build a small orchestrator prompt that delegates to subagents.
 
     The prompt is ~40 lines instead of ~280 lines.
     All data is pre-gathered in Python and passed as structured context.
+    If diagram_url is provided, the LLM references it instead of generating.
     """
     # Format files changed
     files_str = "\n".join(
@@ -427,6 +439,11 @@ def _build_orchestrator_prompt(
     if not graph_str:
         graph_str = "(No graphify analysis available)"
 
+    # Pre-generated diagram context
+    diagram_section = ""
+    if diagram_url:
+        diagram_section = f"\n## Pre-generated Architecture Diagram\n[View Diagram]({diagram_url})\n"
+
     return f"""PR #{pr_number} in {owner}/{repo} — {total_loc} LOC changed.
 
 ## Context (pre-gathered)
@@ -449,7 +466,7 @@ def _build_orchestrator_prompt(
 
 ### Graphify Analysis
 {graph_str}
-
+{diagram_section}
 ## Your Task: Orchestrate Review
 
 You are a senior engineer. Delegate review tasks to subagents, then synthesize.
@@ -460,14 +477,8 @@ Spawn a subagent with:
 - Task: Call `skill_view('deep-think')` first, then analyze the PR diff, post 1-3 inline review comments with GitHub suggestion blocks
 - Output: JSON list of findings [{{file, line, severity, title, detail}}]
 
-### Step 2: Delegate Excalidraw Diagram (sequential — after Step 1 completes)
-Once the inline review subagent finishes, spawn a subagent with:
-- Role: Architecture diagram generator
-- Task: Call `skill_view('excalidraw')` first, then generate a diagram from the findings + graphify data
-- Output: Excalidraw URL
-
-### Step 3: Post Summary Review
-After both subagents complete, post a summary comment:
+### Step 2: Post Summary Review
+After the inline review subagent finishes, post a summary comment:
 
 ```
 ## 🎯 Summary
@@ -481,10 +492,13 @@ After both subagents complete, post a summary comment:
 ## 📊 Code Analysis
 (For each significant file/chunk: WHAT it does, WHY it matters, concerns)
 - `file.py` — description of change and architectural reasoning
-
+""" + (f"""
 ## 🔗 Diagram
-[Visual Review Diagram](<URL from Step 2>)
-
+[View Pre-generated Diagram]({diagram_url})
+""" if diagram_url else """
+## 🔗 Diagram
+Generate a diagram visualizing your findings using the Excalidraw skill.
+""") + """
 ## 📌 Next Steps
 (max 3 actionable items)
 

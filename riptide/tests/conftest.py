@@ -136,8 +136,9 @@ def mock_ollama_truncated():
 
 @pytest.fixture
 def mock_hermes_cron():
-    """Mock hermes cron create calls."""
-    with patch("subprocess.run") as mock:
+    """Mock hermes cron create calls and pre_generate_diagram."""
+    with patch("subprocess.run") as mock, \
+         patch("riptide.grafiphy.orchestrator.pre_generate_diagram", return_value=None):
         mock.return_value.returncode = 0
         mock.return_value.stdout = "cron-id-123"
         mock.return_value.stderr = ""

@@ -88,6 +88,7 @@ class TestSpawnDeepthink:
         with patch("subprocess.run", return_value=self._success_result()) as mock_run, \
              patch("riptide.deepthink._is_cron_available", return_value=True), \
              patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
+             patch("riptide.grafiphy.orchestrator.pre_generate_diagram", return_value=None), \
              patch("riptide.orchestrator.StateStore") as mock_state:
             mock_state.return_value.reserve_job.return_value = True
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
@@ -99,6 +100,7 @@ class TestSpawnDeepthink:
              patch("time.sleep") as mock_sleep, \
              patch("riptide.deepthink._is_cron_available", return_value=True), \
              patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
+             patch("riptide.grafiphy.orchestrator.pre_generate_diagram", return_value=None), \
              patch("riptide.orchestrator.StateStore") as mock_state:
             mock_state.return_value.reserve_job.return_value = True
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
@@ -110,6 +112,7 @@ class TestSpawnDeepthink:
              patch("time.sleep") as mock_sleep, \
              patch("riptide.deepthink._is_cron_available", return_value=True), \
              patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
+             patch("riptide.grafiphy.orchestrator.pre_generate_diagram", return_value=None), \
              patch("riptide.orchestrator.StateStore") as mock_state:
             mock_state.return_value.reserve_job.return_value = True
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
@@ -142,6 +145,84 @@ class TestSpawnDeepthink:
             mock_state.return_value.reserve_job.return_value = False
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
             assert result is False
+
+
+# ── Pre-generate diagram tests ──────────────────────────────────────────────
+
+
+class TestPreGenerateDiagram:
+    """Tests for the pre-generation path wiring in _spawn_deepthink."""
+
+    def _gather_data_mock(self, *args, **kwargs):
+        return {
+            "files_changed": [{"filename": "test.py", "additions": 100, "deletions": 50}],
+            "diff_raw": "+ line 1\n- line 2\n",
+            "repo_tree": ["test.py", "main.py"],
+            "god_nodes": [{"name": "test.py", "edges": 5}],
+            "communities": [{"name": "core", "members": ["test.py"]}],
+            "graph_context": {"raw": "test.py affects main.py"},
+        }
+
+    def test_spawn_calls_pre_generate_diagram(self):
+        """Verify _spawn_deepthink invokes pre_generate_diagram before cron create."""
+        mock_diagram_url = "https://excalidraw.com/#json=abc123"
+        with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="id", stderr="")) as mock_run, \
+             patch("riptide.deepthink._is_cron_available", return_value=True), \
+             patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
+             patch("riptide.grafiphy.orchestrator.pre_generate_diagram", return_value=mock_diagram_url) as mock_pre, \
+             patch("riptide.orchestrator.StateStore") as mock_state:
+            mock_state.return_value.reserve_job.return_value = True
+            _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
+
+            mock_pre.assert_called_once()
+            # Verify diagram_url is passed to prompt builder
+            call_args = mock_run.call_args
+            cmd = call_args[0][0]
+            prompt = cmd[4]
+            assert mock_diagram_url in prompt
+            assert "Pre-generated Architecture Diagram" in prompt
+
+    def test_spawn_no_diagram_when_pre_generate_fails(self):
+        """If pre_generate_diagram returns None, prompt falls back to LLM generation."""
+        with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="id", stderr="")) as mock_run, \
+             patch("riptide.deepthink._is_cron_available", return_value=True), \
+             patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
+             patch("riptide.grafiphy.orchestrator.pre_generate_diagram", return_value=None), \
+             patch("riptide.orchestrator.StateStore") as mock_state:
+            mock_state.return_value.reserve_job.return_value = True
+            _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
+
+            call_args = mock_run.call_args
+            cmd = call_args[0][0]
+            prompt = cmd[4]
+            # Should contain the fallback "Generate a diagram" instruction
+            assert "Generate a diagram" in prompt or "Excalidraw skill" in prompt
+
+    def test_spawn_no_diagram_when_no_graphify_data(self):
+        """If graphify data is empty, pre_generate_diagram returns None (short-circuit) and prompt falls back."""
+        empty_data = {
+            "files_changed": [{"filename": "test.py", "additions": 100, "deletions": 50}],
+            "diff_raw": "+ line 1\n",
+            "repo_tree": [],
+            "god_nodes": [],
+            "communities": [],
+            "graph_context": {},
+        }
+        with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="id", stderr="")) as mock_run, \
+             patch("riptide.deepthink._is_cron_available", return_value=True), \
+             patch("riptide.deepthink._gather_review_data", return_value=empty_data), \
+             patch("riptide.grafiphy.orchestrator.pre_generate_diagram", return_value=None) as mock_pre, \
+             patch("riptide.orchestrator.StateStore") as mock_state:
+            mock_state.return_value.reserve_job.return_value = True
+            _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
+
+            # pre_generate_diagram is called but returns None on empty data
+            mock_pre.assert_called_once()
+            call_args = mock_run.call_args
+            cmd = call_args[0][0]
+            prompt = cmd[4]
+            # Prompt should contain the fallback since no diagram was generated
+            assert "Generate a diagram" in prompt or "Excalidraw skill" in prompt
 
 
 # ── _is_cron_available tests ────────────────────────────────────────────────
@@ -419,7 +500,26 @@ class TestBuildOrchestratorPrompt:
         )
         assert "No graphify analysis available" in prompt
         assert "Delegate Inline Review" in prompt
-        assert "Delegate Excalidraw Diagram" in prompt
+        # Without diagram_url, prompt falls back to LLM generation instruction
+        assert "Generate a diagram" in prompt or "Excalidraw skill" in prompt
+
+    def test_handles_empty_data_with_diagram(self):
+        """When diagram_url is provided, prompt references the pre-generated diagram."""
+        data = {
+            "files_changed": [],
+            "diff_raw": "",
+            "repo_tree": [],
+            "god_nodes": [],
+            "communities": [],
+            "graph_context": {},
+        }
+        test_url = "https://excalidraw.com/#json=test123"
+        prompt = _build_orchestrator_prompt(
+            "ChonSong", "riptide", 42, "feat: test", "author", 300, "abc123", data,
+            diagram_url=test_url,
+        )
+        assert test_url in prompt
+        assert "Pre-generated Architecture Diagram" in prompt
 
     def test_includes_subagent_instructions(self):
         data = {

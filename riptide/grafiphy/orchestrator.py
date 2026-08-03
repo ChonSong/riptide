@@ -23,6 +23,61 @@ from riptide.grafiphy.excalidraw_renderer import render_review, upload_excalidra
 GRAFIPHY_DIR = Path(__file__).parent
 
 
+def pre_generate_diagram(data: dict, pr_metadata: dict) -> Optional[str]:
+    """
+    Synchronously render + upload an Excalidraw diagram BEFORE LLM spawn.
+
+    Uses pre-gathered graphify data (from _gather_review_data) to avoid
+    redundant queries. Returns the shareable URL or None on failure.
+
+    This runs in the Python thread (synchronous) — no cron session needed.
+    The diagram becomes context the LLM references instead of generating.
+
+    Args:
+        data: Output from _gather_review_data() with god_nodes, communities.
+        pr_metadata: {owner, repo, number, title, author, total_loc}
+
+    Returns:
+        Shareable excalidraw.com URL, or None.
+    """
+    god_nodes = data.get("god_nodes", [])
+    communities = data.get("communities", [])
+
+    if not god_nodes and not communities:
+        return None
+
+    graph_data = {
+        "god_nodes": god_nodes[:8],
+        "communities": [
+            {
+                "name": c.get("name", "?"),
+                "members": c.get("members", []) if isinstance(c.get("members"), list) else [],
+            }
+            for c in communities[:6]
+        ],
+    }
+
+    output_dir = Path(tempfile.mkdtemp(prefix=f"riptide-pr{pr_metadata.get('number')}-pre-"))
+    excalidraw_path = output_dir / "diagram.excalidraw"
+
+    try:
+        render_review(
+            pr_data={
+                "number": pr_metadata.get("number", 0),
+                "title": pr_metadata.get("title", ""),
+                "repo": f"{pr_metadata.get('owner')}/{pr_metadata.get('repo')}",
+                "author": pr_metadata.get("author", ""),
+                "loc": pr_metadata.get("total_loc", 0),
+            },
+            graph_data=graph_data,
+            output_path=str(excalidraw_path),
+        )
+        return upload_excalidraw(str(excalidraw_path))
+    except Exception as e:
+        print(f"WARNING: Pre-generate diagram failed: {e}")
+        return None
+
+
 def _run_graphify(args: list[str], cwd: str = None, timeout: int = 30) -> tuple[str, str]:
     """Run a graphify command and return (stdout, stderr)."""
     graphify_bin = os.environ.get("GRAPHIFY_BIN", "graphify")
