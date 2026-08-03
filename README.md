@@ -254,7 +254,7 @@ PORT=8477
 RIPTIDE_COMPANION_REPOS=owner/repo1,owner/repo2
 RIPTIDE_COMPANION_MODEL=qwen2.5-coder:7b
 COMPANION_ENABLE_GRAPHIFY=1
-OLLAMA_BASE_URL=http://localhost:43311
+OLLAMA_BASE_URL=http://localhost:11434
 GIPHY_API_KEY=          # optional — enables dynamic GIF lookup
 TENOR_API_KEY=          # optional — enables dynamic GIF lookup
 
