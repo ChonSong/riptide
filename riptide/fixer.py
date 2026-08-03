@@ -56,7 +56,7 @@ WORKSPACE_ROOT = os.environ.get("RIPTIDE_WORKSPACE_ROOT", "/home/sc/workspace")
 
 def handle_fix_command(
     client,
-    installation_id: int,
+    installation_id: int | None,
     owner: str,
     repo: str,
     pr_number: int,
@@ -72,8 +72,12 @@ def handle_fix_command(
 
     description: optional free-text after `fix` (already stripped).
     """
+    # Determine effective installation_id for client calls.
+    # If the client is a GhCliClient, installation_id is None (uses PAT).
+    effective_installation_id = installation_id
+
     try:
-        pr_details = client.get_pr_details(installation_id, owner, repo, pr_number)
+        pr_details = client.get_pr_details(effective_installation_id, owner, repo, pr_number)
     except Exception as e:
         log.warning("Failed to fetch PR details for fix: %s", e)
         return (
@@ -89,15 +93,12 @@ def handle_fix_command(
     head_sha = pr_details.get("head", {}).get("sha", "")
     head_ref = pr_details.get("head", {}).get("ref", "")
     # Fork detection: fail-closed — if head.repo is missing (deleted fork,
-    # API race) or differs from base, treat as fork. Only same-repo when
-    # head_repo explicitly matches base owner/repo.
+    # API race) or differs from base, treat as fork.
     head_repo = (pr_details.get("head", {}).get("repo") or {}).get("full_name", "")
     is_fork = head_repo.lower() != f"{owner}/{repo}".lower() if head_repo else True
 
-    # Authorization gate (CodeRabbit Critical): the COMMENTER must be the PR
-    # author, the repo owner, or OUR_USERNAME. Without this, any account
-    # with read access could comment `@riptide-bot fix` and trigger a
-    # push-capable session on a PR they don't own.
+    # Authorization gate: the COMMENTER must be the PR author, the repo owner,
+    # or OUR_USERNAME.
     authorized = (
         commenter == OUR_USERNAME
         or commenter == author
@@ -114,7 +115,10 @@ def handle_fix_command(
             f"on this PR. Your comment was logged."
         )
 
-    push_eligible = _is_push_eligible(owner, repo, author) and not is_fork
+    # Push eligibility: allow if we own the repo OR authored the PR.
+    # Fork PRs from external users (head != base, not our org) stay comment-only.
+    # Fork PRs authored by us are push-eligible (we own the head branch).
+    push_eligible = _is_push_eligible(owner, repo, author) and (not is_fork or author == OUR_USERNAME)
 
     try:
         spawned = _spawn_fix(
