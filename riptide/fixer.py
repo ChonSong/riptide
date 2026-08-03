@@ -88,9 +88,11 @@ def handle_fix_command(
     total_loc = additions + deletions
     head_sha = pr_details.get("head", {}).get("sha", "")
     head_ref = pr_details.get("head", {}).get("ref", "")
-    # Fork detection: head repo full_name differs from base owner/repo.
+    # Fork detection: fail-closed — if head.repo is missing (deleted fork,
+    # API race) or differs from base, treat as fork. Only same-repo when
+    # head_repo explicitly matches base owner/repo.
     head_repo = (pr_details.get("head", {}).get("repo") or {}).get("full_name", "")
-    is_fork = bool(head_repo) and head_repo.lower() != f"{owner}/{repo}".lower()
+    is_fork = head_repo.lower() != f"{owner}/{repo}".lower() if head_repo else True
 
     # Authorization gate (CodeRabbit Critical): the COMMENTER must be the PR
     # author, the repo owner, or OUR_USERNAME. Without this, any account
@@ -171,10 +173,8 @@ def _is_push_eligible(owner: str, repo: str, pr_author: str) -> bool:
 
 def _is_cron_available() -> bool:
     """Check that `hermes cron create` works."""
-    result = subprocess.run(
-        ["which", "hermes"], capture_output=True, text=True, timeout=5
-    )
-    return bool(result.returncode == 0 and result.stdout.strip())
+    import shutil
+    return shutil.which("hermes") is not None
 
 
 def _spawn_fix(
@@ -236,6 +236,7 @@ def _spawn_fix(
         "--skill", "riptide-fix",
         "--model", FIX_MODEL,
         "--provider", FIX_PROVIDER,
+        "--repeat", "1",
         "--deliver", "origin",
     ]
 
