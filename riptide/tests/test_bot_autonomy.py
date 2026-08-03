@@ -26,9 +26,22 @@ class TestSpawnRetry:
         r.stderr = ""
         return r
 
+    def _gather_data_mock(self, *args, **kwargs):
+        return {
+            "files_changed": [],
+            "diff_raw": "",
+            "repo_tree": [],
+            "god_nodes": [],
+            "communities": [],
+            "graph_context": {},
+        }
+
     def test_spawn_succeeds_on_first_attempt(self):
         with patch("subprocess.run", return_value=self._success_result()) as mock_run, \
-             patch("riptide.deepthink._is_cron_available", return_value=True):
+             patch("riptide.deepthink._is_cron_available", return_value=True), \
+             patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
+             patch("riptide.orchestrator.StateStore") as mock_state:
+            mock_state.return_value.reserve_job.return_value = True
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
             assert result is True
             assert mock_run.call_count == 1
@@ -40,7 +53,10 @@ class TestSpawnRetry:
 
         with patch("subprocess.run", side_effect=failures + [success]) as mock_run, \
              patch("time.sleep") as mock_sleep, \
-             patch("riptide.deepthink._is_cron_available", return_value=True):
+             patch("riptide.deepthink._is_cron_available", return_value=True), \
+             patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
+             patch("riptide.orchestrator.StateStore") as mock_state:
+            mock_state.return_value.reserve_job.return_value = True
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
             assert result is True
             assert mock_run.call_count == 3
@@ -53,7 +69,10 @@ class TestSpawnRetry:
         failures = [MagicMock(returncode=1, stderr="x") for _ in range(3)]
         with patch("subprocess.run", side_effect=failures) as mock_run, \
              patch("time.sleep") as mock_sleep, \
-             patch("riptide.deepthink._is_cron_available", return_value=True):
+             patch("riptide.deepthink._is_cron_available", return_value=True), \
+             patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
+             patch("riptide.orchestrator.StateStore") as mock_state:
+            mock_state.return_value.reserve_job.return_value = True
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
             assert result is False
             assert mock_run.call_count == 3
@@ -63,22 +82,35 @@ class TestSpawnRetry:
         """_is_cron_available False -> skips that attempt entirely."""
         with patch("subprocess.run", return_value=self._success_result()) as mock_run, \
              patch("time.sleep") as mock_sleep, \
-             patch("riptide.deepthink._is_cron_available", side_effect=[False, True]):
+             patch("riptide.deepthink._is_cron_available", side_effect=[False, True]), \
+             patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
+             patch("riptide.orchestrator.StateStore") as mock_state:
+            mock_state.return_value.reserve_job.return_value = True
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
             assert result is True
             # First attempt skipped (no subprocess), second attempt ran
             assert mock_run.call_count == 1
+
     def test_spawn_timeout_retries(self):
         """TimeoutExpired on attempts 1-2, success on 3."""
         timeout = subprocess.TimeoutExpired(cmd="hermes", timeout=15)
         success = MagicMock(returncode=0, stdout="cron-id")
         with patch("subprocess.run", side_effect=[timeout, timeout, success]) as mock_run, \
              patch("time.sleep") as mock_sleep, \
-             patch("riptide.deepthink._is_cron_available", return_value=True):
+             patch("riptide.deepthink._is_cron_available", return_value=True), \
+             patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
+             patch("riptide.orchestrator.StateStore") as mock_state:
+            mock_state.return_value.reserve_job.return_value = True
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
             assert result is True
             assert mock_run.call_count == 3
 
+    def test_skips_when_review_already_pending(self):
+        """If a review is already pending, don't spawn another."""
+        with patch("riptide.orchestrator.StateStore") as mock_state:
+            mock_state.return_value.reserve_job.return_value = False
+            result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
+            assert result is False
 
 # ── Companion Bot 2 status footer ─────────────────────────────────────────────
 
