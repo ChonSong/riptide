@@ -467,42 +467,22 @@ Spawn a subagent with:
 - Task: Call `skill_view('deep-think')` first, then analyze the PR diff, post 1-3 inline review comments with GitHub suggestion blocks
 - Output: JSON list of findings [{{file, line, severity, title, detail}}]
 
-### Step 2: Delegate Excalidraw Diagram (sequential — after Step 1 completes)
-Once the inline review subagent finishes, spawn a subagent with:
-- Role: Architecture diagram generator
-- Task: Call `skill_view('excalidraw')` first, then generate a diagram from the findings + graphify data
-- Output: Excalidraw URL
+### Step 2: Write Findings JSON
+After the inline review subagent finishes, write its findings to /tmp/findings.json as JSON:
+[{{severity, title, detail, file, line}}]
+Severity must be one of: critical, warning, suggestion, info, approved.
 
-### Step 3: Post Summary Review
-After both subagents complete, post a summary comment:
+### Step 3: Assemble + Post Review (deterministic)
+Run the assembly script — it validates, formats, and posts. Do NOT hand-format the review.
 
 ```
-## 🎯 Summary
-(1-2 sentences: what this PR does)
-
-## 🔍 Findings
-| Severity | File | Line | Issue |
-|----------|------|------|-------|
-| 🟡 Warning | file.py | 42 | Issue description |
-
-## 📊 Code Analysis
-(For each significant file/chunk: WHAT it does, WHY it matters, concerns)
-- `file.py` — description of change and architectural reasoning
-
-## 🔗 Diagram
-[Visual Review Diagram](<URL from Step 2>)
-
-## 📌 Next Steps
-(max 3 actionable items)
-
-## 💭 Explanation
-(Trade-offs considered, approach rationale, what was weighed)
-
----
-<sub>Riptide Review via Hermes</sub>
+python -m riptide.assemble_review \
+  --findings /tmp/findings.json \
+  --owner {owner} --repo {repo} --pr {pr_number} \
+  --model "{DEEPTHINK_MODEL}" --provider "{DEEPTHINK_PROVIDER}"
 ```
 
-Use `gh pr comment {pr_number} --repo {owner}/{repo} --body '<review>'` to post.
+The script appends the model/provider to the sign-off deterministically.
 
 ### Rules
 - Max 3 inline comments, real issues only

@@ -482,7 +482,7 @@ class TestBuildOrchestratorPrompt:
         )
         assert "No graphify analysis available" in prompt
         assert "Delegate Inline Review" in prompt
-        assert "Delegate Excalidraw Diagram" in prompt
+        assert "assemble_review" in prompt
 
     def test_includes_subagent_instructions(self):
         data = {
@@ -497,5 +497,5 @@ class TestBuildOrchestratorPrompt:
             "ChonSong", "riptide", 42, "feat: test", "author", 300, "abc123", data
         )
         assert "Spawn a subagent" in prompt
-        assert "Excalidraw" in prompt
-        assert "Riptide Review via Hermes" in prompt
+        assert "assemble_review" in prompt
+        assert "DEEPTHINK" in prompt or "custom:LongCat-2.0" in prompt
