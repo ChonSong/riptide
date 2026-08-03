@@ -139,23 +139,23 @@ class TestIsCronAvailable:
 class TestBuildFixPrompt:
     def test_prompt_contains_verification_gate(self):
         prompt = _build_fix_prompt("ChonSong", "riptide", 42, "title", "author", 15,
-                                   "abc123", "feat/x", "", True)
+                                   "abc123", "feat/x", "", True, "test-job-123")
         assert "Verification gate" in prompt
         assert "NEVER edit" in prompt
         assert "NO force-push" in prompt
 
     def test_prompt_with_description(self):
         prompt = _build_fix_prompt("ChonSong", "riptide", 42, "title", "author", 15,
-                                   "abc123", "feat/x", "fix the bug", True)
+                                   "abc123", "feat/x", "fix the bug", True, "test-job-123")
         assert "fix the bug" in prompt
 
     def test_prompt_push_eligible(self):
         prompt = _build_fix_prompt("ChonSong", "riptide", 42, "title", "author", 15,
-                                   "abc123", "feat/x", "", True)
+                                   "abc123", "feat/x", "", True, "test-job-123")
         assert "git push" in prompt
         assert "comment-only" not in prompt
 
     def test_prompt_not_push_eligible(self):
         prompt = _build_fix_prompt("other", "repo", 42, "title", "author", 15,
-                                   "abc123", "feat/x", "", False)
+                                   "abc123", "feat/x", "", False, "test-job-123")
         assert "Do NOT push" in prompt
