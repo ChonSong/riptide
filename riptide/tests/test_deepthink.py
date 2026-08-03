@@ -73,9 +73,8 @@ class TestSpawnDeepthink:
         # Verify --skill flags
         assert "--skill" in cmd
         skills = [cmd[i + 1] for i, x in enumerate(cmd) if x == "--skill"]
-        assert "github-pr-lifecycle" in skills
+        assert "riptide-review" in skills
         assert "deep-think" in skills
-        assert "excalidraw" in skills
 
         # Verify --deliver and --name
         assert "--deliver" in cmd
