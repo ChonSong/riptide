@@ -194,8 +194,8 @@ class TestPreGenerateDiagram:
             call_args = mock_run.call_args
             cmd = call_args[0][0]
             prompt = cmd[4]
-            # Should contain the fallback "Generate a diagram" instruction
-            assert "Generate a diagram" in prompt or "Excalidraw skill" in prompt
+            # Prompt should reference assembly since no diagram was pre-generated
+            assert "assemble_review" in prompt
 
     def test_spawn_no_diagram_when_no_graphify_data(self):
         """If graphify data is empty, pre_generate_diagram returns None (short-circuit) and prompt falls back."""
@@ -220,8 +220,8 @@ class TestPreGenerateDiagram:
             call_args = mock_run.call_args
             cmd = call_args[0][0]
             prompt = cmd[4]
-            # Prompt should contain the fallback since no diagram was generated
-            assert "Generate a diagram" in prompt or "Excalidraw skill" in prompt
+            # Prompt should reference assembly since no diagram was generated
+            assert "assemble_review" in prompt
 
 # ── Classification Integration Tests ────────────────────────────────────────
 
@@ -561,8 +561,8 @@ class TestBuildOrchestratorPrompt:
         )
         assert "No graphify analysis available" in prompt
         assert "Delegate Inline Review" in prompt
-        # Without diagram_url, prompt falls back to LLM generation instruction
-        assert "Generate a diagram" in prompt or "Excalidraw skill" in prompt
+        # Without diagram_url, prompt references assembly
+        assert "assemble_review" in prompt
 
     def test_handles_empty_data_with_diagram(self):
         """When diagram_url is provided, prompt references the pre-generated diagram."""
@@ -581,6 +581,7 @@ class TestBuildOrchestratorPrompt:
         )
         assert test_url in prompt
         assert "Pre-generated Architecture Diagram" in prompt
+        assert "assemble_review" in prompt
 
     def test_includes_subagent_instructions(self):
         data = {
@@ -595,5 +596,5 @@ class TestBuildOrchestratorPrompt:
             "ChonSong", "riptide", 42, "feat: test", "author", 300, "abc123", data
         )
         assert "Spawn a subagent" in prompt
-        assert "Excalidraw" in prompt
-        assert "Riptide Review via Hermes" in prompt
+        assert "assemble_review" in prompt
+        assert "DEEPTHINK" in prompt or "custom:LongCat-2.0" in prompt

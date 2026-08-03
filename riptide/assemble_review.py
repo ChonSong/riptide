@@ -12,7 +12,9 @@ Usage:
         --owner ChonSong \
         --repo riptide \
         --pr 42 \
-        --diagram-url "https://excalidraw.com/#json=..."
+        --diagram-url "https://excalidraw.com/#json=..." \
+        --model "custom:LongCat-2.0" \
+        --provider "custom"
 """
 import argparse
 import json
@@ -30,6 +32,8 @@ def assemble_review_body(
     repo: str,
     pr_number: int,
     diagram_url: Optional[str] = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
 ) -> str:
     """
     Assemble a review comment from structured findings.
@@ -94,8 +98,18 @@ def assemble_review_body(
     else:
         parts.append("- Ready to merge ✓")
 
-    # Sign-off
-    parts.append("\n---\n<sub>Riptide Review via Hermes</sub>")
+    # Sign-off — include model/provider deterministically (from Python, not LLM)
+    signoff = "<sub>Riptide Review via Hermes"
+    if model or provider:
+        signoff += " · "
+        if model:
+            signoff += f"model: `{model}`"
+        if model and provider:
+            signoff += " · "
+        if provider:
+            signoff += f"provider: `{provider}`"
+    signoff += "</sub>"
+    parts.append(f"\n---\n{signoff}")
 
     body = "\n".join(parts)
 
@@ -161,6 +175,8 @@ def main():
     parser.add_argument("--repo", required=True, help="Repo name")
     parser.add_argument("--pr", required=True, type=int, help="PR number")
     parser.add_argument("--diagram-url", default=None, help="Pre-generated diagram URL")
+    parser.add_argument("--model", default=None, help="Model used for the review (appended to sign-off)")
+    parser.add_argument("--provider", default=None, help="Provider used for the review (appended to sign-off)")
     parser.add_argument("--dry-run", action="store_true", help="Print review instead of posting")
     args = parser.parse_args()
 
@@ -191,6 +207,8 @@ def main():
         repo=args.repo,
         pr_number=args.pr,
         diagram_url=args.diagram_url,
+        model=args.model,
+        provider=args.provider,
     )
 
     if args.dry_run:
