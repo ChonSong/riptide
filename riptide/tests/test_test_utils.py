@@ -1,5 +1,7 @@
 """Tests for riptide.test_utils (pipeline verification module)."""
 
+import time
+
 import pytest
 
 from riptide.test_utils import format_elapsed, retry_until
@@ -35,3 +37,18 @@ class TestRetryUntil:
             retry_until(lambda: True, timeout=0, interval=1)
         with pytest.raises(ValueError):
             retry_until(lambda: True, timeout=1, interval=0)
+
+    def test_does_not_overshoot_deadline(self):
+        """Sleep after last check is capped to remaining time, not full interval."""
+        calls = []
+        start = time.monotonic()
+
+        def predicate():
+            calls.append(time.monotonic())
+            return None
+
+        result = retry_until(predicate, timeout=0.3, interval=5.0)
+        elapsed = time.monotonic() - start
+        assert result is None
+        # Must return within ~0.3s + small margin, not 5s
+        assert elapsed < 1.0, f"overshot deadline: {elapsed:.2f}s"

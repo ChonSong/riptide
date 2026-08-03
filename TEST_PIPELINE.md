@@ -1,6 +1,6 @@
 # test/e2e-pipeline-verify
 
-Test PR to verify the full Riptide pipeline end-to-end:
+Test PR to verify the full Riptide review pipeline end-to-end:
 
 1. Webhook fires via tunnel (riptide.codeovertcp.com)
 2. T0 orchestrator classifies the PR
@@ -9,4 +9,5 @@ Test PR to verify the full Riptide pipeline end-to-end:
 5. Subagents run inline review + Excalidraw diagram
 6. Summary review posted with all required sections
 
-This change adds a trivial utility function to exercise the pipeline.
+This change adds `riptide/test_utils.py` (`format_elapsed`, `retry_until`)
+and tests, then verifies the review pipeline runs end-to-end on a real PR.

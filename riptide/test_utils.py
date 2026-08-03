@@ -40,6 +40,8 @@ def retry_until(predicate, timeout: float = 30.0, interval: float = 1.0, descrip
         result = predicate()
         if result:
             return result
-        time.sleep(interval)
+        # Cap the sleep so we don't overshoot the deadline
+        remaining = deadline - time.monotonic()
+        time.sleep(min(interval, remaining))
 
     return None
