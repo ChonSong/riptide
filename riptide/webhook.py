@@ -17,6 +17,7 @@ import time
 import logging
 import threading
 import traceback
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -238,6 +239,35 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
             t.start()
             log.info(
                 f"[{delivery_id}] T0 orchestrator spawned for {repo_full}#{pr_number}"
+            )
+
+    # PR merged into default branch → auto-deploy
+    if (
+        action == "closed"
+        and pr.get("merged")
+        and pr.get("base", {}).get("ref") == os.environ.get("RIPTIDE_DEPLOY_BRANCH", "main")
+    ):
+        repo_default_branch = repo.get("default_branch", "main")
+        if pr.get("base", {}).get("ref") == repo_default_branch:
+            log.info(
+                f"[{delivery_id}] PR #{pr_number} merged into {repo_full}@{repo_default_branch} — triggering auto-deploy"
+            )
+            deploy_script = os.environ.get(
+                "RIPTIDE_DEPLOY_SCRIPT", "/home/sc/workspace/riptide/scripts/deploy.sh"
+            )
+            # Run in a transient scope so it survives the service restart
+            subprocess.Popen(
+                [
+                    "systemd-run",
+                    "--user",
+                    "--scope",
+                    "--property=KillMode=process",
+                    "--collect",
+                    deploy_script,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
             )
 
     return Response(status_code=200)
