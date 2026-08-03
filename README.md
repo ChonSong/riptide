@@ -217,7 +217,7 @@ riptide/
 ## Quick Start
 
 ### Prerequisites
-- Python 3.11+
+- Python 3.12+
 - Ollama with `qwen2.5-coder:7b`
 - GitHub App registered with webhook permissions
 - (Optional) Giphy or Tenor API key for dynamic GIF lookup

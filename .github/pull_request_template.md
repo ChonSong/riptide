@@ -12,7 +12,7 @@
 
 <!-- How was this tested? -->
 
-- [ ] Linting passes (`python -m py_compile riptide/*.py`)
-- [ ] Type check passes (py_compile check)
+- [ ] Linting passes (`ruff check riptide/`)
+- [ ] Type check passes (`python -m py_compile riptide/*.py`)
 - [ ] Tests pass (`python3 -m pytest riptide/tests/ -v`)
 - [ ] Tested locally
