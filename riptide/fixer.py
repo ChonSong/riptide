@@ -226,6 +226,7 @@ def _spawn_fix(
             head_ref=head_ref,
             description=description,
             push_eligible=push_eligible,
+            job_id=job_id,
         )
     except Exception as e:
         state.mark_failed(job_id)
@@ -286,6 +287,7 @@ def _build_fix_prompt(
     head_ref: str,
     description: str,
     push_eligible: bool,
+    job_id: str,
 ) -> str:
     """Build the orchestrator prompt for the spawned fix session.
 
@@ -362,4 +364,12 @@ SURFACE → EXPLORE (graphify) → CHALLENGE → SYNTHESIZE → VALIDATE
 Post a PR comment listing per-finding verdict + one-line reason, files
 touched, test results, and the commit SHA (or the patch if push was not
 authorized). Include the model attribution footer.
+
+## Cleanup (mandatory — run AFTER posting the summary comment)
+import sys; sys.path.insert(0, '/home/sc/workspace/riptide')
+from riptide.orchestrator import StateStore
+state = StateStore()
+# Call ONE of these based on outcome:
+state.mark_complete('{job_id}')  # success: fixes applied and tested
+# state.mark_failed('{job_id}')   # failure: red tests, could not complete
 """
