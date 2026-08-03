@@ -133,6 +133,8 @@ Reply to any PR comment with `@riptide-bot`:
 | `@riptide-bot review` | Trigger deep-think review now | Bot 2 |
 | `@riptide-bot full review` | Same (alias) | Bot 2 |
 | `@riptide-bot deepthink` | Same (alias) | Bot 2 |
+| `@riptide-bot fix` | Trigger autonomous fix (edit/commit/push) | Bot 2 |
+| `@riptide-bot fix <description>` | Fix a specific described problem | Bot 2 |
 | `@riptide-bot companion skip` | Stop companion TLDR on this PR | Bot 1 |
 | `@riptide-bot companion resume` | Re-enable companion TLDR | Bot 1 |
 
@@ -370,6 +372,7 @@ GET /health
 | `pull_request` opened/reopened/synchronize | T0 Orchestrator → T1/T2/T3 dispatch | TL;DR comment + ProofShot |
 | `issue_comment` `@riptide-bot companion skip/resume` | Control companion | Confirmation reply |
 | `issue_comment` `@riptide-bot review` / `full review` / `deepthink` | Trigger Bot 2 deep-think | Confirmation reply |
+| `issue_comment` `@riptide-bot fix [description]` | Trigger autonomous fix (edit/commit/push) | Confirmation reply + fix summary |
 | `installation` created/deleted | Sync repo list | Metadata DB updated |
 
 ---

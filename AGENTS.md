@@ -5,7 +5,7 @@ Repo-scoped rules for AI agents reviewing or editing this codebase.
 ## Before submitting a change
 
 ```bash
-python -m py_compile riptide/companion.py riptide/deepthink.py riptide/proofshotter.py riptide/webhook.py riptide/github_app.py
+python -m py_compile riptide/companion.py riptide/deepthink.py riptide/proofshotter.py riptide/webhook.py riptide/github_app.py riptide/fixer.py
 ```
 
 ## Repository layout
@@ -16,6 +16,7 @@ riptide/
 │   ├── github_app.py      # JWT auth, GitHub API client
 │   ├── companion.py       # Bot 1: TL;DR + ELI5 + ProofShot flagger
 │   ├── deepthink.py       # Bot 2: Cron polling + Hermes deep-think spawner
+│   ├── fixer.py           # Bot 2: Autonomous fix (edit/commit/push)
 │   ├── proofshotter.py    # Bot 3: Cron-polled proofshot visual verification
 │   ├── webhook.py         # FastAPI server (companion trigger, installation sync)
 │   └── __init__.py
@@ -48,6 +49,17 @@ riptide/
 - Posts review comment with findings
 - Notes missing proofshot evidence in review comment
 - Dedup: SHA-based + 24h cooldown (prevents re-review of same revision)
+
+### Bot 2b: Autonomous Fix (On-Demand)
+- Triggered by `@riptide-bot fix` or `@riptide-bot fix <description>` on a PR
+- Handled by `riptide/fixer.py`, routed in `webhook.py` Route 2b
+- Parses findings from the latest `@riptide-bot review` comment (or triggers one first)
+- **Authorization gate:** only the PR author, repo owner, or ChonSong can trigger
+- Verifies each finding against current code (valid/skip-already-addressed/skip-stale)
+- Pushes directly to the PR branch when same-repo and author-eligible (via `gh` CLI as ChonSong)
+- Fork/foreign PRs get a comment-only patch with a "cannot push" note
+- Safety: no force-push, no secret edits, no push on red tests, Conventional Commits
+- Instant ack comment ("🛠 Riptide Fix triggered"), then summary with verdicts
 
 ### Bot 1: Companion State Reporting
 - Companion TL;DR footer includes Bot 2 status when state file is present:
