@@ -197,7 +197,7 @@ riptide/
 │   ├── proofshotter.py    # Bot 3: Cron-polled visual verification
 │   ├── webhook.py         # FastAPI server (companion trigger, installation sync)
 │   ├── resources/         # Static assets
-│   └── tests/             # pytest suite (12 test files)
+│   └── tests/             # pytest suite (11 test files + conftest.py)
 ├── server.py              # Uvicorn/gunicorn entry point
 ├── requirements.txt       # fastapi, uvicorn, pydantic, cryptography, requests, graphifyy
 ├── Dockerfile
