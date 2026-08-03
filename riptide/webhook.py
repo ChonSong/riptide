@@ -314,6 +314,26 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
             except Exception as e:
                 log.error(f"[{delivery_id}] Review command failed: {e}")
 
+        # Route 2b: On-demand fix command (@riptide-bot fix [description])
+        from riptide.fixer import FIX_RE, handle_fix_command
+
+        if FIX_RE.search(body):
+            log.info(
+                f"[{delivery_id}] Fix command on {owner}/{repo_name}#{pr_number} by {commenter}"
+            )
+            try:
+                client = github_client()
+                description = FIX_RE.search(body).group(1).strip()
+                result = handle_fix_command(
+                    client, installation_id, owner, repo_name, pr_number, commenter, description
+                )
+                if result:
+                    client.post_pr_comment(
+                        installation_id, owner, repo_name, pr_number, result
+                    )
+            except Exception as e:
+                log.error(f"[{delivery_id}] Fix command failed: {e}")
+
     return Response(status_code=200)
 
 
