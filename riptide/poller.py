@@ -50,9 +50,18 @@ def _init_db(conn: sqlite3.Connection):
         CREATE TABLE IF NOT EXISTS {PROCESSED_TABLE} (
             comment_id INTEGER PRIMARY KEY,
             processed_at TEXT NOT NULL,
-            result TEXT
+            result TEXT,
+            pending_response TEXT
         )
     """)
+    # Migration for pre-existing databases: CREATE TABLE IF NOT EXISTS is a
+    # no-op when the table already exists, so databases created before the
+    # pending_response column was added lack it. Without the column,
+    # _mark_processed/_get_pending_response throw "no such column" and break
+    # the poller on every fix comment.
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({PROCESSED_TABLE})").fetchall()}
+    if "pending_response" not in columns:
+        conn.execute(f"ALTER TABLE {PROCESSED_TABLE} ADD COLUMN pending_response TEXT")
     conn.commit()
 
 
@@ -64,13 +73,22 @@ def _is_processed(conn: sqlite3.Connection, comment_id: int) -> bool:
     return row is not None
 
 
-def _mark_processed(conn: sqlite3.Connection, comment_id: int, result: str = ""):
+def _mark_processed(conn: sqlite3.Connection, comment_id: int, result: str = "", pending_response: str = ""):
     conn.execute(
-        f"INSERT OR REPLACE INTO {PROCESSED_TABLE} (comment_id, processed_at, result) "
-        f"VALUES (?, ?, ?)",
-        (comment_id, datetime.now(timezone.utc).isoformat(), result[:200])
+        f"INSERT OR REPLACE INTO {PROCESSED_TABLE} (comment_id, processed_at, result, pending_response) "
+        f"VALUES (?, ?, ?, ?)",
+        (comment_id, datetime.now(timezone.utc).isoformat(), result[:200], pending_response)
     )
     conn.commit()
+
+
+def _get_pending_response(conn: sqlite3.Connection, comment_id: int) -> Optional[str]:
+    """Retrieve a pending response body that failed to post."""
+    row = conn.execute(
+        f"SELECT pending_response FROM {PROCESSED_TABLE} WHERE comment_id = ?",
+        (comment_id,)
+    ).fetchone()
+    return row[0] if row and row[0] else None
 
 
 def _has_pending_fix(conn: sqlite3.Connection, pr_key: str) -> bool:
@@ -187,6 +205,28 @@ def _handle_fix(client, match: dict, conn: sqlite3.Connection):
     repo = match["repo"]
     pr_number = match["pr_number"]
 
+    # Retry path: if a previous post attempt failed, retry without re-calling handle_fix_command
+    pending_response = _get_pending_response(conn, comment_id)
+    if pending_response:
+        log.info(f"Retrying pending response for comment {comment_id}")
+        try:
+            client.post_pr_comment(
+                installation_id=None,
+                owner=owner,
+                repo=repo,
+                pr_number=pr_number,
+                body=pending_response,
+            )
+            spawned = "Riptide Fix triggered" in pending_response
+            status = "spawned" if spawned else "not-spawned"
+            _mark_processed(conn, comment_id,
+                            f'{{"result":"{status}","pr_key":"{pr_key}"}}', pending_response="")
+            log.info(f"Successfully posted pending response for {pr_key}")
+            return
+        except Exception as e:
+            log.error(f"Retry post failed for {pr_key}: {e}")
+            return  # Keep pending response for future retry
+
     if _is_processed(conn, comment_id):
         log.info(f"Skipping already-processed comment {comment_id}")
         return
@@ -249,7 +289,9 @@ def _handle_fix(client, match: dict, conn: sqlite3.Connection):
             log.info(f"Posted fix trigger comment on {pr_key} (spawned={spawned})")
         except Exception as e:
             log.error(f"Failed to post comment on {pr_key}: {e}")
-            _mark_processed(conn, comment_id, f"post-failed: {e}")
+            # Store the result as pending so the next poll can retry
+            _mark_processed(conn, comment_id, f"post-pending: {str(e)[:150]}",
+                            pending_response=result)
     else:
         log.info(f"Fix handler returned no comment for {pr_key}")
         _mark_processed(conn, comment_id, "no-result")
