@@ -423,9 +423,10 @@ def _should_run_visual(
     diff_snippet = ""
     try:
         # Get first ~600 chars of actual diff for UI files
+        ui_json = json.dumps(ui_files)
         diff_result = subprocess.run(
             ["gh", "api", f"repos/{owner}/{repo}/pulls/{pr_number}/files",
-             "--jq", ".[] | select(.filename as $f | $ui | index($f) != null) | .patch[:200]",
+             "--jq", f".[] | select(.filename as $f | {ui_json} | index($f) != null) | .patch[:200]",
              "--paginate"],
             capture_output=True, text=True, timeout=30,
         )
@@ -503,7 +504,7 @@ def run():
         # ── Get open PRs via gh CLI ──────────────────────────────────────
         prs = subprocess.run(
             ["gh", "pr", "list", "--repo", repo_full, "--state", "open",
-             "--json", "number,title,headRefName,headRefOid,author,"
+             "--json", "number,title,body,headRefName,headRefOid,author,"
                        "additions,deletions,createdAt,updatedAt,url,state,isDraft",
              "--limit", "50"],
             capture_output=True, text=True, timeout=30,
@@ -521,6 +522,7 @@ def run():
         for pr in open_prs:
             pr_number = pr["number"]
             pr_title = pr.get("title", "")
+            pr_body = pr.get("body", "")
             pr_author = pr.get("author", {}).get("login", "")
             head_sha = pr.get("headRefOid", "")
             updated_at_str = pr.get("updatedAt", "")
@@ -578,7 +580,7 @@ def run():
             commit_messages = [c.get("message", "") for c in commit_map]
 
             should_run, reason = _should_run_visual(
-                owner, repo_name, pr_number, pr_title, "",
+                owner, repo_name, pr_number, pr_title, pr_body,
                 ui_files, commit_messages,
             )
             if not should_run:

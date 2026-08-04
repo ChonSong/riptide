@@ -621,13 +621,6 @@ class T0Orchestrator:
                 "body": f"![ProofShot]({gif_url})" if gif_url else "Visual capture complete",
                 "gif_url": gif_url,
             }
-            
-            return {
-                "status": "complete",
-                "tier": "t3_visual",
-                "body": f"![ProofShot]({gif_url})" if gif_url else "Visual capture complete",
-                "gif_url": gif_url,
-            }
         except Exception as e:
             log.warning(f"T3 visual dispatch failed: {e}")
             return {"status": "error", "tier": "t3_visual", "body": f"Visual capture failed: {str(e)}"}
