@@ -144,6 +144,69 @@ class TestSpawnDeepthink:
             assert result is False
 
 
+# ── Classification Integration Tests ────────────────────────────────────────
+
+
+class TestSpawnDeepthinkClassification:
+    """Tests that _spawn_deepthink uses classification to select skills."""
+
+    def _success_result(self):
+        r = MagicMock()
+        r.returncode = 0
+        r.stdout = "cron-id-123"
+        r.stderr = ""
+        return r
+
+    def test_trivial_pr_loads_no_skills(self):
+        """TRIVIAL PRs should not load any LLM skills."""
+        trivial_data = {
+            "files_changed": [{"filename": "README.md", "additions": 3, "deletions": 1}],
+            "diff_raw": "+ line\n",
+            "repo_tree": [],
+            "god_nodes": [],
+            "communities": [],
+            "graph_context": {},
+        }
+        with patch("subprocess.run", return_value=self._success_result()) as mock_run, \
+             patch("riptide.deepthink._is_cron_available", return_value=True), \
+             patch("riptide.deepthink._gather_review_data", return_value=trivial_data), \
+             patch("riptide.grafiphy.orchestrator.pre_generate_diagram", return_value=None, create=True), \
+             patch("riptide.orchestrator.StateStore") as mock_state:
+            mock_state.return_value.reserve_job.return_value = True
+            _spawn_deepthink("ChonSong", "riptide", 42, "docs: fix typo", "user", 4, "abc123")
+
+            call_args = mock_run.call_args
+            cmd = call_args[0][0]
+            skills = [cmd[i + 1] for i, x in enumerate(cmd) if x == "--skill"]
+            assert skills == []
+
+    def test_arch_pr_loads_brooks_lint(self):
+        """ARCH PRs should load brooks-lint in addition to standard skills."""
+        arch_data = {
+            "files_changed": [
+                {"filename": f"f{i}.py", "additions": 50, "deletions": 20}
+                for i in range(6)
+            ],
+            "diff_raw": "+ line\n" * 300,
+            "repo_tree": [],
+            "god_nodes": [{"name": "core.py", "edges": 25}],
+            "communities": [{"name": "core", "members": ["core.py"]}],
+            "graph_context": {},
+        }
+        with patch("subprocess.run", return_value=self._success_result()) as mock_run, \
+             patch("riptide.deepthink._is_cron_available", return_value=True), \
+             patch("riptide.deepthink._gather_review_data", return_value=arch_data), \
+             patch("riptide.grafiphy.orchestrator.pre_generate_diagram", return_value=None, create=True), \
+             patch("riptide.orchestrator.StateStore") as mock_state:
+            mock_state.return_value.reserve_job.return_value = True
+            _spawn_deepthink("ChonSong", "riptide", 42, "feat: big refactor", "user", 420, "abc123")
+
+            call_args = mock_run.call_args
+            cmd = call_args[0][0]
+            skills = [cmd[i + 1] for i, x in enumerate(cmd) if x == "--skill"]
+            assert "brooks-lint" in skills
+
+
 # ── _is_cron_available tests ────────────────────────────────────────────────
 
 
@@ -419,7 +482,7 @@ class TestBuildOrchestratorPrompt:
         )
         assert "No graphify analysis available" in prompt
         assert "Delegate Inline Review" in prompt
-        assert "Delegate Excalidraw Diagram" in prompt
+        assert "assemble_review" in prompt
 
     def test_includes_subagent_instructions(self):
         data = {
@@ -434,5 +497,5 @@ class TestBuildOrchestratorPrompt:
             "ChonSong", "riptide", 42, "feat: test", "author", 300, "abc123", data
         )
         assert "Spawn a subagent" in prompt
-        assert "Excalidraw" in prompt
-        assert "Riptide Review via Hermes" in prompt
+        assert "assemble_review" in prompt
+        assert "DEEPTHINK" in prompt or "custom:LongCat-2.0" in prompt
