@@ -611,12 +611,16 @@ class T0Orchestrator:
             gif_path = result.get("gif", "")
             gif_url = _upload_gif(gif_path, profile.pr_number)
             if gif_url and self.github:
-                # Commit-level context is not available in orchestrator path
-                # (PR head SHA is implicit in _post_proofshot_comment's optional args)
                 _post_proofshot_comment(
                     profile.owner, profile.repo, profile.pr_number,
                     gif_url
                 )
+            return {
+                "status": "complete",
+                "tier": "t3_visual",
+                "body": f"![ProofShot]({gif_url})" if gif_url else "Visual capture complete",
+                "gif_url": gif_url,
+            }
             
             return {
                 "status": "complete",
