@@ -54,7 +54,7 @@ MIN_LOC_CHANGED = int(os.environ.get("RIPTIDE_MIN_LOC_CHANGED", "100"))
 # and unpinned jobs are skipped to prevent unintended spend (Hermes #44585).
 # The riptide profile runs LongCat-2.0 via the custom LongCat provider.
 DEEPTHINK_MODEL = os.environ.get("RIPTIDE_DEEPTHINK_MODEL", "custom:LongCat-2.0")
-DEEPTHINK_PROVIDER = os.environ.get("RIPTIDE_DEEPTHINK_PROVIDER", "custom")
+DEEPTHINK_PROVIDER = os.environ.get("RIPTIDE_DEEPTHINK_PROVIDER", "longcat")
 
 STATE_FILE = Path(
     os.environ.get("RIPTIDE_DATA_DIR", "/tmp/riptide-data")
