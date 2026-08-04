@@ -132,7 +132,7 @@ def handle_review_command(
         f"🧠 **Riptide Review triggered for #{pr_number}!**\n\n"
         f"A Hermes deep-think session has been scheduled and will begin within 2 minutes. "
         f"The review will analyze the full diff, run graphify blast-radius analysis, "
-        f"post inline suggestions, and generate an Excalidraw architecture diagram.\n\n"
+        f"and post inline suggestions.\n\n"
         f"**PR:** {title}\n"
         f"**Author:** @{author}\n"
         f"**Changes:** +{additions}/-{deletions} ({total_loc} LOC)\n"
@@ -160,7 +160,7 @@ def _spawn_deepthink(
     """Spawn a Hermes cron session for deep-think review on this PR.
 
     Uses pre-gathered data and a small orchestrator prompt that delegates
-    to subagents for inline review and Excalidraw diagram generation.
+    to subagents for inline review.
 
     Retries up to 3 times with exponential backoff (5s/15s/30s).
     Reserves a pending job before spawning the review; marks the job as

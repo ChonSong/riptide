@@ -21,6 +21,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
@@ -330,8 +331,10 @@ def _post_proofshot_comment(
 def _get_commit_file_map(owner: str, repo: str, pr_number: int) -> list[dict]:
     """Get per-commit file change map for a PR.
 
-    Returns list of {sha, message, files, ui_files} for each commit,
-    ordered oldest → newest.
+    Returns list of {sha, message, files, ui_files, error} for each commit,
+    ordered oldest → newest, or None when the commits-list fetch failed —
+    the caller must NOT treat a None/errored result as "no UI files changed";
+    it should surface it and retry next poll.
     """
     # Get commit list with SHAs and messages
     commits_result = subprocess.run(
@@ -341,7 +344,7 @@ def _get_commit_file_map(owner: str, repo: str, pr_number: int) -> list[dict]:
     )
     if commits_result.returncode != 0:
         log.warning("  Failed to fetch commits for %s/%s#%d", owner, repo, pr_number)
-        return []
+        return None
 
     commits = []
     for line in commits_result.stdout.strip().split("\n"):
@@ -352,25 +355,46 @@ def _get_commit_file_map(owner: str, repo: str, pr_number: int) -> list[dict]:
         except json.JSONDecodeError:
             continue
 
-    # For each commit, get its files
+    # For each commit, get its files (with retry on transient failures)
     for commit in commits:
         sha = commit["sha"]
+        all_files, err = _fetch_commit_files(owner, repo, sha)
+        if all_files is None:
+            commit["files"] = []
+            commit["ui_files"] = []
+            commit["error"] = err or "failed to fetch commit files"
+            continue
+        commit["files"] = all_files
+        commit["ui_files"] = [f for f in all_files if f.endswith(tuple(UI_EXTENSIONS))]
+        commit["error"] = None
+
+    return commits
+
+
+def _fetch_commit_files(owner: str, repo: str, sha: str):
+    """Fetch a commit's changed files via one `gh api` call, with one retry.
+
+    Returns (all_files, error_msg). On success error_msg is None. On persistent
+    failure all_files is None and error_msg describes why — the caller must NOT
+    treat a failure as "no files" (that would silently drop a PR to the no-UI path).
+    """
+    for attempt in (1, 2):
         files_result = subprocess.run(
             ["gh", "api", f"repos/{owner}/{repo}/commits/{sha}",
              "--jq", ".files[].filename"],
             capture_output=True, text=True, timeout=30,
         )
-        if files_result.returncode != 0:
-            commit["files"] = []
-            commit["ui_files"] = []
-            continue
-
-        all_files = [f for f in files_result.stdout.strip().split("\n") if f]
-        ui_files = [f for f in all_files if f.endswith(tuple(UI_EXTENSIONS))]
-        commit["files"] = all_files
-        commit["ui_files"] = ui_files
-
-    return commits
+        if files_result.returncode == 0:
+            all_files = [f for f in files_result.stdout.strip().split("\n") if f]
+            return all_files, None
+        if attempt == 1:
+            log.warning(
+                "  Commit %s file lookup failed (attempt 1/2) — retrying: %s",
+                sha[:12],
+                files_result.stderr[:200],
+            )
+            time.sleep(1)
+    return None, files_result.stderr[:200]
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────
@@ -453,6 +477,27 @@ def run():
 
             # ── Per-commit analysis: which commits have UI changes? ─────
             commit_map = _get_commit_file_map(owner, repo_name, pr_number)
+            # A commit whose file list failed to fetch is NOT "no UI files" —
+            # surface it as an error and retry next poll instead of silently
+            # skipping the PR (a transient gh api failure would otherwise drop
+            # a UI PR to the no-UI path).
+            if commit_map is None:
+                log.warning(
+                    "  #%d skip — commit list lookup failed; retrying next poll", pr_number
+                )
+                skipped_error += 1
+                continue
+            errored = [c for c in commit_map if c.get("error")]
+            if errored:
+                log.warning(
+                    "  #%d skip — %d commit(s) file lookup failed (%s); retrying next poll",
+                    pr_number,
+                    len(errored),
+                    ", ".join(c["sha"][:8] for c in errored),
+                )
+                skipped_error += 1
+                continue
+
             ui_commits = [c for c in commit_map if c["ui_files"]]
 
             if not ui_commits:
