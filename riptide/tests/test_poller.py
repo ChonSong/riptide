@@ -203,13 +203,89 @@ class TestHandleFix:
         client.post_pr_comment.assert_not_called()
         conn.close()
 
-    def test_post_failure_does_not_block(self, poller_mod):
+    def test_post_failure_persists_pending_response_and_retries(self, poller_mod):
+        """When post_pr_comment fails, persist the response as pending and retry
+        on subsequent polls without calling handle_fix_command again."""
         conn = sqlite3.connect(str(poller_mod.DB_PATH))
         client = MagicMock()
-        client.post_pr_comment.side_effect = Exception("API down")
         success_msg = "🛠 **Riptide Fix triggered for #1!**"
-        with patch("riptide.fixer.handle_fix_command", return_value=success_msg):
-            poller_mod._handle_fix(client, self._match(), conn)
-        # post-failed is not "spawned" — future retries allowed
+
+        # First attempt: handle_fix_command succeeds, but post fails
+        client.post_pr_comment.side_effect = Exception("API down")
+        with patch("riptide.fixer.handle_fix_command", return_value=success_msg) as mock_handler:
+            poller_mod._handle_fix(client, self._match(comment_id=1), conn)
+            # handle_fix_command was called once
+            assert mock_handler.call_count == 1
+
+        # Verify pending response is stored
+        pending = poller_mod._get_pending_response(conn, 1)
+        assert pending == success_msg
+        # Not marked as spawned yet
         assert poller_mod._has_pending_fix(conn, "ChonSong/riptide#1") is False
+
+        # Second attempt: retry posting (API recovered)
+        client.post_pr_comment.side_effect = None
+        client.post_pr_comment.return_value = {"id": 999}
+        with patch("riptide.fixer.handle_fix_command", return_value=success_msg) as mock_handler:
+            poller_mod._handle_fix(client, self._match(comment_id=1), conn)
+            # handle_fix_command was NOT called again (pending response path)
+            mock_handler.assert_not_called()
+
+        # Verify response was posted
+        client.post_pr_comment.assert_called_once()
+        # Now marked as spawned
+        assert poller_mod._has_pending_fix(conn, "ChonSong/riptide#1") is True
+        # Pending response cleared
+        assert poller_mod._get_pending_response(conn, 1) is None
         conn.close()
+
+
+# ── _search_fix_comments ─────────────────────────────────────────────────────
+
+
+class TestSearchFixComments:
+    def test_ignores_stale_command_on_recently_updated_pr(self, poller_mod):
+        """Regression: old command comments should be ignored even if the PR was
+        recently updated, by comparing comment updated_at/created_at against cutoff."""
+        from datetime import datetime, timezone
+
+        # Simulate a PR updated yesterday
+        recent_pr = {
+            "repository_url": "https://api.github.com/repos/o/r",
+            "number": 1,
+            "title": "Test PR",
+            "updated_at": "2026-08-03T00:00:00Z",
+        }
+
+        # Old comment from 10 days ago (outside LOOKBACK_DAYS default of 3)
+        old_comment = {
+            "id": 100,
+            "user": {"login": "alice"},
+            "body": "@riptide-bot fix the bug",
+            "created_at": "2026-07-25T00:00:00Z",
+            "updated_at": "2026-07-25T00:00:00Z",
+        }
+
+        # Recent comment from today
+        recent_comment = {
+            "id": 200,
+            "user": {"login": "bob"},
+            "body": "@riptide-bot fix the other bug",
+            "created_at": "2026-08-04T00:00:00Z",
+            "updated_at": "2026-08-04T00:00:00Z",
+        }
+
+        with patch("riptide.poller.requests") as mock_requests:
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {"items": [recent_pr]}
+            mock_requests.get.return_value = mock_response
+
+            with patch("riptide.poller._get_pr_comments", return_value=[old_comment, recent_comment]):
+                with patch("riptide.poller._get_gh_token", return_value="fake-token"):
+                    matches = poller_mod._search_fix_comments(lookback_days=3)
+
+        # Only the recent comment should be included
+        assert len(matches) == 1
+        assert matches[0]["comment_id"] == 200
+        assert matches[0]["commenter"] == "bob"

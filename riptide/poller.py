@@ -42,7 +42,12 @@ FIX_RE = re.compile(r"@riptide-bot\s+fix\b(.*)", re.IGNORECASE | re.DOTALL)
 LOOKBACK_DAYS = int(os.environ.get("RIPTIDE_POLLER_LOOKBACK", "3"))
 
 
-
+def _get_gh_token() -> str:
+    cmd = ["gh", "auth", "token"]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to get gh token: {result.stderr[:200]}")
+    return result.stdout.strip()
 
 
 def _init_db(conn: sqlite3.Connection):
@@ -50,7 +55,8 @@ def _init_db(conn: sqlite3.Connection):
         CREATE TABLE IF NOT EXISTS {PROCESSED_TABLE} (
             comment_id INTEGER PRIMARY KEY,
             processed_at TEXT NOT NULL,
-            result TEXT
+            result TEXT,
+            pending_response TEXT
         )
     """)
     conn.commit()
@@ -64,13 +70,22 @@ def _is_processed(conn: sqlite3.Connection, comment_id: int) -> bool:
     return row is not None
 
 
-def _mark_processed(conn: sqlite3.Connection, comment_id: int, result: str = ""):
+def _mark_processed(conn: sqlite3.Connection, comment_id: int, result: str = "", pending_response: str = ""):
     conn.execute(
-        f"INSERT OR REPLACE INTO {PROCESSED_TABLE} (comment_id, processed_at, result) "
-        f"VALUES (?, ?, ?)",
-        (comment_id, datetime.now(timezone.utc).isoformat(), result[:200])
+        f"INSERT OR REPLACE INTO {PROCESSED_TABLE} (comment_id, processed_at, result, pending_response) "
+        f"VALUES (?, ?, ?, ?)",
+        (comment_id, datetime.now(timezone.utc).isoformat(), result[:200], pending_response)
     )
     conn.commit()
+
+
+def _get_pending_response(conn: sqlite3.Connection, comment_id: int) -> Optional[str]:
+    """Retrieve a pending response body that failed to post."""
+    row = conn.execute(
+        f"SELECT pending_response FROM {PROCESSED_TABLE} WHERE comment_id = ?",
+        (comment_id,)
+    ).fetchone()
+    return row[0] if row and row[0] else None
 
 
 def _has_pending_fix(conn: sqlite3.Connection, pr_key: str) -> bool:
@@ -93,26 +108,24 @@ def _has_pending_fix(conn: sqlite3.Connection, pr_key: str) -> bool:
 
 
 def _search_fix_comments(lookback_days: int = LOOKBACK_DAYS) -> list[dict]:
-    """Search open PRs mentioning @riptide-bot fix via gh CLI."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days))
     cutoff_str = cutoff.strftime("%Y-%m-%d")
 
-    cmd = [
-        "gh", "search", "prs",
-        "--state", "open",
-        "--updated", f">={cutoff_str}",
-        "--sort", "updated",
-        "--order", "desc",
-        "--limit", "20",
-        "--json", "number,title,repository,createdAt,body,author,commentsCount",
-        f'"@riptide-bot fix"',
-    ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-        if result.returncode != 0:
-            log.warning("gh search prs failed: %s", result.stderr[:200])
+        import requests
+        token = _get_gh_token()
+        params = {
+            "q": f'is:pr is:open "@riptide-bot fix" updated:>={cutoff_str}',
+            "sort": "updated", "order": "desc", "per_page": "20",
+        }
+        url = "https://api.github.com/search/issues"
+        headers = {"Authorization": f"token {token}",
+                   "Accept": "application/vnd.github+json"}
+        result = requests.get(url, params=params, headers=headers, timeout=15)
+        if result.status_code != 200:
+            log.warning("search failed: HTTP %s", result.status_code)
             return []
-        items = json.loads(result.stdout) if result.stdout.strip() else []
+        data = result.json()
     except Exception as e:
         log.error("search error: %s", e)
         return []
@@ -120,29 +133,39 @@ def _search_fix_comments(lookback_days: int = LOOKBACK_DAYS) -> list[dict]:
     matches = []
     seen_prs = set()
 
-    for item in items:
-        repo = item.get("repository", {})
-        owner = repo.get("owner", {}).get("login", "")
-        repo_name = repo.get("name", "")
-        pr_number = item.get("number", 0)
-        if not owner or not repo_name or not pr_number:
+    for item in data.get("items", []):
+        repo_url = item.get("repository_url", "")
+        parts = repo_url.rsplit("/", 2)
+        if len(parts) < 3:
             continue
+        owner = parts[-2]
+        repo = parts[-1]
+        pr_number = item["number"]
 
-        pr_key = f"{owner}/{repo_name}#{pr_number}"
+        pr_key = f"{owner}/{repo}#{pr_number}"
         if pr_key in seen_prs:
             continue
         seen_prs.add(pr_key)
 
-        comments = _get_pr_comments(owner, repo_name, pr_number)
+        comments = _get_pr_comments(owner, repo, pr_number)
         for comment in comments:
             body = comment.get("body", "")
             if FIX_RE.search(body):
+                # Check if comment is recent enough (compare updated_at, fallback to created_at)
+                comment_ts_str = comment.get("updated_at") or comment.get("created_at", "")
+                if comment_ts_str:
+                    try:
+                        comment_ts = datetime.fromisoformat(comment_ts_str.replace("Z", "+00:00"))
+                        if comment_ts < cutoff:
+                            continue  # Skip stale command comments
+                    except (ValueError, TypeError):
+                        pass  # If parsing fails, include the comment
                 matches.append({
                     "comment_id": comment["id"],
                     "commenter": comment.get("user", {}).get("login", "unknown"),
                     "body": body,
                     "owner": owner,
-                    "repo": repo_name,
+                    "repo": repo,
                     "pr_number": pr_number,
                     "pr_title": item.get("title", ""),
                     "created_at": comment.get("created_at", ""),
@@ -186,6 +209,29 @@ def _handle_fix(client, match: dict, conn: sqlite3.Connection):
     owner = match["owner"]
     repo = match["repo"]
     pr_number = match["pr_number"]
+
+    # Check for pending response from a previous failed post attempt
+    pending_response = _get_pending_response(conn, comment_id)
+    if pending_response:
+        log.info(f"Retrying pending response for comment {comment_id}")
+        try:
+            client.post_pr_comment(
+                installation_id=None,
+                owner=owner,
+                repo=repo,
+                pr_number=pr_number,
+                body=pending_response,
+            )
+            # Successfully posted — clear pending response and mark as spawned
+            spawned = "Riptide Fix triggered" in pending_response
+            status = "spawned" if spawned else "not-spawned"
+            _mark_processed(conn, comment_id, f'{{"result":"{status}","pr_key":"{pr_key}"}}', pending_response="")
+            log.info(f"Successfully posted pending response for {pr_key}")
+            return
+        except Exception as e:
+            log.error(f"Retry post failed for {pr_key}: {e}")
+            # Keep pending response for future retry
+            return
 
     if _is_processed(conn, comment_id):
         log.info(f"Skipping already-processed comment {comment_id}")
@@ -245,14 +291,15 @@ def _handle_fix(client, match: dict, conn: sqlite3.Connection):
             )
             status = "spawned" if spawned else "not-spawned"
             _mark_processed(conn, comment_id,
-                            f'{{"result":"{status}","pr_key":"{pr_key}"}}')
+                            f'{{"result":"{status}","pr_key":"{pr_key}"}}', pending_response="")
             log.info(f"Posted fix trigger comment on {pr_key} (spawned={spawned})")
         except Exception as e:
             log.error(f"Failed to post comment on {pr_key}: {e}")
-            _mark_processed(conn, comment_id, f"post-failed: {e}")
+            # Store the response body as pending for retry, but don't mark as permanently processed
+            _mark_processed(conn, comment_id, f"post-pending: {str(e)[:150]}", pending_response=result)
     else:
         log.info(f"Fix handler returned no comment for {pr_key}")
-        _mark_processed(conn, comment_id, "no-result")
+        _mark_processed(conn, comment_id, "no-result", pending_response="")
 
 
 def poll():

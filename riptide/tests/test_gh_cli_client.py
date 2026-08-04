@@ -37,28 +37,32 @@ class TestGhApi:
     def test_get_returns_json(self):
         client = GhCliClient()
         payload = {"number": 42, "title": "test pr"}
-        with patch("subprocess.run", return_value=self._mock_run(json.dumps(payload))):
-            result = client._gh_api("repos/o/r/pulls/42")
-            assert result["number"] == 42
-            assert result["title"] == "test pr"
+        with patch("shutil.which", return_value="/usr/bin/gh"):
+            with patch("subprocess.run", return_value=self._mock_run(json.dumps(payload))):
+                result = client._gh_api("repos/o/r/pulls/42")
+                assert result["number"] == 42
+                assert result["title"] == "test pr"
 
     def test_empty_response_returns_empty_dict(self):
         client = GhCliClient()
-        with patch("subprocess.run", return_value=self._mock_run("", returncode=0)):
-            result = client._gh_api("repos/o/r/check-runs")
-            assert result == {}
+        with patch("shutil.which", return_value="/usr/bin/gh"):
+            with patch("subprocess.run", return_value=self._mock_run("", returncode=0)):
+                result = client._gh_api("repos/o/r/check-runs")
+                assert result == {}
 
     def test_nonzero_exit_raises(self):
         client = GhCliClient()
-        with patch("subprocess.run", return_value=self._mock_run("", returncode=1, stderr="Not found")):
-            with pytest.raises(RuntimeError, match="gh api failed"):
-                client._gh_api("repos/o/r/pulls/9999")
+        with patch("shutil.which", return_value="/usr/bin/gh"):
+            with patch("subprocess.run", return_value=self._mock_run("", returncode=1, stderr="Not found")):
+                with pytest.raises(RuntimeError, match="gh api failed"):
+                    client._gh_api("repos/o/r/pulls/9999")
 
     def test_timeout_raises(self):
         client = GhCliClient()
-        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="gh", timeout=30)):
-            with pytest.raises(RuntimeError, match="timeout"):
-                client._gh_api("repos/o/r/pulls/1")
+        with patch("shutil.which", return_value="/usr/bin/gh"):
+            with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="gh", timeout=30)):
+                with pytest.raises(RuntimeError, match="timeout"):
+                    client._gh_api("repos/o/r/pulls/1")
 
     def test_gh_not_available_raises(self):
         client = GhCliClient()
