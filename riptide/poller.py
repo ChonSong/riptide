@@ -26,6 +26,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
+import requests
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -59,6 +61,14 @@ def _init_db(conn: sqlite3.Connection):
             pending_response TEXT
         )
     """)
+    # Migration for pre-existing databases: CREATE TABLE IF NOT EXISTS is a
+    # no-op when the table already exists, so databases created before the
+    # pending_response column was added lack it. Without the column,
+    # _mark_processed/_get_pending_response throw "no such column" and break
+    # the poller on every fix comment.
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({PROCESSED_TABLE})").fetchall()}
+    if "pending_response" not in columns:
+        conn.execute(f"ALTER TABLE {PROCESSED_TABLE} ADD COLUMN pending_response TEXT")
     conn.commit()
 
 
@@ -112,7 +122,6 @@ def _search_fix_comments(lookback_days: int = LOOKBACK_DAYS) -> list[dict]:
     cutoff_str = cutoff.strftime("%Y-%m-%d")
 
     try:
-        import requests
         token = _get_gh_token()
         params = {
             "q": f'is:pr is:open "@riptide-bot fix" updated:>={cutoff_str}',

@@ -226,6 +226,9 @@ class TestHandleFix:
         # Second attempt: retry posting (API recovered)
         client.post_pr_comment.side_effect = None
         client.post_pr_comment.return_value = {"id": 999}
+        # The first attempt's failed call still counts on the mock; reset so
+        # assert_called_once below only sees the retry's successful post.
+        client.post_pr_comment.reset_mock()
         with patch("riptide.fixer.handle_fix_command", return_value=success_msg) as mock_handler:
             poller_mod._handle_fix(client, self._match(comment_id=1), conn)
             # handle_fix_command was NOT called again (pending response path)
