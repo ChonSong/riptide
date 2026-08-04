@@ -25,9 +25,27 @@ from pydantic import BaseModel
 
 from .github_app import verify_webhook_signature, GitHubAppClient
 from .orchestrator import T0Orchestrator, TaskClassifier, StateStore
+from .labeler import Labeler
 
 # Companion is optional — silently unavailable if RIPTIDE_COMPANION_REPOS is unset
 _companion = None
+
+# Labeler is optional — silently unavailable if RIPTIDE_LABELER_ENABLED != "1"
+_labeler = None
+
+
+def get_labeler():
+    global _labeler
+    if _labeler is None:
+        if os.environ.get("RIPTIDE_LABELER_ENABLED", "1") != "1":
+            _labeler = False  # sentinel — don't retry
+            return None
+        try:
+            _labeler = Labeler()
+        except Exception as e:
+            log.warning("Labeler not available: %s", e)
+            _labeler = False
+    return _labeler if _labeler else None
 
 
 def get_companion():
@@ -240,6 +258,24 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
                 f"[{delivery_id}] T0 orchestrator spawned for {repo_full}#{pr_number}"
             )
 
+            # Also spawn labeler thread (non-blocking)
+            labeler = get_labeler()
+            if labeler and github:
+                def _safe_label():
+                    try:
+                        labels = labeler.classify_pr(pr_detail, files, repo_full)
+                        # Setup labels on repo first (creates missing ones)
+                        labeler.setup_labels_on_repo(installation_id, owner, repo_name, github)
+                        # Add labels to PR
+                        github.add_labels_to_issue(installation_id, owner, repo_name, pr_number, labels)
+                        log.info(f"[{delivery_id}] Labels applied to {repo_full}#{pr_number}: {labels}")
+                    except Exception as e:
+                        log.error(f"[{delivery_id}] Labeler failed: {e}")
+
+                label_thread = Thread(target=_safe_label, daemon=True, name=f"label-{repo_name}-{pr_number}")
+                label_thread.start()
+                log.info(f"[{delivery_id}] Labeler spawned for {repo_full}#{pr_number}")
+
     return Response(status_code=200)
 
 
@@ -333,6 +369,27 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
                     )
             except Exception as e:
                 log.error(f"[{delivery_id}] Fix command failed: {e}")
+
+        # Route 3: Relabel command (@riptide-bot relabel)
+        if "@riptide-bot relabel" in body.lower():
+            log.info(
+                f"[{delivery_id}] Relabel command on {owner}/{repo_name}#{pr_number} by {commenter}"
+            )
+            try:
+                client = github_client()
+                labeler = get_labeler()
+                if labeler:
+                    pr_detail = client.get_pr_details(installation_id, owner, repo_name, pr_number)
+                    files = client.get_pr_files(installation_id, owner, repo_name, pr_number)
+                    labels = labeler.classify_pr(pr_detail, files, f"{owner}/{repo_name}")
+                    labeler.setup_labels_on_repo(installation_id, owner, repo_name, client)
+                    client.add_labels_to_issue(installation_id, owner, repo_name, pr_number, labels)
+                    client.post_pr_comment(
+                        installation_id, owner, repo_name, pr_number,
+                        f"🏷️ Labels re-applied: {', '.join(labels)}"
+                    )
+            except Exception as e:
+                log.error(f"[{delivery_id}] Relabel command failed: {e}")
 
     return Response(status_code=200)
 
