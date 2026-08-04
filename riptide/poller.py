@@ -205,10 +205,24 @@ def _handle_fix(client, match: dict, conn: sqlite3.Connection):
     repo = match["repo"]
     pr_number = match["pr_number"]
 
-    # Retry path: if a previous post attempt failed, retry without re-calling handle_fix_command
+    # Retry path: if a previous post attempt failed, retry without re-calling handle_fix_command.
     pending_response = _get_pending_response(conn, comment_id)
     if pending_response:
         log.info(f"Retrying pending response for comment {comment_id}")
+        spawned = "Riptide Fix triggered" in pending_response
+        status = "spawned" if spawned else "not-spawned"
+        # Idempotency: clear the pending marker BEFORE posting. If the post
+        # succeeds but this DB write of a terminal status fails, the pending
+        # marker is already gone, so the next poll cannot re-post the comment.
+        try:
+            _mark_processed(conn, comment_id,
+                            f'{{"result":"post-attempted","pr_key":"{pr_key}"}}',
+                            pending_response="")
+        except Exception as e:
+            # Nothing posted yet on this attempt; keep the pending marker so the
+            # next poll retries (no duplicate risk — the comment was never sent).
+            log.error(f"DB write failed clearing pending response for {pr_key}: {e}")
+            return
         try:
             client.post_pr_comment(
                 installation_id=None,
@@ -217,15 +231,26 @@ def _handle_fix(client, match: dict, conn: sqlite3.Connection):
                 pr_number=pr_number,
                 body=pending_response,
             )
-            spawned = "Riptide Fix triggered" in pending_response
-            status = "spawned" if spawned else "not-spawned"
-            _mark_processed(conn, comment_id,
-                            f'{{"result":"{status}","pr_key":"{pr_key}"}}', pending_response="")
-            log.info(f"Successfully posted pending response for {pr_key}")
-            return
         except Exception as e:
+            # Post failed — restore the pending marker so the next poll retries.
             log.error(f"Retry post failed for {pr_key}: {e}")
-            return  # Keep pending response for future retry
+            try:
+                _mark_processed(conn, comment_id,
+                                f"post-pending: {str(e)[:150]}",
+                                pending_response=pending_response)
+            except Exception as db_e:
+                log.error(f"DB write failed restoring pending response for {pr_key}: {db_e}")
+            return
+        # Post succeeded — record the terminal status. The pending marker was
+        # already cleared pre-post, so a DB failure here cannot cause a duplicate.
+        try:
+            _mark_processed(conn, comment_id,
+                            f'{{"result":"{status}","pr_key":"{pr_key}"}}',
+                            pending_response="")
+        except Exception as e:
+            log.error(f"DB write failed recording posted status for {pr_key}: {e}")
+        log.info(f"Successfully posted pending response for {pr_key}")
+        return
 
     if _is_processed(conn, comment_id):
         log.info(f"Skipping already-processed comment {comment_id}")
@@ -253,7 +278,14 @@ def _handle_fix(client, match: dict, conn: sqlite3.Connection):
             _mark_processed(conn, comment_id, f'{{"result":"already-pending-webhook","pr_key":"{pr_key}"}}')
             return
     except Exception as e:
-        log.debug(f"Pending-job check failed for {pr_key}: {e}", exc_info=True)
+        # Fail closed: the cross-channel dedup guard exists to prevent the
+        # poller from double-handling a fix the webhook already claimed. If the
+        # StateStore check fails, assuming "no job" risks posting the redundant
+        # "Could not schedule" comment the guard is meant to suppress — exactly
+        # when the dedup is needed most. Mark dedup-check-failed and skip.
+        log.warning(f"Pending-job check failed for {pr_key}: {e}; failing closed", exc_info=True)
+        _mark_processed(conn, comment_id, f'{{"result":"dedup-check-failed","pr_key":"{pr_key}"}}')
+        return
 
     commenter = match["commenter"]
     body = match["body"]

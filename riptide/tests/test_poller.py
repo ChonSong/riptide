@@ -213,3 +213,92 @@ class TestHandleFix:
         # post-failed is not "spawned" — future retries allowed
         assert poller_mod._has_pending_fix(conn, "ChonSong/riptide#1") is False
         conn.close()
+
+    def _seed_pending(self, poller_mod, conn, comment_id, body):
+        """Seed a comment with a pending_response (simulating a prior post failure)."""
+        poller_mod._mark_processed(
+            conn, comment_id,
+            '{"result":"post-attempted","pr_key":"ChonSong/riptide#1"}',
+            pending_response=body,
+        )
+
+    def test_retry_posts_and_clears_pending(self, poller_mod):
+        """Retry path posts the pending response and clears the marker so the
+        next poll does NOT re-post it (idempotency)."""
+        conn = sqlite3.connect(str(poller_mod.DB_PATH))
+        body = "🛠 **Riptide Fix triggered for #1!**"
+        self._seed_pending(poller_mod, conn, 50, body)
+        assert poller_mod._get_pending_response(conn, 50) == body
+        client = MagicMock()
+        with patch("riptide.fixer.handle_fix_command") as mock_handler:
+            poller_mod._handle_fix(client, self._match(comment_id=50), conn)
+            mock_handler.assert_not_called()
+        # Comment was posted exactly once
+        client.post_pr_comment.assert_called_once()
+        # Pending marker cleared -> next poll will not re-post a duplicate
+        assert poller_mod._get_pending_response(conn, 50) is None
+        conn.close()
+
+    def test_retry_post_failure_restores_pending(self, poller_mod):
+        """If the retry post fails, restore the pending marker so the next poll retries."""
+        conn = sqlite3.connect(str(poller_mod.DB_PATH))
+        body = "🛠 **Riptide Fix triggered for #1!**"
+        self._seed_pending(poller_mod, conn, 51, body)
+        client = MagicMock()
+        client.post_pr_comment.side_effect = Exception("API down")
+        with patch("riptide.fixer.handle_fix_command") as mock_handler:
+            poller_mod._handle_fix(client, self._match(comment_id=51), conn)
+            mock_handler.assert_not_called()
+        client.post_pr_comment.assert_called_once()
+        # Pending marker restored -> next poll retries instead of dropping the reply
+        assert poller_mod._get_pending_response(conn, 51) == body
+        conn.close()
+
+    def test_retry_split_brain_no_duplicate(self, poller_mod):
+        """Split-brain: post succeeds but the terminal DB write fails. The pending
+        marker was already cleared BEFORE posting, so the next poll cannot re-post
+        a duplicate comment (at-least-once delivery safe)."""
+        conn = sqlite3.connect(str(poller_mod.DB_PATH))
+        body = "🛠 **Riptide Fix triggered for #1!**"
+        self._seed_pending(poller_mod, conn, 52, body)
+        client = MagicMock()
+        real_mark = poller_mod._mark_processed
+        call_count = {"n": 0}
+
+        def flaky_mark(conn2, cid, result="", pending_response=""):
+            call_count["n"] += 1
+            if call_count["n"] >= 2:  # the terminal status write fails
+                raise RuntimeError("DB disk full")
+            return real_mark(conn2, cid, result, pending_response)
+
+        with patch("riptide.poller._mark_processed", side_effect=flaky_mark):
+            with patch("riptide.fixer.handle_fix_command") as mock_handler:
+                poller_mod._handle_fix(client, self._match(comment_id=52), conn)
+                mock_handler.assert_not_called()
+        # The comment WAS posted (post succeeded)
+        client.post_pr_comment.assert_called_once()
+        # Marker cleared pre-post -> no re-post next poll
+        assert poller_mod._get_pending_response(conn, 52) is None
+        # Comment still recorded as processed (post-attempted row) -> poller skips it
+        assert poller_mod._is_processed(conn, 52) is True
+        conn.close()
+
+    def test_dedup_check_failure_fails_closed(self, poller_mod, no_webhook_pending):
+        """If the StateStore cross-channel dedup check raises, fail closed: mark
+        dedup-check-failed and skip — NEVER post a redundant 'Could not schedule'
+        comment on top of the webhook's confirmation."""
+        conn = sqlite3.connect(str(poller_mod.DB_PATH))
+        no_webhook_pending.return_value.has_pending_job.side_effect = Exception("StateStore down")
+        client = MagicMock()
+        with patch("riptide.fixer.handle_fix_command") as mock_handler:
+            poller_mod._handle_fix(client, self._match(comment_id=200), conn)
+            mock_handler.assert_not_called()
+        # No comment posted
+        client.post_pr_comment.assert_not_called()
+        # Marked processed with dedup-check-failed so the poller won't re-hit it
+        row = conn.execute(
+            f"SELECT result FROM {poller_mod.PROCESSED_TABLE} WHERE comment_id = 200"
+        ).fetchone()
+        assert row is not None and "dedup-check-failed" in row[0]
+        assert poller_mod._is_processed(conn, 200) is True
+        conn.close()
