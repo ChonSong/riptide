@@ -19,6 +19,7 @@ import base64
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone, timedelta
@@ -145,6 +146,35 @@ def _checkout_pr(owner: str, repo: str, pr_number: int) -> Optional[Path]:
         return None
 
 
+def _checkout_commit(work_dir: Path, commit_sha: str) -> bool:
+    """Fetch and check out a specific commit in the workdir.
+
+    The workdir is a shallow clone; the PR commits are reachable from
+    refs/pull/N/head so `git fetch origin <sha>` can retrieve each one.
+    Returns True on success.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "fetch", "origin", commit_sha],
+            cwd=work_dir, capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0:
+            log.warning("  git fetch commit %s failed: %s", commit_sha[:8], result.stderr[:200])
+            return False
+
+        result = subprocess.run(
+            ["git", "checkout", "--detach", commit_sha],
+            cwd=work_dir, capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            log.warning("  git checkout commit %s failed: %s", commit_sha[:8], result.stderr[:200])
+            return False
+        return True
+    except Exception as exc:
+        log.warning("  Checkout commit %s failed: %s", commit_sha[:8], exc)
+        return False
+
+
 def _run_proofshot(
     pr_number: int,
     url: str,
@@ -254,6 +284,12 @@ def _upload_gif(gif_path: str, pr_number: int, commit_sha: str = "") -> Optional
     try:
         asset_name = f"pr{pr_number}-{commit_sha[:8]}-proofshot.gif" if commit_sha else f"pr{pr_number}-proofshot.gif"
 
+        # Stage a copy whose basename matches the intended asset name, since
+        # `gh release upload` names assets by local file basename. Without this,
+        # the stored asset is `proofshot.gif` and the lookup below never matches.
+        staged = f"/tmp/{asset_name}"
+        shutil.copy(gif_path, staged)
+
         # Ensure the grafiphy-assets release exists
         result = subprocess.run(
             ["gh", "release", "view", "grafiphy-assets", "--json", "url"],
@@ -269,7 +305,7 @@ def _upload_gif(gif_path: str, pr_number: int, commit_sha: str = "") -> Optional
 
         # Upload with --clobber to overwrite existing asset of the same name
         result = subprocess.run(
-            ["gh", "release", "upload", "grafiphy-assets", gif_path, "--clobber"],
+            ["gh", "release", "upload", "grafiphy-assets", staged, "--clobber"],
             capture_output=True, text=True, timeout=60,
         )
         if result.returncode != 0:
@@ -285,7 +321,9 @@ def _upload_gif(gif_path: str, pr_number: int, commit_sha: str = "") -> Optional
             assets = json.loads(result.stdout).get("assets", [])
             for asset in assets:
                 if asset["name"] == asset_name:
-                    return asset["url"]
+                    # browser_download_url renders as an image in GitHub comments;
+                    # the API-asset "url" would not.
+                    return asset.get("browser_download_url") or asset["url"]
         return None
     except Exception as exc:
         log.warning("  Upload error: %s", exc)
@@ -503,6 +541,13 @@ def run():
                     "  Capturing commit %s (%s)",
                     commit_sha[:8], ", ".join(commit["ui_files"][:3]),
                 )
+
+                # Check out the specific commit before capturing so the
+                # capture reflects THIS commit's state, not the PR head.
+                if not _checkout_commit(work_dir, commit_sha):
+                    log.warning("  #%d commit %s checkout failed — skipping", pr_number, commit_sha[:8])
+                    skipped_error += 1
+                    continue
 
                 result = _run_proofshot(pr_number, url, seed_path, output_dir, captures)
                 if result is None:
