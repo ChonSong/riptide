@@ -334,6 +334,24 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
             except Exception as e:
                 log.error(f"[{delivery_id}] Fix command failed: {e}")
 
+        # Route 2c: Manual proofshot override (@riptide-bot proofshot / visual / capture / proof)
+        from riptide.proofshotter import PROOFSHOT_RE, handle_manual_command
+
+        if PROOFSHOT_RE.search(body):
+            log.info(
+                f"[{delivery_id}] Manual proofshot on {owner}/{repo_name}#{pr_number} by {commenter}"
+            )
+            try:
+                result = handle_manual_command(
+                    installation_id, owner, repo_name, pr_number, commenter
+                )
+                if result:
+                    github_client().post_pr_comment(
+                        installation_id, owner, repo_name, pr_number, result
+                    )
+            except Exception as e:
+                log.error(f"[{delivery_id}] Manual proofshot failed: {e}")
+
     return Response(status_code=200)
 
 

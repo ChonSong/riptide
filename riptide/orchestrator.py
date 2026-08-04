@@ -439,25 +439,33 @@ class T0Orchestrator:
         
         # T3 visual can be slow — run in thread with timeout
         if profile.needs_t3_visual:
-            job_id = f"{profile.pr_number}-t3-visual"
-            self.state.create_job(job_id, profile.pr_number, "t3_visual")
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(self._dispatch_t3_visual, profile)
-                try:
-                    results["t3_visual"] = future.result(timeout=self.t3_timeout)
-                    self.state.mark_complete(job_id)
-                except FuturesTimeout:
-                    results["t3_visual"] = {
-                        "status": "timeout",
-                        "body": f"⏰ Visual evidence timed out after {self.t3_timeout}s",
-                    }
-                    self.state.mark_failed(job_id)
-                except Exception as e:
-                    results["t3_visual"] = {
-                        "status": "error",
-                        "body": f"❌ Visual evidence failed: {str(e)}",
-                    }
-                    self.state.mark_failed(job_id)
+            # Dedup: skip if already visualized at this head SHA
+            from riptide.proofshotter import was_visualized
+            if was_visualized(profile.owner, profile.repo, profile.pr_number, profile.head_sha):
+                results["t3_visual"] = {
+                    "status": "skipped",
+                    "body": "📸 Already visualized at this commit — `@riptide-bot proofshot` to re-capture.",
+                }
+            else:
+                job_id = f"{profile.pr_number}-t3-visual"
+                self.state.create_job(job_id, profile.pr_number, "t3_visual")
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(self._dispatch_t3_visual, profile)
+                    try:
+                        results["t3_visual"] = future.result(timeout=self.t3_timeout)
+                        self.state.mark_complete(job_id)
+                    except FuturesTimeout:
+                        results["t3_visual"] = {
+                            "status": "timeout",
+                            "body": f"⏰ Visual evidence timed out after {self.t3_timeout}s",
+                        }
+                        self.state.mark_failed(job_id)
+                    except Exception as e:
+                        results["t3_visual"] = {
+                            "status": "error",
+                            "body": f"❌ Visual evidence failed: {str(e)}",
+                        }
+                        self.state.mark_failed(job_id)
         
         # T3 arch: dispatch via deepthink cron (not a stub anymore)
         if profile.needs_t3_arch:
@@ -603,6 +611,8 @@ class T0Orchestrator:
             gif_path = result.get("gif", "")
             gif_url = _upload_gif(gif_path, profile.pr_number)
             if gif_url and self.github:
+                # Commit-level context is not available in orchestrator path
+                # (PR head SHA is implicit in _post_proofshot_comment's optional args)
                 _post_proofshot_comment(
                     profile.owner, profile.repo, profile.pr_number,
                     gif_url

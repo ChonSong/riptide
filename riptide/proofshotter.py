@@ -19,6 +19,7 @@ import base64
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone, timedelta
@@ -67,7 +68,7 @@ PROOFSHOT_MARKER = "\U0001f4f8 ProofShot"
 
 
 def _load_state() -> dict[str, dict]:
-    """Load processed PR state: {owner/repo#number: {head_sha, reviewed_at}}."""
+    """Load processed PR state: {owner/repo#number: {head_sha, reviewed_at, triggered_by}}."""
     if STATE_FILE.exists():
         try:
             return json.loads(STATE_FILE.read_text())
@@ -79,6 +80,25 @@ def _load_state() -> dict[str, dict]:
 def _save_state(state: dict[str, dict]):
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(state, indent=2))
+
+
+def was_visualized(owner: str, repo: str, pr_number: int, head_sha: str) -> bool:
+    """Check if a PR's head SHA has already been visualized (dedup gate)."""
+    state = _load_state()
+    pr_key = f"{owner}/{repo}#{pr_number}"
+    return state.get(pr_key, {}).get("head_sha") == head_sha
+
+
+def mark_visualized(owner: str, repo: str, pr_number: int, head_sha: str, triggered_by: str = "webhook"):
+    """Mark a PR's head SHA as visualized."""
+    state = _load_state()
+    pr_key = f"{owner}/{repo}#{pr_number}"
+    state[pr_key] = {
+        "head_sha": head_sha,
+        "reviewed_at": datetime.now(timezone.utc).isoformat(),
+        "triggered_by": triggered_by,
+    }
+    _save_state(state)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -526,8 +546,7 @@ def run():
 
             # Mark PR as processed (full head SHA)
             if triggered > 0:
-                state[pr_key] = {"head_sha": head_sha, "reviewed_at": now.isoformat()}
-                _save_state(state)
+                mark_visualized(owner, repo_name, pr_number, head_sha, triggered_by="webhook")
 
     # ── Summary ─────────────────────────────────────────────────────────
     log.info(
@@ -538,6 +557,101 @@ def run():
         skipped_no_ui,
         skipped_dedup, skipped_error,
     )
+
+
+# ── Manual override command ──────────────────────────────────────────────────
+
+PROOFSHOT_RE = re.compile(
+    r"@riptide-bot\s+(proofshot|visual|capture|proof)",
+    re.IGNORECASE,
+)
+
+
+def handle_manual_command(
+    installation_id: int,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    commenter: str,
+) -> Optional[str]:
+    """Handle @riptide-bot proofshot manual override — bypass dedup.
+
+    Returns reply text on success/failure, None if PR is not visualizable.
+    """
+    log.info("Manual proofshot requested by %s on %s/%s#%d", commenter, owner, repo, pr_number)
+
+    # Get PR details
+    pr_result = subprocess.run(
+        ["gh", "pr", "view", str(pr_number), "--repo", f"{owner}/{repo}",
+         "--json", "headRefOid,title,state,isDraft"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if pr_result.returncode != 0:
+        return f"❌ Could not fetch PR #{pr_number} details."
+
+    pr_data = json.loads(pr_result.stdout)
+    head_sha = pr_data.get("headRefOid", "")
+    pr_title = pr_data.get("title", "")
+    is_draft = pr_data.get("isDraft", False)
+
+    if is_draft:
+        return "❌ Cannot run ProofShot on a draft PR."
+
+    # Get PR files
+    files_result = subprocess.run(
+        ["gh", "api", f"repos/{owner}/{repo}/pulls/{pr_number}/files",
+         "--jq", ".[].filename", "--paginate"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if files_result.returncode != 0:
+        return f"❌ Could not fetch PR #{pr_number} files."
+
+    all_files = [f for f in files_result.stdout.strip().split("\n") if f]
+    ui_files = [f for f in all_files if f.endswith(tuple(UI_EXTENSIONS))]
+
+    if not ui_files:
+        return "📷 No UI files changed in this PR — nothing to capture."
+
+    # Checkout
+    work_dir = _checkout_pr(owner, repo, pr_number)
+    if work_dir is None:
+        return "❌ Failed to checkout PR branch."
+
+    # Config
+    config = _check_proofshot_config(owner, repo, pr_number, head_sha)
+    if config is None:
+        config = {"url": "http://localhost:8788", "captures": []}
+
+    # Seed
+    seed_path: Optional[str] = None
+    raw_seed = config.get("seed")
+    if raw_seed:
+        candidate = work_dir / raw_seed
+        if candidate.exists():
+            seed_path = str(candidate.resolve())
+
+    url = config.get("url", "http://localhost:8788")
+    captures = config.get("captures", [])
+    output_dir = Path(f"/tmp/proofshot-pr-{owner}-{repo}-{pr_number}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Run
+    result = _run_proofshot(pr_number, url, seed_path, output_dir, captures)
+    if result is None:
+        return "❌ ProofShot capture failed. Check service logs."
+
+    # Upload
+    gif_url = _upload_gif(result["gif"], pr_number)
+    if gif_url is None:
+        return "❌ Failed to upload GIF."
+
+    # Post
+    _post_proofshot_comment(owner, repo, pr_number, gif_url)
+
+    # Mark as visualized (manual trigger)
+    mark_visualized(owner, repo, pr_number, head_sha, triggered_by="manual")
+
+    return f"📸 ProofShot complete — visual evidence posted on PR #{pr_number}."
 
 
 if __name__ == "__main__":
