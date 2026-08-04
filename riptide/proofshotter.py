@@ -613,7 +613,7 @@ def run():
             config = _check_proofshot_config(owner, repo_name, pr_number, head_sha)
             if config is None:
                 log.info("  #%d no proofshot.config.json — using defaults", pr_number)
-                config = {"url": "http://localhost:8788", "captures": []}
+                config = {"url": os.environ.get("RIPTIDE_PROOFSHOT_URL", "http://localhost:8788"), "captures": []}
 
             # Resolve seed path (relative to repo root in the checkout)
             seed_path: Optional[str] = None
@@ -625,7 +625,7 @@ def run():
                 else:
                     log.warning("  Seed file %s not found at %s", raw_seed, candidate)
 
-            url = config.get("url", "http://localhost:8788")
+            url = config.get("url", os.environ.get("RIPTIDE_PROOFSHOT_URL", "http://localhost:8788"))
             captures = config.get("captures", [])
 
             # Run proofshot for each commit that touched UI files
@@ -747,7 +747,7 @@ def handle_manual_command(
         if candidate.exists():
             seed_path = str(candidate.resolve())
 
-    url = config.get("url", "http://localhost:8788")
+    url = config.get("url", os.environ.get("RIPTIDE_PROOFSHOT_URL", "http://localhost:8788"))
     captures = config.get("captures", [])
     output_dir = Path(f"/tmp/proofshot-pr-{owner}-{repo}-{pr_number}")
     output_dir.mkdir(parents=True, exist_ok=True)
