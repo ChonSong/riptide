@@ -156,59 +156,31 @@ def _search_fix_comments(lookback_days: int = LOOKBACK_DAYS) -> list[dict]:
     return matches
 
 
+def _get_comments_page(endpoint: str, page: int) -> list[dict]:
+    """Fetch a single page of comments from a GitHub API endpoint."""
+    cmd = ["gh", "api", f"{endpoint}?sort=created&direction=desc&per_page=100&page={page}"]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    if result.returncode != 0:
+        return []
+    return json.loads(result.stdout) or []
+
+
 def _get_pr_comments(owner: str, repo: str, pr_number: int) -> list[dict]:
+    """Fetch all comments (issue + review) for a PR, paginated."""
     comments = []
-
-    # 1. PR-level comments (issues endpoint)
-    page = 1
-    while True:
-        try:
-            cmd = [
-                "gh", "api",
-                f"repos/{owner}/{repo}/issues/{pr_number}/comments"
-                f"?sort=created&direction=desc&per_page=100&page={page}",
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-            if result.returncode != 0:
-                break
-            batch = json.loads(result.stdout)
-            if not batch:
+    for endpoint in [
+        f"repos/{owner}/{repo}/issues/{pr_number}/comments",
+        f"repos/{owner}/{repo}/pulls/{pr_number}/comments",
+    ]:
+        for page in range(1, 4):  # max 3 pages = 300 comments
+            try:
+                batch = _get_comments_page(endpoint, page)
+            except Exception as e:
+                log.debug("Error fetching comments: %s", e)
                 break
             comments.extend(batch)
             if len(batch) < 100:
                 break
-            page += 1
-            if page > 3:
-                break
-        except Exception as e:
-            log.debug("Error fetching PR comments: %s", e)
-            break
-
-    # 2. Review comments (inline, pulls endpoint)
-    page = 1
-    while True:
-        try:
-            cmd = [
-                "gh", "api",
-                f"repos/{owner}/{repo}/pulls/{pr_number}/comments"
-                f"?sort=created&direction=desc&per_page=100&page={page}",
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-            if result.returncode != 0:
-                break
-            batch = json.loads(result.stdout)
-            if not batch:
-                break
-            comments.extend(batch)
-            if len(batch) < 100:
-                break
-            page += 1
-            if page > 3:
-                break
-        except Exception as e:
-            log.debug("Error fetching review comments: %s", e)
-            break
-
     return comments
 
 
