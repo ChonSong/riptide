@@ -42,12 +42,7 @@ FIX_RE = re.compile(r"@riptide-bot\s+fix\b(.*)", re.IGNORECASE | re.DOTALL)
 LOOKBACK_DAYS = int(os.environ.get("RIPTIDE_POLLER_LOOKBACK", "3"))
 
 
-def _get_gh_token() -> str:
-    cmd = ["gh", "auth", "token"]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-    if result.returncode != 0:
-        raise RuntimeError(f"Failed to get gh token: {result.stderr[:200]}")
-    return result.stdout.strip()
+
 
 
 def _init_db(conn: sqlite3.Connection):
@@ -98,24 +93,26 @@ def _has_pending_fix(conn: sqlite3.Connection, pr_key: str) -> bool:
 
 
 def _search_fix_comments(lookback_days: int = LOOKBACK_DAYS) -> list[dict]:
+    """Search open PRs mentioning @riptide-bot fix via gh CLI."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days))
     cutoff_str = cutoff.strftime("%Y-%m-%d")
 
+    cmd = [
+        "gh", "search", "prs",
+        "--state", "open",
+        "--updated", f">={cutoff_str}",
+        "--sort", "updated",
+        "--order", "desc",
+        "--limit", "20",
+        "--json", "number,title,repository,createdAt,body,author,commentsCount",
+        f'"@riptide-bot fix"',
+    ]
     try:
-        import requests
-        token = _get_gh_token()
-        params = {
-            "q": f'is:pr is:open "@riptide-bot fix" updated:>={cutoff_str}',
-            "sort": "updated", "order": "desc", "per_page": "20",
-        }
-        url = "https://api.github.com/search/issues"
-        headers = {"Authorization": f"token {token}",
-                   "Accept": "application/vnd.github+json"}
-        result = requests.get(url, params=params, headers=headers, timeout=15)
-        if result.status_code != 200:
-            log.warning("search failed: HTTP %s", result.status_code)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        if result.returncode != 0:
+            log.warning("gh search prs failed: %s", result.stderr[:200])
             return []
-        data = result.json()
+        items = json.loads(result.stdout) if result.stdout.strip() else []
     except Exception as e:
         log.error("search error: %s", e)
         return []
@@ -123,21 +120,20 @@ def _search_fix_comments(lookback_days: int = LOOKBACK_DAYS) -> list[dict]:
     matches = []
     seen_prs = set()
 
-    for item in data.get("items", []):
-        repo_url = item.get("repository_url", "")
-        parts = repo_url.rsplit("/", 2)
-        if len(parts) < 3:
+    for item in items:
+        repo = item.get("repository", {})
+        owner = repo.get("owner", {}).get("login", "")
+        repo_name = repo.get("name", "")
+        pr_number = item.get("number", 0)
+        if not owner or not repo_name or not pr_number:
             continue
-        owner = parts[-2]
-        repo = parts[-1]
-        pr_number = item["number"]
 
-        pr_key = f"{owner}/{repo}#{pr_number}"
+        pr_key = f"{owner}/{repo_name}#{pr_number}"
         if pr_key in seen_prs:
             continue
         seen_prs.add(pr_key)
 
-        comments = _get_pr_comments(owner, repo, pr_number)
+        comments = _get_pr_comments(owner, repo_name, pr_number)
         for comment in comments:
             body = comment.get("body", "")
             if FIX_RE.search(body):
@@ -146,7 +142,7 @@ def _search_fix_comments(lookback_days: int = LOOKBACK_DAYS) -> list[dict]:
                     "commenter": comment.get("user", {}).get("login", "unknown"),
                     "body": body,
                     "owner": owner,
-                    "repo": repo,
+                    "repo": repo_name,
                     "pr_number": pr_number,
                     "pr_title": item.get("title", ""),
                     "created_at": comment.get("created_at", ""),
