@@ -74,6 +74,7 @@ class Labeler:
         self.definitions_path = definitions_path or LABEL_DEFINITIONS_PATH
         self.definitions = self._load_definitions()
         self._llm = None
+        self._setup_cache: dict[str, str] = {}  # repo_full → taxonomy version
 
     def _load_definitions(self) -> dict:
         """Load label definitions JSON."""
@@ -90,6 +91,15 @@ class Labeler:
                 model=ai_config.get("model", "qwen2.5-coder:7b"),
             )
         return self._llm
+
+    @staticmethod
+    def _normalize_color(color: str) -> str:
+        """Strip leading '#' from color and validate as 6-char hex."""
+        if color.startswith("#"):
+            color = color[1:]
+        if not re.match(r"^[0-9A-Fa-f]{6}$", color):
+            raise ValueError(f"Invalid color: expected 6-char hex, got '{color}'")
+        return color
 
     def _match_pattern(self, pattern: str, text: str) -> bool:
         """Match a regex pattern against text (case-insensitive)."""
@@ -204,8 +214,22 @@ class Labeler:
 
         if not type_matched:
             # Needs triage for unknown types
-            labels.append("status/needs-triage")
-            context["confidence"] = 0.5
+            # Try LLM fallback if confidence is below threshold
+            ai_config = self.definitions.get("ai_fallback_config", {})
+            threshold = ai_config.get("confidence_threshold", 0.7)
+            context["confidence"] = 0.5  # low confidence for unknown types
+
+            if self.llm and threshold > 0.5:
+                llm_labels = self.llm.classify(title, body, filenames, self._get_all_labels())
+                # Filter to canonical labels only
+                valid_labels = [l for l in llm_labels if l in self._get_all_labels()]
+                if valid_labels:
+                    labels.extend(valid_labels)
+                    type_matched = True
+                    context["confidence"] = 0.9  # LLM resolved the classification
+
+            if not type_matched:
+                labels.append("status/needs-triage")
 
         # Apply security label if detected (can coexist with type/bug etc.)
         if self._match_pattern(r"\b(security|vuln|cve|xss|injection|exploit)\b", title + " " + body):
@@ -227,29 +251,47 @@ class Labeler:
                 labels.append(rule["label"])
                 break
 
-        # ── Status ─────────────────────────────────────────────────────────
-        if is_draft:
-            labels.append("status/draft")
-        if context["confidence"] < 0.7:
-            labels.append("status/needs-triage")
-        if "type/bug" in labels and not has_repro_steps:
-            labels.append("status/needs-repro")
-        if re.search(r"\b(blocked on|waiting for|depends on)\b", body, re.IGNORECASE):
-            labels.append("status/blocked")
+        # ── Status (from configured rules) ────────────────────────────────
+        for rule in rules.get("status", []):
+            if "pattern" in rule:
+                pattern = rule["pattern"]
+                # If pattern looks like a label name (contains '/'), check against classified labels
+                if "/" in pattern:
+                    if pattern not in labels:
+                        continue
+                else:
+                    if not self._match_pattern(pattern, title + " " + body):
+                        continue
+            # If rule has a condition, evaluate it
+            if "condition" in rule and not self._evaluate_condition(rule["condition"], context):
+                continue
+            labels.append(rule["label"])
 
         # ── Area (can have multiple) ───────────────────────────────────────
         for rule in rules.get("area", []):
             if "pattern" in rule and self._match_pattern(rule["pattern"], title + " " + body):
                 labels.append(rule["label"])
 
-        # ── Sweeper (blast radius) ─────────────────────────────────────────
+        # ── Sweeper (blast radius + risk) ──────────────────────────────────
+        # Blast radius: first match wins (one label)
         for rule in rules.get("sweeper", []):
+            if not rule["label"].startswith("sweeper:blast-"):
+                continue
             if "pattern" in rule and not self._match_pattern(rule["pattern"], title + " " + body):
                 continue
             if "condition" in rule and not self._evaluate_condition(rule["condition"], context):
                 continue
             labels.append(rule["label"])
             break
+        # Risk labels: all matching rules apply (multiple labels)
+        for rule in rules.get("sweeper", []):
+            if not rule["label"].startswith("sweeper:risk-"):
+                continue
+            if "pattern" in rule and not self._match_pattern(rule["pattern"], title + " " + body):
+                continue
+            if "condition" in rule and not self._evaluate_condition(rule["condition"], context):
+                continue
+            labels.append(rule["label"])
 
         # ── Component (per-repo path matching) ─────────────────────────────
         if repo:
@@ -265,7 +307,18 @@ class Labeler:
         # ── Bot marker ─────────────────────────────────────────────────────
         labels.append("bot/labeled")
 
-        return list(set(labels))  # dedupe
+        # Deduplicate while preserving order (first occurrence wins)
+        return list(dict.fromkeys(labels))
+
+    def _get_all_labels(self) -> list[str]:
+        """Get all label names from taxonomy."""
+        labels = []
+        for dim in self.definitions.get("shared_labels", {}).get("dimensions", {}).values():
+            labels.extend(dim.get("labels", {}).keys())
+        # Add comp/* labels from all repos
+        for repo_data in self.definitions.get("repo_components", {}).get("repos", {}).values():
+            labels.extend(repo_data.keys())
+        return labels
 
     def _apply_title_heuristics(self, title: str, labels: list[str]) -> bool:
         """Apply title-based heuristics when no rule matched. Returns True if matched."""
@@ -286,8 +339,15 @@ class Labeler:
         """
         Ensure all canonical labels exist on the repo.
         Creates missing labels. Does NOT delete existing ones (safe to re-run).
+        Uses caching to avoid redundant API calls when taxonomy is unchanged.
         """
         full_name = f"{owner}/{repo}"
+        version = self.definitions.get("version", "0.0.0")
+
+        # Cache hit: taxonomy unchanged since last setup for this repo
+        if self._setup_cache.get(full_name) == version:
+            return True
+
         dimensions = self.definitions.get("shared_labels", {}).get("dimensions", {})
 
         # Collect all labels for this repo
@@ -308,11 +368,14 @@ class Labeler:
         # Create labels
         for name, info in all_labels.items():
             try:
+                color = self._normalize_color(info["color"])
                 github_client.ensure_label(
                     installation_id, owner, repo, name,
-                    info["description"], info["color"]
+                    info["description"], color
                 )
             except Exception as e:
                 log.warning(f"Failed to create label {name}: {e}")
 
+        # Update cache
+        self._setup_cache[full_name] = version
         return True

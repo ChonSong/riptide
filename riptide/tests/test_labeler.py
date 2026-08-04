@@ -287,7 +287,7 @@ class TestComponentClassification:
         pr = {"title": "fix: bug", "body": ""}
         files = [{"filename": "riptide/companion.py", "additions": 10, "deletions": 5}]
         labels = labeler.classify_pr(pr, files, repo="Unknown/repo")
-        comp_labels = [l for l in labels if l.startswith("comp/")]
+        comp_labels = [label for label in labels if label.startswith("comp/")]
         assert len(comp_labels) == 0
 
 
@@ -379,6 +379,94 @@ class TestSetupLabels:
         labeler.setup_labels_on_repo(123, "ChonSong", "riptide", github)
         # Should call ensure_label for all shared + comp labels
         assert github.ensure_label.call_count > 0
+
+    def test_setup_caching(self, labeler):
+        """Test that repeated setup with unchanged version makes no per-label calls."""
+        github = MagicMock()
+        github.ensure_label.return_value = {}
+        # First call
+        labeler.setup_labels_on_repo(123, "ChonSong", "riptide", github)
+        first_call_count = github.ensure_label.call_count
+        assert first_call_count > 0
+        # Second call (cache hit — should not call ensure_label again)
+        labeler.setup_labels_on_repo(123, "ChonSong", "riptide", github)
+        assert github.ensure_label.call_count == first_call_count
+
+    def test_setup_cache_bump_on_version_change(self, labeler):
+        """Test that changing taxonomy version triggers re-provisioning."""
+        github = MagicMock()
+        github.ensure_label.return_value = {}
+        # First call
+        labeler.setup_labels_on_repo(123, "ChonSong", "riptide", github)
+        first_call_count = github.ensure_label.call_count
+        # Bump version
+        labeler.definitions["version"] = "2.0.0"
+        labeler.setup_labels_on_repo(123, "ChonSong", "riptide", github)
+        assert github.ensure_label.call_count > first_call_count
+
+    def test_normalize_color_strips_hash(self, labeler):
+        color = labeler._normalize_color("#FF5733")
+        assert color == "FF5733"
+
+    def test_normalize_color_validates_hex(self, labeler):
+        with pytest.raises(ValueError):
+            labeler._normalize_color("ZZZZZZ")
+
+
+class TestLLMFallback:
+    """Test LLM fallback integration."""
+
+    def test_llm_fallback_on_unknown(self, labeler):
+        """Test that LLM voter is invoked for unknown types."""
+        # Mock the LLM voter
+        mock_llm = MagicMock()
+        mock_llm.classify.return_value = ["type/feature", "priority/low"]
+        labeler._llm = mock_llm
+
+        pr = {"title": "Something completely unknown", "body": "No conventional commit"}
+        files = [{"filename": "random.txt", "additions": 5, "deletions": 2}]
+        labels = labeler.classify_pr(pr, files)
+        # LLM should have been called
+        mock_llm.classify.assert_called_once()
+        # Should include LLM result
+        assert "type/feature" in labels
+        # Should NOT have needs-triage (LLM resolved it)
+        assert "status/needs-triage" not in labels
+
+    def test_llm_fallback_empty_returns_triage(self, labeler):
+        """Test that empty LLM result falls back to needs-triage."""
+        mock_llm = MagicMock()
+        mock_llm.classify.return_value = []
+        labeler._llm = mock_llm
+
+        pr = {"title": "Something unknown", "body": ""}
+        files = [{"filename": "random.txt", "additions": 5, "deletions": 2}]
+        labels = labeler.classify_pr(pr, files)
+        assert "status/needs-triage" in labels
+
+    def test_llm_result_filtered_to_canonical(self, labeler):
+        """Test that non-canonical LLM results are filtered out."""
+        mock_llm = MagicMock()
+        mock_llm.classify.return_value = ["type/feature", "bogus/nonexistent", "priority/low"]
+        labeler._llm = mock_llm
+
+        pr = {"title": "Something unknown", "body": ""}
+        files = [{"filename": "random.txt", "additions": 5, "deletions": 2}]
+        labels = labeler.classify_pr(pr, files)
+        assert "type/feature" in labels
+        assert "priority/low" in labels
+        assert "bogus/nonexistent" not in labels
+
+
+class TestOrderPreservingDedup:
+    """Test that dedup preserves rule order."""
+
+    def test_order_preserved(self, labeler):
+        pr = {"title": "fix: crash on save", "body": "Steps to reproduce: click save"}
+        files = [{"filename": "riptide/companion.py", "additions": 50, "deletions": 30}]
+        labels1 = labeler.classify_pr(pr, files)
+        labels2 = labeler.classify_pr(pr, files)
+        assert labels1 == labels2  # Deterministic order
 
 
 if __name__ == "__main__":

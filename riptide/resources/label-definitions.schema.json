@@ -85,10 +85,10 @@
     },
     "rule": {
       "type": "object",
-      "required": ["label", "pattern"],
+      "required": ["label"],
       "properties": {
         "label": { "type": "string" },
-        "pattern": { "type": "string", "description": "Regex pattern (applied to title+body lowercase)" },
+        "pattern": { "type": "string", "description": "Regex pattern (applied to title+body or classified labels)" },
         "paths": { "type": "array", "items": { "type": "string" }, "description": "File path glob patterns" },
         "condition": { "type": "string", "description": "Python expression (e.g., 'loc > 100')" }
       }

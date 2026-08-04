@@ -284,15 +284,17 @@ class GitHubAppClient:
     def ensure_label(self, installation_id: int, owner: str, repo: str,
                      name: str, description: str, color: str) -> dict:
         """Create a label if it doesn't exist, update if it does."""
+        from urllib.parse import quote
+        encoded_name = quote(name, safe="")
         resp = requests.get(
-            f"{self.base_url}/repos/{owner}/{repo}/labels/{name}",
+            f"{self.base_url}/repos/{owner}/{repo}/labels/{encoded_name}",
             headers=self._headers(installation_id),
             timeout=15,
         )
         if resp.status_code == 200:
             # Label exists — update description/color
             resp = requests.patch(
-                f"{self.base_url}/repos/{owner}/{repo}/labels/{name}",
+                f"{self.base_url}/repos/{owner}/{repo}/labels/{encoded_name}",
                 headers=self._headers(installation_id, {"Content-Type": "application/json"}),
                 json={"description": description, "color": color},
                 timeout=15,
@@ -323,8 +325,10 @@ class GitHubAppClient:
     def remove_label_from_issue(self, installation_id: int, owner: str, repo: str,
                                 issue_number: int, label: str) -> dict:
         """Remove a label from an issue/PR."""
+        from urllib.parse import quote
+        encoded_label = quote(label, safe="")
         resp = requests.delete(
-            f"{self.base_url}/repos/{owner}/{repo}/issues/{issue_number}/labels/{label}",
+            f"{self.base_url}/repos/{owner}/{repo}/issues/{issue_number}/labels/{encoded_label}",
             headers=self._headers(installation_id),
             timeout=15,
         )
