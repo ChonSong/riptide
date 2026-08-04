@@ -118,7 +118,7 @@ def handle_fix_command(
     # Push eligibility: allow if we own the repo OR authored the PR.
     # Fork PRs from external users (head != base, not our org) stay comment-only.
     # Fork PRs authored by us are push-eligible (we own the head branch).
-    push_eligible = _is_push_eligible(owner, repo, author) and (not is_fork or author == OUR_USERNAME)
+    push_eligible = _is_push_eligible(owner, repo, author) and _is_fork_push_eligible(is_fork, author)
 
     try:
         spawned = _spawn_fix(
@@ -148,7 +148,7 @@ def handle_fix_command(
     mode = (
         "edit, commit, and push fixes directly to the PR branch"
         if push_eligible
-        else "produce a comment-only patch (cannot push to a fork or foreign repo)"
+        else "generate a comment-only patch (fork or foreign repo)"
     )
     scope = (
         f"the problem you described: _{description.strip()}_"
@@ -173,6 +173,11 @@ def _is_push_eligible(owner: str, repo: str, pr_author: str) -> bool:
     foreign repos. (Fork PRs are additionally excluded by the caller.)
     """
     return owner == OUR_ORG or pr_author == OUR_USERNAME
+
+
+def _is_fork_push_eligible(is_fork: bool, author: str) -> bool:
+    """Return True if a fork PR is push-eligible."""
+    return not is_fork or author == OUR_USERNAME
 
 
 def _is_cron_available() -> bool:

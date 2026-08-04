@@ -7,6 +7,7 @@ from riptide.fixer import (
     FIX_RE,
     handle_fix_command,
     _is_push_eligible,
+    _is_fork_push_eligible,
     _is_cron_available,
     _spawn_fix,
     _build_fix_prompt,
@@ -104,6 +105,8 @@ class TestIsPushEligible:
 
 
 class TestForkDetection:
+    """Tests for fork/same-repo detection and push eligibility."""
+
     def _pr_details(self, head_repo=None):
         head = {"sha": "abc", "ref": "feat/x"}
         if head_repo:
