@@ -249,10 +249,10 @@ def _run_proofshot_custom(
         return None
 
 
-def _upload_gif(gif_path: str, pr_number: int) -> Optional[str]:
+def _upload_gif(gif_path: str, pr_number: int, commit_sha: str = "") -> Optional[str]:
     """Upload GIF to the grafiphy-assets GitHub release and return its download URL."""
     try:
-        asset_name = f"pr{pr_number}-proofshot.gif"
+        asset_name = f"pr{pr_number}-{commit_sha[:8]}-proofshot.gif" if commit_sha else f"pr{pr_number}-proofshot.gif"
 
         # Ensure the grafiphy-assets release exists
         result = subprocess.run(
@@ -294,14 +294,18 @@ def _upload_gif(gif_path: str, pr_number: int) -> Optional[str]:
 
 def _post_proofshot_comment(
     owner: str, repo: str, pr_number: int,
-    gif_url: str,
+    gif_url: str, commit_sha: str = "", commit_message: str = "",
 ) -> bool:
     """Post the ProofShot visual evidence comment on the PR."""
     body_parts = [
         f"## {PROOFSHOT_MARKER} Visual Evidence\n",
-        "ProofShot visual verification completed for the UI changes in this PR.\n",
-        f"![ProofShot GIF]({gif_url})\n",
     ]
+    if commit_sha:
+        # Shorten commit message to first line, max 60 chars
+        msg = commit_message.split("\n")[0][:60] if commit_message else ""
+        body_parts.append(f"**Commit `{commit_sha[:8]}`:** {msg}\n")
+    body_parts.append("ProofShot visual verification completed for the UI changes in this PR.\n")
+    body_parts.append(f"![ProofShot GIF]({gif_url})\n")
 
     body_parts.append(
         "\n---\n"
@@ -316,8 +320,57 @@ def _post_proofshot_comment(
     if result.returncode != 0:
         log.warning("  Failed to post comment on #%d: %s", pr_number, result.stderr[:200])
         return False
-    log.info("  \u2713 ProofShot comment posted on %s/%s#%d", owner, repo, pr_number)
+    log.info("  ✓ ProofShot comment posted on %s/%s#%d", owner, repo, pr_number)
     return True
+
+
+# ── Per-commit diff mapping ────────────────────────────────────────────────────
+
+
+def _get_commit_file_map(owner: str, repo: str, pr_number: int) -> list[dict]:
+    """Get per-commit file change map for a PR.
+
+    Returns list of {sha, message, files, ui_files} for each commit,
+    ordered oldest → newest.
+    """
+    # Get commit list with SHAs and messages
+    commits_result = subprocess.run(
+        ["gh", "api", f"repos/{owner}/{repo}/pulls/{pr_number}/commits",
+         "--jq", ".[].{sha: .sha, message: .commit.message}"],
+        capture_output=True, text=True, timeout=30,
+    )
+    if commits_result.returncode != 0:
+        log.warning("  Failed to fetch commits for %s/%s#%d", owner, repo, pr_number)
+        return []
+
+    commits = []
+    for line in commits_result.stdout.strip().split("\n"):
+        if not line:
+            continue
+        try:
+            commits.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+
+    # For each commit, get its files
+    for commit in commits:
+        sha = commit["sha"]
+        files_result = subprocess.run(
+            ["gh", "api", f"repos/{owner}/{repo}/commits/{sha}",
+             "--jq", ".files[].filename"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if files_result.returncode != 0:
+            commit["files"] = []
+            commit["ui_files"] = []
+            continue
+
+        all_files = [f for f in files_result.stdout.strip().split("\n") if f]
+        ui_files = [f for f in all_files if f.endswith(tuple(UI_EXTENSIONS))]
+        commit["files"] = all_files
+        commit["ui_files"] = ui_files
+
+    return commits
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────
@@ -372,15 +425,16 @@ def run():
 
             # ── Filter: skip draft PRs ──────────────────────────────────
             if is_draft:
-                log.info("  #%d skip \u2014 draft PR", pr_number)
+                log.info("  #%d skip — draft PR", pr_number)
                 skipped_draft += 1
                 continue
 
             pr_key = f"{repo_full}#{pr_number}"
 
             # ── Dedup: same head SHA already processed ──────────────────
+            # Note: per-commit captures bypass this — new commits always run
             if state.get(pr_key, {}).get("head_sha") == head_sha:
-                log.info("  #%d skip ── already processed (SHA %s)", pr_number, head_sha[:12])
+                log.info("  #%d skip — already processed (SHA %s)", pr_number, head_sha[:12])
                 skipped_dedup += 1
                 continue
 
@@ -388,45 +442,28 @@ def run():
             try:
                 updated_at = datetime.fromisoformat(updated_at_str.replace("Z", "+00:00"))
             except (ValueError, AttributeError):
-                log.warning("  #%d skip \u2014 can't parse updatedAt: %s", pr_number, updated_at_str)
+                log.warning("  #%d skip — can't parse updatedAt: %s", pr_number, updated_at_str)
                 skipped_stale += 1
                 continue
 
             if updated_at > cutoff:
-                log.info("  #%d skip \u2014 last updated %s, not yet stale", pr_number, updated_at_str)
+                log.info("  #%d skip — last updated %s, not yet stale", pr_number, updated_at_str)
                 skipped_stale += 1
                 continue
 
-            # ── Filter: check for UI file changes ───────────────────────
-            files_result = subprocess.run(
-                ["gh", "api", f"repos/{owner}/{repo_name}/pulls/{pr_number}/files",
-                 "--jq", ".[].filename", "--paginate"],
-                capture_output=True, text=True, timeout=30,
-            )
-            if files_result.returncode != 0:
-                log.warning("  #%d skip — can't fetch files: %s",
-                            pr_number, files_result.stderr[:200])
-                skipped_error += 1
-                continue
+            # ── Per-commit analysis: which commits have UI changes? ─────
+            commit_map = _get_commit_file_map(owner, repo_name, pr_number)
+            ui_commits = [c for c in commit_map if c["ui_files"]]
 
-            all_files = [f for f in files_result.stdout.strip().split("\n") if f]
-            ui_files = [f for f in all_files if f.endswith(tuple(UI_EXTENSIONS))]
-
-            if not ui_files:
-                log.info("  #%d skip \u2014 no UI files changed", pr_number)
+            if not ui_commits:
+                log.info("  #%d skip — no UI files changed", pr_number)
                 skipped_no_ui += 1
                 continue
 
-            # ── Check for proofshot.config.json (optional enrichment) ──
-            config = _check_proofshot_config(owner, repo_name, pr_number, head_sha)
-            if config is None:
-                log.info("  #%d no proofshot.config.json — using defaults", pr_number)
-                config = {"url": "http://localhost:8788", "captures": []}
-
-            # ── All filters passed — run proofshot ──────────────────────
+            # ── All filters passed — run proofshot per commit ───────────
             log.info(
-                "  #%d TRIGGER — UI files: %s, SHA=%s",
-                pr_number, ", ".join(ui_files[:5]), head_sha[:12],
+                "  #%d TRIGGER — %d commits with UI files",
+                pr_number, len(ui_commits),
             )
 
             # Checkout PR branch for seed file resolution
@@ -435,6 +472,12 @@ def run():
                 log.warning("  #%d failed to checkout — skipping", pr_number)
                 skipped_error += 1
                 continue
+
+            # Check for proofshot.config.json (optional enrichment)
+            config = _check_proofshot_config(owner, repo_name, pr_number, head_sha)
+            if config is None:
+                log.info("  #%d no proofshot.config.json — using defaults", pr_number)
+                config = {"url": "http://localhost:8788", "captures": []}
 
             # Resolve seed path (relative to repo root in the checkout)
             seed_path: Optional[str] = None
@@ -448,28 +491,43 @@ def run():
 
             url = config.get("url", "http://localhost:8788")
             captures = config.get("captures", [])
-            output_dir = Path(f"/tmp/proofshot-pr-{owner}-{repo_name}-{pr_number}")
-            output_dir.mkdir(parents=True, exist_ok=True)
 
-            result = _run_proofshot(pr_number, url, seed_path, output_dir, captures)
-            if result is None:
-                log.warning("  #%d proofshot failed — skipping", pr_number)
-                skipped_error += 1
-                continue
+            # Run proofshot for each commit that touched UI files
+            for commit in ui_commits:
+                commit_sha = commit["sha"]
+                commit_msg = commit.get("message", "")
+                output_dir = Path(f"/tmp/proofshot-pr-{owner}-{repo_name}-{pr_number}-{commit_sha[:8]}")
+                output_dir.mkdir(parents=True, exist_ok=True)
 
-            # Upload GIF to release assets
-            gif_url = _upload_gif(result["gif"], pr_number)
-            if gif_url is None:
-                log.warning("  #%d skip — upload failed for %s",
-                            pr_number, result["gif"])
-                skipped_error += 1
-                continue
+                log.info(
+                    "  Capturing commit %s (%s)",
+                    commit_sha[:8], ", ".join(commit["ui_files"][:3]),
+                )
 
-            # Post the evidence comment
-            if _post_proofshot_comment(owner, repo_name, pr_number, gif_url):
+                result = _run_proofshot(pr_number, url, seed_path, output_dir, captures)
+                if result is None:
+                    log.warning("  #%d commit %s proofshot failed — skipping", pr_number, commit_sha[:8])
+                    skipped_error += 1
+                    continue
+
+                # Upload GIF to release assets
+                gif_url = _upload_gif(result["gif"], pr_number, commit_sha)
+                if gif_url is None:
+                    log.warning("  #%d commit %s upload failed", pr_number, commit_sha[:8])
+                    skipped_error += 1
+                    continue
+
+                # Post the evidence comment
+                if _post_proofshot_comment(
+                    owner, repo_name, pr_number, gif_url,
+                    commit_sha=commit_sha, commit_message=commit_msg,
+                ):
+                    triggered += 1
+
+            # Mark PR as processed (full head SHA)
+            if triggered > 0:
                 state[pr_key] = {"head_sha": head_sha, "reviewed_at": now.isoformat()}
                 _save_state(state)
-                triggered += 1
 
     # ── Summary ─────────────────────────────────────────────────────────
     log.info(
