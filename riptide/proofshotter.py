@@ -175,29 +175,35 @@ def _run_proofshot_default(
     seed_path: Optional[str],
     output_dir: Path,
 ) -> Optional[dict]:
-    """Run the default proofshot PR workflow via the CLI."""
-    cmd = [
-        sys.executable or "python3",
-        str(PROOFSHOT_CLI),
-        "pr", str(pr_number),
-        "--url", url,
-        "--output", str(output_dir),
-    ]
-    if seed_path:
-        cmd.extend(["--seed", seed_path])
+    """Run proofshot by importing ProofshotSession directly.
 
-    log.info("  Running: proofshot pr %d --url %s --output %s", pr_number, url, output_dir)
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-    if result.returncode != 0:
-        log.warning("  proofshot pr failed (exit %d): %s", result.returncode, result.stderr[:300])
+    Drives the browser session in-process instead of shelling out to
+    cli.py. This avoids the hardcoded toolbar interactions and the
+    double-upload/double-comment that cli.py pr does.
+    """
+    try:
+        sys.path.insert(0, str(PROOFSHOT_ROOT))
+        from cli import ProofshotSession
+
+        log.info("  Starting ProofshotSession for #%d at %s", pr_number, url)
+        session = ProofshotSession(url, str(output_dir), seed_path)
+        session.start()
+
+        # Wait for page to settle, then stop and generate GIF from video
+        session.page.wait_for_timeout(3000)
+        result = session.stop(gif_output="proofshot.gif")
+        if result.get("gif"):
+            return {"gif": result["gif"]}
+
+        log.warning("  proofshot did not produce a GIF at %s", output_dir)
         return None
 
-    gif_path = output_dir / "proofshot.gif"
-    if gif_path.exists():
-        return {"gif": str(gif_path), "screenshots": sorted(str(p) for p in output_dir.glob("*.png"))}
-
-    log.warning("  proofshot did not produce a GIF at %s", gif_path)
-    return None
+    except ImportError:
+        log.warning("  ProofshotSession import failed — is /home/sc/workspace/proofshot present?")
+        return None
+    except Exception as exc:
+        log.warning("  ProofshotSession failed for #%d: %s", pr_number, exc)
+        return None
 
 
 def _run_proofshot_custom(
@@ -209,44 +215,38 @@ def _run_proofshot_custom(
 ) -> Optional[dict]:
     """Drive ProofshotSession manually for custom capture sequences.
 
-    Builds and runs an inline Python script that uses the ProofshotSession class
-    from the proofshot CLI module, following each capture defined in the config.
+    Import ProofshotSession directly (in-process) instead of building
+    a subprocess script. This avoids the double-upload/double-comment
+    that cli.py pr does.
     """
-    captures_json = json.dumps(captures)
-    seed_repr = json.dumps(seed_path) if seed_path else "None"
-
-    script = (
-        "import json, sys, time; "
-        f"sys.path.insert(0, {json.dumps(str(PROOFSHOT_ROOT))}); " \
-        "from cli import ProofshotSession; "
-        f"s = ProofshotSession({json.dumps(url)}, {json.dumps(str(output_dir))}, {seed_repr}); "
-        "s.start(); "
-        f"caps = {captures_json}; "
-        "for c in caps:\n"
-        "    time.sleep(c.get('wait', 0) / 1000);\n"
-        "    s.capture(selector=c.get('selector'), output=f\"{c['name']}.png\");\n"
-        "r = s.stop(gif_output='proofshot.gif');\n"
-        "print(json.dumps({'gif': r.get('gif'), "
-        "'screenshots': [str(x) for x in r.get('screenshots', [])]}))"
-    )
-
-    log.info("  Running custom proofshot for #%d (%d captures)", pr_number, len(captures))
-    result = subprocess.run(
-        [sys.executable or "python3", "-c", script],
-        capture_output=True, text=True, timeout=180,
-    )
-    if result.returncode != 0:
-        log.warning("  Custom proofshot failed (exit %d): %s", result.returncode, result.stderr[:300])
-        return None
-
     try:
-        data = json.loads(result.stdout.strip())
-        if data.get("gif"):
-            return data
+        sys.path.insert(0, str(PROOFSHOT_ROOT))
+        from cli import ProofshotSession
+
+        log.info("  Running custom proofshot for #%d (%d captures)", pr_number, len(captures))
+        session = ProofshotSession(url, str(output_dir), seed_path)
+        session.start()
+
+        for c in captures:
+            wait_ms = c.get("wait", 0)
+            if wait_ms:
+                session.page.wait_for_timeout(wait_ms)
+            selector = c.get("selector")
+            name = c.get("name", "capture")
+            session.capture(selector=selector, output=f"{name}.png")
+
+        result = session.stop(gif_output="proofshot.gif")
+        if result.get("gif"):
+            return {"gif": result["gif"]}
+
         log.warning("  Custom proofshot produced no GIF output")
         return None
-    except (json.JSONDecodeError, ValueError) as exc:
-        log.warning("  Failed to parse custom proofshot output: %s", exc)
+
+    except ImportError:
+        log.warning("  ProofshotSession import failed — is /home/sc/workspace/proofshot present?")
+        return None
+    except Exception as exc:
+        log.warning("  Custom proofshot failed for #%d: %s", pr_number, exc)
         return None
 
 
