@@ -6,7 +6,7 @@ Cron-polled worker that:
   2. Runs proofshot Playwright captures on the dev instance
      (proofshot.config.json is optional — defaults to localhost:8788
       if absent; include one in the PR root for custom captures/seed)
-  3. Posts visual evidence (GIF/screenshots) as a GitHub PR comment
+  3. Posts visual evidence (GIF) as a GitHub PR comment
 
 Dedup: tracks pr_number + head_sha to avoid re-running on the same revision.
 New commits with UI changes automatically retrigger (no 24h cooldown).
@@ -157,7 +157,7 @@ def _run_proofshot(
     If captures are defined in proofshot.config.json, drives the session manually
     for each capture step. Otherwise uses the default 'proofshot pr' workflow.
 
-    Returns {'gif': str, 'screenshots': list[str]} on success, None on failure.
+    Returns {'gif': str} on success, None on failure.
     """
     if not PROOFSHOT_CLI.exists():
         log.warning("  Proofshot CLI not found at %s — skipping verification", PROOFSHOT_CLI)
@@ -194,7 +194,7 @@ def _run_proofshot_default(
 
     gif_path = output_dir / "proofshot.gif"
     if gif_path.exists():
-        return {"gif": str(gif_path), "screenshots": sorted(str(p) for p in output_dir.glob("*.png"))}
+        return {"gif": str(gif_path)}
 
     log.warning("  proofshot did not produce a GIF at %s", gif_path)
     return None
@@ -226,8 +226,7 @@ def _run_proofshot_custom(
         "    time.sleep(c.get('wait', 0) / 1000);\n"
         "    s.capture(selector=c.get('selector'), output=f\"{c['name']}.png\");\n"
         "r = s.stop(gif_output='proofshot.gif');\n"
-        "print(json.dumps({'gif': r.get('gif'), "
-        "'screenshots': [str(x) for x in r.get('screenshots', [])]}))"
+        "print(json.dumps({'gif': r.get('gif')}))"
     )
 
     log.info("  Running custom proofshot for #%d (%d captures)", pr_number, len(captures))
@@ -295,7 +294,7 @@ def _upload_gif(gif_path: str, pr_number: int) -> Optional[str]:
 
 def _post_proofshot_comment(
     owner: str, repo: str, pr_number: int,
-    gif_url: str, screenshots: list[str],
+    gif_url: str,
 ) -> bool:
     """Post the ProofShot visual evidence comment on the PR."""
     body_parts = [
@@ -303,10 +302,6 @@ def _post_proofshot_comment(
         "ProofShot visual verification completed for the UI changes in this PR.\n",
         f"![ProofShot GIF]({gif_url})\n",
     ]
-    if screenshots:
-        body_parts.append("\n**Captures:**\n")
-        for s in screenshots:
-            body_parts.append(f"- `{Path(s).name}`\n")
 
     body_parts.append(
         "\n---\n"
@@ -470,10 +465,8 @@ def run():
                 skipped_error += 1
                 continue
 
-            screenshots = result.get("screenshots", [])
-
             # Post the evidence comment
-            if _post_proofshot_comment(owner, repo_name, pr_number, gif_url, screenshots):
+            if _post_proofshot_comment(owner, repo_name, pr_number, gif_url):
                 state[pr_key] = {"head_sha": head_sha, "reviewed_at": now.isoformat()}
                 _save_state(state)
                 triggered += 1

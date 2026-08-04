@@ -601,12 +601,11 @@ class T0Orchestrator:
                 return {"status": "error", "tier": "t3_visual", "body": "Capture failed"}
             
             gif_path = result.get("gif", "")
-            screenshots = result.get("screenshots", [])
             gif_url = _upload_gif(gif_path, profile.pr_number)
             if gif_url and self.github:
                 _post_proofshot_comment(
                     profile.owner, profile.repo, profile.pr_number,
-                    gif_url, screenshots=screenshots
+                    gif_url
                 )
             
             return {
