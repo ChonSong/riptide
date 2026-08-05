@@ -257,6 +257,19 @@ def _spawn_deepthink(
         skills = select_skills(depth)
         log.info(f"{owner}/{repo}#{pr_number} classified as {depth.value}, skills={skills}")
 
+        # Pre-generate Excalidraw diagram in Python (deterministic, no LLM needed)
+        diagram_url = None
+        try:
+            from riptide.grafiphy.orchestrator import pre_generate_diagram
+            diagram_url = pre_generate_diagram(data, dict(
+                owner=owner, repo=repo, number=pr_number,
+                title=pr_title, author=pr_author, total_loc=total_loc,
+            ))
+            if diagram_url:
+                log.info(f"Pre-generated diagram for {owner}/{repo}#{pr_number}: {diagram_url}")
+        except Exception as e:
+            log.warning(f"Pre-generate diagram failed (non-fatal): {e}")
+
         prompt = _build_orchestrator_prompt(
             owner=owner,
             repo=repo,
@@ -266,6 +279,7 @@ def _spawn_deepthink(
             total_loc=total_loc,
             head_sha=head_sha,
             data=data,
+            diagram_url=diagram_url,
         )
     except Exception as e:
         state.mark_failed(job_id)
@@ -470,11 +484,14 @@ def _build_orchestrator_prompt(
     total_loc: int,
     head_sha: str,
     data: dict,
+    diagram_url: Optional[str] = None,
 ) -> str:
-    """Build a small orchestrator prompt that delegates to subagents.
+    """
+    Build a small orchestrator prompt that delegates to subagents.
 
     The prompt is ~40 lines instead of ~280 lines.
     All data is pre-gathered in Python and passed as structured context.
+    If diagram_url is provided, the LLM references it instead of generating.
     """
     # Format files changed
     files_str = "\n".join(
@@ -500,6 +517,9 @@ def _build_orchestrator_prompt(
     if not graph_str:
         graph_str = "(No graphify analysis available)"
 
+    diagram_section = f"\n## Pre-generated Architecture Diagram\n[View Diagram]({diagram_url})\n" if diagram_url else ""
+    diagram_step = "\n### Step 4: Architecture Diagram\nThe architecture diagram is pre-generated and embedded above. Reference it in your Code Analysis section.\n" if diagram_url else ""
+
     return f"""PR #{pr_number} in {owner}/{repo} — {total_loc} LOC changed.
 
 ## Context (pre-gathered)
@@ -522,7 +542,7 @@ def _build_orchestrator_prompt(
 
 ### Graphify Analysis
 {graph_str}
-
+{diagram_section}
 ## Your Task: Orchestrate Review
 
 You are a senior engineer. Delegate review tasks to subagents, then synthesize.
@@ -532,11 +552,11 @@ Spawn a subagent with:
 - Role: Code reviewer
 - Task: Call `skill_view('deep-think')` first, then analyze the PR diff, post 1-3 inline review comments with GitHub suggestion blocks
 - Output: JSON list of findings [{{file, line, severity, title, detail}}]
+Severity must be one of: critical, warning, suggestion, info, approved.
 
 ### Step 2: Write Findings JSON
 After the inline review subagent finishes, write its findings to /tmp/findings.json as JSON:
 [{{severity, title, detail, file, line}}]
-Severity must be one of: critical, warning, suggestion, info, approved.
 
 ### Step 3: Assemble + Post Review (deterministic)
 Run the assembly script — it validates, formats, and posts. Do NOT hand-format the review.
@@ -556,7 +576,7 @@ The script appends the model/provider to the sign-off deterministically.
 - Reference inline comments in the summary
 - The Code Analysis and Explanation sections are REQUIRED — never omit them
 - If a section has nothing to report, say so explicitly ("No significant findings") rather than omitting it
-
+{diagram_step}
 REPO PATH: ~/workspace/{repo}/
 """
 

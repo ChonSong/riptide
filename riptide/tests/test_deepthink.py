@@ -88,6 +88,7 @@ class TestSpawnDeepthink:
         with patch("subprocess.run", return_value=self._success_result()) as mock_run, \
              patch("riptide.deepthink._is_cron_available", return_value=True), \
              patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
+             patch("riptide.grafiphy.orchestrator.pre_generate_diagram", return_value=None), \
              patch("riptide.state.StateStore") as mock_state:
             mock_state.return_value.reserve_job.return_value = True
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
@@ -99,6 +100,7 @@ class TestSpawnDeepthink:
              patch("time.sleep") as mock_sleep, \
              patch("riptide.deepthink._is_cron_available", return_value=True), \
              patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
+             patch("riptide.grafiphy.orchestrator.pre_generate_diagram", return_value=None), \
              patch("riptide.state.StateStore") as mock_state:
             mock_state.return_value.reserve_job.return_value = True
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
@@ -110,6 +112,7 @@ class TestSpawnDeepthink:
              patch("time.sleep") as mock_sleep, \
              patch("riptide.deepthink._is_cron_available", return_value=True), \
              patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
+             patch("riptide.grafiphy.orchestrator.pre_generate_diagram", return_value=None), \
              patch("riptide.state.StateStore") as mock_state:
             mock_state.return_value.reserve_job.return_value = True
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
@@ -497,3 +500,20 @@ class TestBuildOrchestratorPrompt:
         assert "Spawn a subagent" in prompt
         assert "assemble_review" in prompt
         assert "LongCat-2.0" in prompt or "DEEPTHINK" in prompt
+
+    def test_includes_diagram_url_when_provided(self):
+        data = {
+            "files_changed": [],
+            "diff_raw": "",
+            "repo_tree": [],
+            "god_nodes": [],
+            "communities": [],
+            "graph_context": {},
+        }
+        prompt = _build_orchestrator_prompt(
+            "ChonSong", "riptide", 42, "feat: test", "author", 300, "abc123", data,
+            diagram_url="https://excalidraw.com/#json=abc123"
+        )
+        assert "Pre-generated Architecture Diagram" in prompt
+        assert "https://excalidraw.com/#json=abc123" in prompt
+        assert "Step 4: Architecture Diagram" in prompt
