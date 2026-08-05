@@ -585,28 +585,28 @@ class T0Orchestrator:
     def _dispatch_t3_visual(self, profile: TaskProfile) -> dict:
         """Dispatch to T3 (proofshot visual capture)."""
         try:
-            from riptide.proofshotter import _checkout_pr, _run_proofshot_default, _upload_gif, _post_proofshot_comment
+            from riptide.proofshotter import _checkout_pr, _run_proofshot, _upload_gif, _post_proofshot_comment
             
             work_dir = _checkout_pr(profile.owner, profile.repo, profile.pr_number)
             if not work_dir:
                 return {"status": "error", "tier": "t3_visual", "body": "Checkout failed"}
             
-            result = _run_proofshot_default(
+            result = _run_proofshot(
                 profile.pr_number,
-                url="http://localhost:8788",
+                url=os.environ.get("RIPTIDE_PROOFSHOT_URL", "http://localhost:8788"),
                 seed_path=None,
                 output_dir=Path(f"/tmp/proofshot-pr-{profile.owner}-{profile.repo}-{profile.pr_number}"),
+                captures=[],
             )
             if not result:
                 return {"status": "error", "tier": "t3_visual", "body": "Capture failed"}
             
             gif_path = result.get("gif", "")
-            screenshots = result.get("screenshots", [])
             gif_url = _upload_gif(gif_path, profile.pr_number)
             if gif_url and self.github:
                 _post_proofshot_comment(
                     profile.owner, profile.repo, profile.pr_number,
-                    gif_url, screenshots=screenshots
+                    gif_url, screenshots=result.get("screenshots", [])
                 )
             
             return {
