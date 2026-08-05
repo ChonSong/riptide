@@ -53,7 +53,7 @@ MIN_LOC_CHANGED = int(os.environ.get("RIPTIDE_MIN_LOC_CHANGED", "100"))
 # Pin the inference config on spawned cron jobs — the global config drifts,
 # and unpinned jobs are skipped to prevent unintended spend (Hermes #44585).
 # The riptide profile runs LongCat-2.0 via the custom LongCat provider.
-DEEPTHINK_MODEL = os.environ.get("RIPTIDE_DEEPTHINK_MODEL", "custom:LongCat-2.0")
+DEEPTHINK_MODEL = os.environ.get("RIPTIDE_DEEPTHINK_MODEL", "LongCat-2.0")
 DEEPTHINK_PROVIDER = os.environ.get("RIPTIDE_DEEPTHINK_PROVIDER", "longcat")
 
 STATE_FILE = Path(
