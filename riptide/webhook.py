@@ -16,7 +16,6 @@ import json
 import time
 import logging
 import threading
-import subprocess
 import traceback
 from pathlib import Path
 from typing import Optional
@@ -240,37 +239,6 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
             log.info(
                 f"[{delivery_id}] T0 orchestrator spawned for {repo_full}#{pr_number}"
             )
-
-    # PR merged into default branch → auto-deploy
-    elif action == "closed" and pr.get("merged"):
-        default_branch = os.environ.get("RIPTIDE_DEPLOY_BRANCH", "main")
-        base_ref = pr.get("base", {}).get("ref", "")
-        if base_ref == default_branch:
-            log.info(f"[{delivery_id}] PR #{pr_number} merged into {default_branch} — triggering auto-deploy")
-            deploy_script = os.environ.get("RIPTIDE_DEPLOY_SCRIPT", "/home/sc/workspace/riptide/scripts/deploy.sh")
-            if not Path(deploy_script).exists():
-                log.error(
-                    f"[{delivery_id}] Auto-deploy skipped — script not found: {deploy_script}"
-                )
-            elif not os.access(deploy_script, os.X_OK):
-                log.error(
-                    f"[{delivery_id}] Auto-deploy skipped — script not executable: {deploy_script}"
-                )
-            else:
-                try:
-                    proc = subprocess.Popen(
-                        ["systemd-run", "--user", "--scope", "--property=KillMode=process", "--collect", deploy_script],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        start_new_session=True,
-                    )
-                    log.info(f"[{delivery_id}] Auto-deploy triggered (pid={proc.pid})")
-                except FileNotFoundError:
-                    log.error(
-                        f"[{delivery_id}] Auto-deploy skipped — systemd-run not found. Install systemd or trigger deploy manually."
-                    )
-                except Exception as e:
-                    log.error(f"[{delivery_id}] Failed to trigger auto-deploy: {e}")
 
     return Response(status_code=200)
 
