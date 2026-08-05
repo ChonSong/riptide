@@ -206,7 +206,7 @@ def _spawn_fix(
     run_at = (datetime.now() + timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%S")
 
     # Cross-session awareness: clean up stale jobs, then atomically reserve
-    from riptide.orchestrator import StateStore
+    from riptide.state import StateStore
     state = StateStore()
     state.cleanup_stale_pending()
     job_id = f"{name}-{head_sha[:12]}-{uuid.uuid4().hex[:12]}"

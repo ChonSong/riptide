@@ -100,7 +100,7 @@ class TestHandleFix:
         bare MagicMock would be truthy and incorrectly short-circuit every test, so
         default it to False and let specific tests override.
         """
-        with patch("riptide.orchestrator.StateStore") as mock_store:
+        with patch("riptide.state.StateStore") as mock_store:
             mock_store.return_value.has_pending_job.return_value = False
             yield mock_store
 

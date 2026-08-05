@@ -109,49 +109,7 @@ class TaskClassifier:
         ]
 
 
-# ── Result Validation ────────────────────────────────────────────────────────
 
-@dataclass
-class ValidationReport:
-    valid: bool
-    confidence: float
-    issues: list
-
-
-class ResultValidator:
-    """Validate subagent results before T0 uses them."""
-    
-    def validate(self, result: Optional[dict] = None) -> ValidationReport:
-        if not result:
-            return ValidationReport(valid=False, confidence=0.0, issues=["Empty result"])
-        
-        issues = []
-        confidence = 1.0
-        
-        # Source-check: does it cite actual code?
-        if not result.get("cited_files"):
-            issues.append("No source citations found")
-            confidence *= 0.7
-        
-        # Coherence: does it make sense?
-        body = result.get("body", "")
-        if not body or len(body) < 20:
-            issues.append("Output suspiciously short or empty")
-            confidence *= 0.5
-        
-        # Completeness: did it answer the full question?
-        if result.get("truncated"):
-            issues.append("Output was truncated")
-            confidence *= 0.8
-        
-        return ValidationReport(
-            valid=len(issues) == 0 or confidence >= 0.7,
-            confidence=confidence,
-            issues=issues,
-        )
-
-
-# ── State Store ──────────────────────────────────────────────────────────────
 
 class StateStore:
     """
@@ -381,7 +339,6 @@ class T0Orchestrator:
         self.t3_timeout = t3_timeout
         self.state = state_store or StateStore()
         self.classifier = TaskClassifier()
-        self.validator = ResultValidator()
     
     def review_pr(self, profile: TaskProfile, mode: str = "parallel") -> dict:
         """
@@ -406,10 +363,7 @@ class T0Orchestrator:
             # T2 first — always generate TL;DR (quick, cheap)
             t2_result = self._dispatch_t2(profile)
             
-            if mode == "parallel":
-                results = self._parallel_review(profile, t2_result)
-            else:
-                results = self._serial_review(profile, t2_result)
+            results = self._parallel_review(profile, t2_result)
             
             # Post unified comment
             unified = self._synthesize(results, profile)
@@ -475,41 +429,7 @@ class T0Orchestrator:
         
         return results
     
-    def _serial_review(self, profile: TaskProfile, t2_result: dict) -> dict:
-        """Dispatch tier-by-tier, verify before escalating (verification)."""
-        results = {"t2": t2_result}
-        
-        # T1 next (multi-file analysis) — non-blocking
-        if profile.needs_t1:
-            t1_result = self._dispatch_t1(profile)
-            report = self.validator.validate(t1_result)
-            results["t1"] = t1_result
-            
-            if report.confidence >= 0.7:
-                return results
-        
-        # T3 visual (most expensive)
-        if profile.needs_t3_visual:
-            try:
-                results["t3_visual"] = self._dispatch_t3_visual(profile)
-            except Exception:
-                results["t3_visual"] = {
-                    "status": "error",
-                    "body": "⏰ Visual evidence failed",
-                }
-        
-        # T3 arch (if architecture changed)
-        if profile.needs_t3_arch:
-            try:
-                results["t3_arch"] = self._dispatch_t3_arch(profile)
-            except Exception:
-                results["t3_arch"] = {
-                    "status": "error",
-                    "body": "⏰ Architecture diagram failed",
-                }
-        
-        return results
-    
+
     def _dispatch_t2(self, profile: TaskProfile) -> dict:
         """T2: Quick TL;DR via companion (cheap, always runs)."""
         if not self.companion:

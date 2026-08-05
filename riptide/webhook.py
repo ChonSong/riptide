@@ -26,7 +26,8 @@ from fastapi import FastAPI, Request, Response, HTTPException
 from pydantic import BaseModel
 
 from .github_app import verify_webhook_signature, GitHubAppClient
-from .orchestrator import T0Orchestrator, TaskClassifier, StateStore
+from .orchestrator import T0Orchestrator, TaskClassifier
+from .state import StateStore
 from .labeler import Labeler
 
 # Companion is optional — silently unavailable if RIPTIDE_COMPANION_REPOS is unset

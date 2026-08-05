@@ -4,7 +4,7 @@ Tests for review pipeline classification and skill selection.
 """
 
 import pytest
-from riptide.review_pipeline import (
+from riptide.deepthink import (
     ReviewDepth,
     classify_review_depth,
     select_skills,
