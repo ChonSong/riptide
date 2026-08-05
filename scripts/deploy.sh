@@ -30,7 +30,9 @@ trap 'exec 200>&-' EXIT
 
 
 # ── 1. Pull latest main ─────────────────────────────────────────────────────
-log "Pulling latest origin/${DEPLOY_BRANCH}..."
+# Auto-deploy script — pulls latest, restarts service, verifies.
+# Runs under systemd-run --scope (not --collect) so the scope
+# is cleaned up automatically after deploy completes.
 if ! git pull origin "$DEPLOY_BRANCH" --ff-only >> "$LOG_FILE" 2>&1; then
     log "ERROR: git pull failed"
     exit 1
