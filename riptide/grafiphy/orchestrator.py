@@ -10,6 +10,7 @@ Adds:
     - suggestions: inline review suggestions from Bot 2
 """
 import json
+import logging
 import os
 import subprocess
 import tempfile
@@ -18,6 +19,8 @@ from pathlib import Path
 from typing import Optional
 
 from riptide.grafiphy.excalidraw_renderer import render_review, upload_excalidraw
+
+log = logging.getLogger("riptide.grafiphy.orchestrator")
 
 # ── Constants ──────────────────────────────────────────────────────
 GRAFIPHY_DIR = Path(__file__).parent
@@ -40,6 +43,8 @@ def pre_generate_diagram(data: dict, pr_metadata: dict) -> Optional[str]:
     Returns:
         Shareable excalidraw.com URL, or None.
     """
+    import time
+    start = time.monotonic()
     god_nodes = data.get("god_nodes", [])
     communities = data.get("communities", [])
 
@@ -57,25 +62,30 @@ def pre_generate_diagram(data: dict, pr_metadata: dict) -> Optional[str]:
         ],
     }
 
-    output_dir = Path(tempfile.mkdtemp(prefix=f"riptide-pr{pr_metadata.get('number')}-pre-"))
-    excalidraw_path = output_dir / "diagram.excalidraw"
+    # Use TemporaryDirectory so cleanup happens automatically on success/failure
+    with tempfile.TemporaryDirectory(prefix=f"riptide-pr{pr_metadata.get('number')}-pre-") as tmp_dir:
+        excalidraw_path = Path(tmp_dir) / "diagram.excalidraw"
 
-    try:
-        render_review(
-            pr_data={
-                "number": pr_metadata.get("number", 0),
-                "title": pr_metadata.get("title", ""),
-                "repo": f"{pr_metadata.get('owner')}/{pr_metadata.get('repo')}",
-                "author": pr_metadata.get("author", ""),
-                "loc": pr_metadata.get("total_loc", 0),
-            },
-            graph_data=graph_data,
-            output_path=str(excalidraw_path),
-        )
-        return upload_excalidraw(str(excalidraw_path))
-    except Exception as e:
-        print(f"WARNING: Pre-generate diagram failed: {e}")
-        return None
+        try:
+            render_review(
+                pr_data={
+                    "number": pr_metadata.get("number", 0),
+                    "title": pr_metadata.get("title", ""),
+                    "repo": f"{pr_metadata.get('owner')}/{pr_metadata.get('repo')}",
+                    "author": pr_metadata.get("author", ""),
+                    "loc": pr_metadata.get("total_loc", 0),
+                },
+                graph_data=graph_data,
+                output_path=str(excalidraw_path),
+            )
+            url = upload_excalidraw(str(excalidraw_path))
+            elapsed = time.monotonic() - start
+            log.info(f"Pre-generated diagram for PR #{pr_metadata.get('number')} in {elapsed:.2f}s")
+            return url
+        except Exception as e:
+            elapsed = time.monotonic() - start
+            log.warning(f"Pre-generate diagram failed after {elapsed:.2f}s: {e}")
+            return None
 
 
 def _run_graphify(args: list[str], cwd: str = None, timeout: int = 30) -> tuple[str, str]:

@@ -106,19 +106,27 @@ class StateStore:
                 pending_response TEXT
             )"""
         )
-        # v3: structured flag for spawned fixes (replaces fragile LIKE '%"spawned"%' search)
+        # v3: structured flag for spawned fixes (replaces fragile LIKE '%"spawned"'%' search)
         if version < 3:
-            conn.execute(
-                "ALTER TABLE processed_comments ADD COLUMN spawned INTEGER NOT NULL DEFAULT 0"
-            )
+            try:
+                conn.execute(
+                    "ALTER TABLE processed_comments ADD COLUMN spawned INTEGER NOT NULL DEFAULT 0"
+                )
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e):
+                    raise
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_processed_comments_spawned ON processed_comments (spawned)"
             )
         # v4: pr_key column for exact lookup of spawned fixes per PR
         if version < 4:
-            conn.execute(
-                "ALTER TABLE processed_comments ADD COLUMN pr_key TEXT"
-            )
+            try:
+                conn.execute(
+                    "ALTER TABLE processed_comments ADD COLUMN pr_key TEXT"
+                )
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e):
+                    raise
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_processed_comments_pr_key ON processed_comments (pr_key)"
             )
@@ -205,7 +213,11 @@ class StateStore:
                 (job_id, pr_number, tier, time.time(), escaped, cutoff),
             )
             conn.commit()
-            return conn.total_changes > 0
+            # Use changes() to deterministically detect whether this INSERT added a row.
+            # conn.total_changes is cumulative across the connection and can give
+            # false positives; changes() returns rows modified by the last statement only.
+            row_count = conn.execute("SELECT changes()").fetchone()[0]
+            return row_count > 0
         except Exception:
             conn.rollback()
             raise

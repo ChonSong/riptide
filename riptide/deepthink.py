@@ -258,17 +258,25 @@ def _spawn_deepthink(
         log.info(f"{owner}/{repo}#{pr_number} classified as {depth.value}, skills={skills}")
 
         # Pre-generate Excalidraw diagram in Python (deterministic, no LLM needed)
+        # Run in background thread with timeout to avoid blocking webhook path
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError
         diagram_url = None
-        try:
+        def _gen_diagram():
             from riptide.grafiphy.orchestrator import pre_generate_diagram
-            diagram_url = pre_generate_diagram(data, dict(
+            return pre_generate_diagram(data, dict(
                 owner=owner, repo=repo, number=pr_number,
                 title=pr_title, author=pr_author, total_loc=total_loc,
             ))
-            if diagram_url:
-                log.info(f"Pre-generated diagram for {owner}/{repo}#{pr_number}: {diagram_url}")
-        except Exception as e:
-            log.warning(f"Pre-generate diagram failed (non-fatal): {e}")
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_gen_diagram)
+            try:
+                diagram_url = future.result(timeout=30)
+                if diagram_url:
+                    log.info(f"Pre-generated diagram for {owner}/{repo}#{pr_number}: {diagram_url}")
+            except TimeoutError:
+                log.warning(f"Pre-generate diagram timed out after 30s for {owner}/{repo}#{pr_number}")
+            except Exception as e:
+                log.warning(f"Pre-generate diagram failed (non-fatal): {e}")
 
         prompt = _build_orchestrator_prompt(
             owner=owner,
