@@ -1,48 +1,37 @@
-# riptide/orchestrator.py
+#!/usr/bin/env python3
 """
-T0 Orchestrator: classify PR tasks, dispatch to tiers, validate results.
+orchestrator.py — Multi-tier review orchestration (T0 dispatcher).
 
-Modes:
-  "parallel" — dispatch T1 + T3 simultaneously (production, fast)
-  "serial"   — dispatch tier-by-tier, verify before escalating (verification)
+Top-level dispatcher that classifies a PR and dispatches to review tiers
+(T1 quick scan, T2 companion TL;DR, T3 visual/architectural deep-dive).
 
-Architecture:
-  T0 (orchestrator) classifies PR → dispatches to T1/T2/T3 tiers
-  T1 = deepthink (Hermes cron, multi-file analysis) — on-demand via _spawn_deepthink
-  T2 = companion quick summary (TL;DR for small PRs)
-  T3 visual = proofshot (UI evidence capture)
-
-Concurrency:
-  - Class-level semaphore caps concurrent T0 reviews (default: 3)
-  - SQLite WAL mode for concurrent reads/writes
-  - Non-blocking T1 dispatch via asyncio.create_subprocess_exec
+Uses riptide.state.StateStore for job tracking and dedup.
 """
 
-import os
-import time
-import sqlite3
-import asyncio
-import threading
+from __future__ import annotations
+
 import logging
-import subprocess
+import os
+import threading
+import time
 from pathlib import Path
 from typing import Optional
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+
+from riptide.state import StateStore
 
 log = logging.getLogger("riptide.orchestrator")
 
 # ── Concurrency limits ───────────────────────────────────────────────────────
 
-# Max concurrent T0 reviews (prevents Ollama flooding + thread explosion)
 _T0_SEMAPHORE = threading.Semaphore(int(os.environ.get("RIPTIDE_T0_MAX_CONCURRENT", "3")))
-# Max retries for posting a comment
 _MAX_COMMENT_RETRIES = 3
-# GitHub comment length limit
 _MAX_COMMENT_LENGTH = 60000
 
 
 # ── Task Classification ──────────────────────────────────────────────────────
+
 
 @dataclass
 class TaskProfile:
@@ -109,257 +98,7 @@ class TaskClassifier:
         ]
 
 
-# ── Result Validation ────────────────────────────────────────────────────────
-
-@dataclass
-class ValidationReport:
-    valid: bool
-    confidence: float
-    issues: list
-
-
-class ResultValidator:
-    """Validate subagent results before T0 uses them."""
-    
-    def validate(self, result: Optional[dict] = None) -> ValidationReport:
-        if not result:
-            return ValidationReport(valid=False, confidence=0.0, issues=["Empty result"])
-        
-        issues = []
-        confidence = 1.0
-        
-        # Source-check: does it cite actual code?
-        if not result.get("cited_files"):
-            issues.append("No source citations found")
-            confidence *= 0.7
-        
-        # Coherence: does it make sense?
-        body = result.get("body", "")
-        if not body or len(body) < 20:
-            issues.append("Output suspiciously short or empty")
-            confidence *= 0.5
-        
-        # Completeness: did it answer the full question?
-        if result.get("truncated"):
-            issues.append("Output was truncated")
-            confidence *= 0.8
-        
-        return ValidationReport(
-            valid=len(issues) == 0 or confidence >= 0.7,
-            confidence=confidence,
-            issues=issues,
-        )
-
-
-# ── State Store ──────────────────────────────────────────────────────────────
-
-class StateStore:
-    """
-    SQLite-backed state for tracking parallel job completion and dedup.
-    
-    Uses WAL mode for concurrent reads/writes and a single shared connection
-    per thread to avoid "database is locked" errors.
-    """
-    
-    def __init__(self, db_path: str = "/tmp/riptide_state.db"):
-        self.db_path = db_path
-        self._local = threading.local()
-        self._init_db()
-    
-    @property
-    def _conn(self):
-        if not hasattr(self._local, "conn"):
-            self._local.conn = sqlite3.connect(self.db_path, timeout=30)
-            self._local.conn.execute("PRAGMA journal_mode=WAL")
-            self._local.conn.execute("PRAGMA busy_timeout=5000")
-        return self._local.conn
-    
-    def _init_db(self):
-        conn = sqlite3.connect(self.db_path)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS jobs (
-                id TEXT PRIMARY KEY,
-                pr_number INTEGER,
-                tier TEXT,
-                status TEXT,
-                created_at REAL,
-                completed_at REAL
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS deliveries (
-                delivery_id TEXT PRIMARY KEY,
-                received_at REAL
-            )
-        """)
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_jobs_pr_status
-            ON jobs (pr_number, status)
-        """)
-        conn.commit()
-        conn.close()
-    
-    def reserve_delivery(self, delivery_id: str) -> bool:
-        """Try to reserve a delivery ID. Returns False if already processed."""
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        try:
-            conn.execute(
-                "INSERT INTO deliveries (delivery_id, received_at) VALUES (?, ?)",
-                (delivery_id, time.time()),
-            )
-            conn.commit()
-            return True
-        except sqlite3.IntegrityError:
-            return False
-        finally:
-            conn.close()
-    
-    def create_job(self, job_id: str, pr_number: int, tier: str):
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        try:
-            conn.execute(
-                "INSERT OR IGNORE INTO jobs (id, pr_number, tier, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
-                (job_id, pr_number, tier, time.time()),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-    
-    def mark_complete(self, job_id: str):
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        try:
-            conn.execute(
-                "UPDATE jobs SET status='complete', completed_at=? WHERE id=?",
-                (time.time(), job_id),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-    @staticmethod
-    def _escape_like(pattern: str) -> str:
-        """Escape SQLite LIKE wildcards (% and _) in a prefix string."""
-        return pattern.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-    def has_pending_job(self, name_prefix: str) -> bool:
-        """Check if any pending job matches this owner/repo/pr prefix.
-
-        Uses LIKE prefix match on job id (format: riptide-review-{owner}-{repo}-{pr_number}-...)
-        and ignores rows older than 2 hours (TTL) to avoid blocking on crashed sessions.
-        """
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        try:
-            cutoff = time.time() - 7200  # 2-hour TTL
-            escaped = f"{self._escape_like(name_prefix)}-%"
-            row = conn.execute(
-                "SELECT COUNT(*) FROM jobs WHERE id LIKE ? ESCAPE '\\' AND status='pending' AND created_at > ?",
-                (escaped, cutoff),
-            ).fetchone()
-            return row[0] > 0
-        finally:
-            conn.close()
-
-    def reserve_job(self, job_id: str, pr_number: int, tier: str, name_prefix: str) -> bool:
-        """Atomically check for existing pending job and reserve a new pending row.
-
-        Uses a single conditional INSERT to avoid TOCTOU race between check and insert.
-        Uses BEGIN IMMEDIATE to acquire a write lock immediately, preventing concurrent
-        transactions from creating duplicate reservations.
-        Returns True if reservation was created, False if already pending.
-
-        Args:
-            job_id: Unique job identifier (e.g., riptide-review-owner-repo-42-sha-time)
-            pr_number: PR number
-            tier: Job tier (e.g., "t1")
-            name_prefix: Prefix for matching (e.g., riptide-review-owner-repo-42)
-        """
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        try:
-            # BEGIN IMMEDIATE: acquire write lock now to prevent concurrent reservations
-            conn.execute("BEGIN IMMEDIATE")
-            cutoff = time.time() - 7200  # 2-hour TTL
-            escaped = f"{self._escape_like(name_prefix)}-%"
-            # Atomically insert only if no matching pending job exists
-            conn.execute(
-                """INSERT INTO jobs (id, pr_number, tier, status, created_at)
-                   SELECT ?, ?, ?, 'pending', ?
-                   WHERE NOT EXISTS (
-                       SELECT 1 FROM jobs WHERE id LIKE ? ESCAPE '\\' AND status='pending' AND created_at > ?
-                   )""",
-                (job_id, pr_number, tier, time.time(), escaped, cutoff),
-            )
-            conn.commit()
-            return conn.total_changes > 0
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
-
-    def cleanup_stale_pending(self, max_age_seconds: int = 7200):
-        """Mark stale pending jobs as failed (e.g., crashed Hermes sessions).
-
-        This prevents stale rows from permanently blocking _spawn_deepthink
-        from returning True for a PR.
-        """
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        try:
-            cutoff = time.time() - max_age_seconds
-            conn.execute(
-                "UPDATE jobs SET status='failed', completed_at=? WHERE status='pending' AND created_at < ?",
-                (time.time(), cutoff),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-    def get_job_status(self, pr_number: int) -> Optional[dict]:
-        """Get the latest job status for a PR (for cross-session awareness)."""
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        try:
-            row = conn.execute(
-                "SELECT id, tier, status, created_at, completed_at FROM jobs "
-                "WHERE pr_number=? ORDER BY created_at DESC LIMIT 1",
-                (pr_number,),
-            ).fetchone()
-            if row:
-                return {
-                    "id": row[0],
-                    "tier": row[1],
-                    "status": row[2],
-                    "created_at": row[3],
-                    "completed_at": row[4],
-                }
-            return None
-        finally:
-            conn.close()
-    def mark_failed(self, job_id: str):
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        try:
-            conn.execute(
-                "UPDATE jobs SET status='failed', completed_at=? WHERE id=?",
-                (time.time(), job_id),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+# ── T0 Orchestrator ─────────────────────────────────────────────────────────
 
 
 class T0Orchestrator:
@@ -379,9 +118,9 @@ class T0Orchestrator:
         self.companion = companion
         self.github = github_client
         self.t3_timeout = t3_timeout
+        # Use the new StateStore from state.py (shared with deepthink/fixer/poller)
         self.state = state_store or StateStore()
         self.classifier = TaskClassifier()
-        self.validator = ResultValidator()
     
     def review_pr(self, profile: TaskProfile, mode: str = "parallel") -> dict:
         """
@@ -394,7 +133,6 @@ class T0Orchestrator:
         Returns:
             dict with unified review result
         """
-        # Concurrency cap: wait if too many T0 reviews are running
         acquired = _T0_SEMAPHORE.acquire(blocking=True, timeout=30)
         if not acquired:
             log.warning(f"T0 semaphore timeout for {profile.owner}/{profile.repo}#{profile.pr_number} — skipping")
@@ -403,15 +141,9 @@ class T0Orchestrator:
         try:
             log.info(f"T0 reviewing {profile.owner}/{profile.repo}#{profile.pr_number} (mode={mode})")
             
-            # T2 first — always generate TL;DR (quick, cheap)
             t2_result = self._dispatch_t2(profile)
+            results = self._parallel_review(profile, t2_result)
             
-            if mode == "parallel":
-                results = self._parallel_review(profile, t2_result)
-            else:
-                results = self._serial_review(profile, t2_result)
-            
-            # Post unified comment
             unified = self._synthesize(results, profile)
             self._post_comment(profile, unified)
             
@@ -423,11 +155,9 @@ class T0Orchestrator:
         """Dispatch T1 + T3 simultaneously (production)."""
         results = {"t2": t2_result}
         
-        # T1 is non-blocking — dispatch without waiting
         if profile.needs_t1:
             job_id = f"{profile.pr_number}-t1"
             self.state.create_job(job_id, profile.pr_number, "t1")
-            # Non-blocking: fire-and-forget via thread
             t1_thread = threading.Thread(
                 target=self._dispatch_t1_async,
                 args=(profile, job_id),
@@ -437,7 +167,6 @@ class T0Orchestrator:
             t1_thread.start()
             results["t1"] = {"status": "dispatched", "tier": "t1", "body": "Deep review dispatched (async)"}
         
-        # T3 visual can be slow — run in thread with timeout
         if profile.needs_t3_visual:
             job_id = f"{profile.pr_number}-t3-visual"
             self.state.create_job(job_id, profile.pr_number, "t3_visual")
@@ -459,13 +188,11 @@ class T0Orchestrator:
                     }
                     self.state.mark_failed(job_id)
         
-        # T3 arch: dispatch via deepthink cron (not a stub anymore)
         if profile.needs_t3_arch:
             job_id = f"{profile.pr_number}-t3-arch"
             self.state.create_job(job_id, profile.pr_number, "t3_arch")
-            # Dispatch to deepthink with excalidraw skill (already has --skill excalidraw)
             t3a_thread = threading.Thread(
-                target=self._dispatch_t1_async,  # Same dispatch path — deepthink handles excalidraw
+                target=self._dispatch_t1_async,
                 args=(profile, job_id),
                 daemon=True,
                 name=f"t3a-{profile.pr_number}",
@@ -475,47 +202,11 @@ class T0Orchestrator:
         
         return results
     
-    def _serial_review(self, profile: TaskProfile, t2_result: dict) -> dict:
-        """Dispatch tier-by-tier, verify before escalating (verification)."""
-        results = {"t2": t2_result}
-        
-        # T1 next (multi-file analysis) — non-blocking
-        if profile.needs_t1:
-            t1_result = self._dispatch_t1(profile)
-            report = self.validator.validate(t1_result)
-            results["t1"] = t1_result
-            
-            if report.confidence >= 0.7:
-                return results
-        
-        # T3 visual (most expensive)
-        if profile.needs_t3_visual:
-            try:
-                results["t3_visual"] = self._dispatch_t3_visual(profile)
-            except Exception:
-                results["t3_visual"] = {
-                    "status": "error",
-                    "body": "⏰ Visual evidence failed",
-                }
-        
-        # T3 arch (if architecture changed)
-        if profile.needs_t3_arch:
-            try:
-                results["t3_arch"] = self._dispatch_t3_arch(profile)
-            except Exception:
-                results["t3_arch"] = {
-                    "status": "error",
-                    "body": "⏰ Architecture diagram failed",
-                }
-        
-        return results
-    
     def _dispatch_t2(self, profile: TaskProfile) -> dict:
         """T2: Quick TL;DR via companion (cheap, always runs)."""
         if not self.companion:
             return {"status": "skipped", "tier": "t2", "body": ""}
         
-        # Always compute emoji + GIF first (cheap, no network)
         from riptide.companion import classify_pr_mood, select_gif
         emoji = "✨"
         gif_url = ""
@@ -525,7 +216,6 @@ class T0Orchestrator:
         except Exception as e:
             log.warning(f"T2 emoji/GIF classification failed: {e}")
         
-        # Generate TL;DR (local Ollama call — may fail if model down)
         tldr = None
         graph_context = None
         try:
@@ -559,12 +249,7 @@ class T0Orchestrator:
             log.warning(f"T1 async dispatch failed for job {job_id}: {e}")
     
     def _dispatch_t1(self, profile: TaskProfile) -> dict:
-        """Dispatch to T1 (deepthink via Hermes cron).
-
-        Uses the refactored _spawn_deepthink which pre-gathers data
-        (diff, files, repo tree, graphify) in Python and builds a small
-        orchestrator prompt that delegates to subagents.
-        """
+        """Dispatch to T1 (deepthink via Hermes cron)."""
         try:
             from riptide.deepthink import _spawn_deepthink
             result = _spawn_deepthink(
@@ -621,7 +306,6 @@ class T0Orchestrator:
     
     def _dispatch_t3_arch(self, profile: TaskProfile) -> dict:
         """Dispatch to T3 (excalidraw architecture diagram via deepthink)."""
-        # Architecture diagram via deepthink's excalidraw skill (already in spawn args)
         try:
             from riptide.deepthink import _spawn_deepthink
             result = _spawn_deepthink(
@@ -644,7 +328,6 @@ class T0Orchestrator:
         parts = []
         t2 = results.get("t2", {})
         
-        # TL;DR header
         emoji = t2.get("emoji", "✨")
         tldr = t2.get("tldr", "")
         author = profile.author
@@ -654,17 +337,14 @@ class T0Orchestrator:
         else:
             parts.append(f"## {emoji} TL;DR\n\n@{author} — reviewing...")
         
-        # GIF reaction
         gif_url = t2.get("gif_url")
         if gif_url:
             parts.append(f"\n\n![{emoji}]({gif_url})")
         
-        # Graph context
         graph_context = t2.get("graph_context", {})
         if graph_context and graph_context.get("nodes", 0) > 0:
             parts.append(f"\n\n📊 Blast radius: {graph_context['nodes']} nodes affected")
         
-        # T1 deep review status
         if "t1" in results:
             t1 = results["t1"]
             if t1.get("spawned"):
@@ -672,7 +352,6 @@ class T0Orchestrator:
             elif t1.get("status") == "error":
                 parts.append(f"\n\n⚠️ Deep review: {t1.get('body', 'failed')}")
         
-        # T3 visual evidence
         if "t3_visual" in results:
             t3v = results["t3_visual"]
             if t3v.get("status") == "complete":
@@ -680,16 +359,13 @@ class T0Orchestrator:
             else:
                 parts.append(f"\n\n⚠️ Visual evidence: {t3v.get('body', 'not available')}")
         
-        # Bot 2 status footer
         if self.companion:
             bot2_status = self.companion._get_bot2_status(profile.owner, profile.repo, profile.pr_number)
             if bot2_status:
                 parts.append(f"\n\n---\n{bot2_status}")
         
-        # Sign-off
         parts.append("\n\n---\n_Reviewed by Riptide T0 · `@riptide-bot review` for re-review_")
         
-        # Enforce comment length limit
         body = "\n".join(parts)
         if len(body) > _MAX_COMMENT_LENGTH:
             body = body[:_MAX_COMMENT_LENGTH - 100] + "\n\n... (truncated)"
@@ -723,6 +399,6 @@ class T0Orchestrator:
             except Exception as e:
                 log.warning(f"Comment post attempt {attempt}/{_MAX_COMMENT_RETRIES} failed: {e}")
                 if attempt < _MAX_COMMENT_RETRIES:
-                    time.sleep(2 * attempt)  # Exponential backoff
+                    time.sleep(2 * attempt)
         
         log.error(f"Failed to post comment after {_MAX_COMMENT_RETRIES} attempts")

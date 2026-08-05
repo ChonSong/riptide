@@ -50,7 +50,7 @@ class TestSpawnDeepthink:
 
     def test_spawn_builds_correct_command(self, mock_hermes_cron):
         with patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
-             patch("riptide.orchestrator.StateStore") as mock_state:
+             patch("riptide.state.StateStore") as mock_state:
             mock_state.return_value.reserve_job.return_value = True
             _spawn_deepthink(
                 owner="ChonSong",
@@ -88,7 +88,8 @@ class TestSpawnDeepthink:
         with patch("subprocess.run", return_value=self._success_result()) as mock_run, \
              patch("riptide.deepthink._is_cron_available", return_value=True), \
              patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
-             patch("riptide.orchestrator.StateStore") as mock_state:
+             patch("riptide.grafiphy.orchestrator.pre_generate_diagram", return_value=None), \
+             patch("riptide.state.StateStore") as mock_state:
             mock_state.return_value.reserve_job.return_value = True
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
             assert result is True
@@ -99,7 +100,8 @@ class TestSpawnDeepthink:
              patch("time.sleep") as mock_sleep, \
              patch("riptide.deepthink._is_cron_available", return_value=True), \
              patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
-             patch("riptide.orchestrator.StateStore") as mock_state:
+             patch("riptide.grafiphy.orchestrator.pre_generate_diagram", return_value=None), \
+             patch("riptide.state.StateStore") as mock_state:
             mock_state.return_value.reserve_job.return_value = True
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
             assert result is False
@@ -110,7 +112,8 @@ class TestSpawnDeepthink:
              patch("time.sleep") as mock_sleep, \
              patch("riptide.deepthink._is_cron_available", return_value=True), \
              patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
-             patch("riptide.orchestrator.StateStore") as mock_state:
+             patch("riptide.grafiphy.orchestrator.pre_generate_diagram", return_value=None), \
+             patch("riptide.state.StateStore") as mock_state:
             mock_state.return_value.reserve_job.return_value = True
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
             assert result is False
@@ -120,7 +123,7 @@ class TestSpawnDeepthink:
         with patch("subprocess.run", return_value=self._success_result()) as mock_hermes_cron, \
              patch("riptide.deepthink._is_cron_available", return_value=True), \
              patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
-             patch("riptide.orchestrator.StateStore") as mock_state:
+             patch("riptide.state.StateStore") as mock_state:
             mock_state.return_value.reserve_job.return_value = True
             _spawn_deepthink(
                 "ChonSong", "riptide", 42, "feat: important change", "test-author", 250, "abc123def456789",
@@ -138,7 +141,7 @@ class TestSpawnDeepthink:
             assert "250" in prompt
 
     def test_skips_when_review_already_pending(self):
-        with patch("riptide.orchestrator.StateStore") as mock_state:
+        with patch("riptide.state.StateStore") as mock_state:
             mock_state.return_value.reserve_job.return_value = False
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
             assert result is False
@@ -170,8 +173,7 @@ class TestSpawnDeepthinkClassification:
         with patch("subprocess.run", return_value=self._success_result()) as mock_run, \
              patch("riptide.deepthink._is_cron_available", return_value=True), \
              patch("riptide.deepthink._gather_review_data", return_value=trivial_data), \
-             patch("riptide.grafiphy.orchestrator.pre_generate_diagram", return_value=None, create=True), \
-             patch("riptide.orchestrator.StateStore") as mock_state:
+             patch("riptide.state.StateStore") as mock_state:
             mock_state.return_value.reserve_job.return_value = True
             _spawn_deepthink("ChonSong", "riptide", 42, "docs: fix typo", "user", 4, "abc123")
 
@@ -196,8 +198,7 @@ class TestSpawnDeepthinkClassification:
         with patch("subprocess.run", return_value=self._success_result()) as mock_run, \
              patch("riptide.deepthink._is_cron_available", return_value=True), \
              patch("riptide.deepthink._gather_review_data", return_value=arch_data), \
-             patch("riptide.grafiphy.orchestrator.pre_generate_diagram", return_value=None, create=True), \
-             patch("riptide.orchestrator.StateStore") as mock_state:
+             patch("riptide.state.StateStore") as mock_state:
             mock_state.return_value.reserve_job.return_value = True
             _spawn_deepthink("ChonSong", "riptide", 42, "feat: big refactor", "user", 420, "abc123")
 
@@ -498,4 +499,21 @@ class TestBuildOrchestratorPrompt:
         )
         assert "Spawn a subagent" in prompt
         assert "assemble_review" in prompt
-        assert "DEEPTHINK" in prompt or "custom:LongCat-2.0" in prompt
+        assert "LongCat-2.0" in prompt or "DEEPTHINK" in prompt
+
+    def test_includes_diagram_url_when_provided(self):
+        data = {
+            "files_changed": [],
+            "diff_raw": "",
+            "repo_tree": [],
+            "god_nodes": [],
+            "communities": [],
+            "graph_context": {},
+        }
+        prompt = _build_orchestrator_prompt(
+            "ChonSong", "riptide", 42, "feat: test", "author", 300, "abc123", data,
+            diagram_url="https://excalidraw.com/#json=abc123"
+        )
+        assert "Pre-generated Architecture Diagram" in prompt
+        assert "https://excalidraw.com/#json=abc123" in prompt
+        assert "Step 4: Architecture Diagram" in prompt

@@ -55,6 +55,73 @@ MIN_LOC_CHANGED = int(os.environ.get("RIPTIDE_MIN_LOC_CHANGED", "100"))
 # The riptide profile runs LongCat-2.0 via the custom LongCat provider.
 DEEPTHINK_MODEL = os.environ.get("RIPTIDE_DEEPTHINK_MODEL", "LongCat-2.0")
 DEEPTHINK_PROVIDER = os.environ.get("RIPTIDE_DEEPTHINK_PROVIDER", "longcat")
+from enum import Enum
+
+
+class ReviewDepth(Enum):
+    """Determines how much LLM analysis a PR needs."""
+    TRIVIAL = "trivial"         # <10 LOC, no logic changes → auto-approve
+    INLINE_ONLY = "inline_only" # Single file, <50 LOC → minimal review
+    STANDARD = "standard"       # Normal PR → full review
+    ARCH = "arch"              # Multi-file, >200 LOC, high graphify impact → +brooks-lint
+
+
+def classify_review_depth(data: dict) -> ReviewDepth:
+    """
+    Rule-based classification of PR depth from pre-gathered data.
+
+    Args:
+        data: Output from _gather_review_data() with god_nodes, communities, files_changed, etc.
+
+    Returns:
+        ReviewDepth enum value
+    """
+    total_loc = sum(
+        f.get("additions", 0) + f.get("deletions", 0) for f in data.get("files_changed", [])
+    )
+    files_changed = data.get("files_changed", [])
+    god_nodes = data.get("god_nodes", [])
+
+    # TRIVIAL: tiny change, no logic files
+    logic_extensions = ('.py', '.js', '.ts', '.go', '.rs', '.java', '.c', '.cpp', '.h')
+    has_logic = any(
+        any(f.get("filename", "").endswith(ext) for ext in logic_extensions)
+        for f in files_changed
+    )
+    if total_loc < 10 and not has_logic:
+        return ReviewDepth.TRIVIAL
+
+    # INLINE_ONLY: single file, small change
+    if len(files_changed) == 1 and total_loc < 50:
+        return ReviewDepth.INLINE_ONLY
+
+    # ARCH: multi-file OR large OR touches high-impact god nodes
+    if len(files_changed) > 5 or total_loc > 200:
+        if any(g.get("edges", 0) > 20 for g in god_nodes):
+            return ReviewDepth.ARCH
+
+    return ReviewDepth.STANDARD
+
+
+def select_skills(depth: ReviewDepth) -> list[str]:
+    """
+    Select which skills to load based on review depth.
+
+    Args:
+        depth: ReviewDepth classification
+
+    Returns:
+        List of skill names to pass as --skill flags
+    """
+    if depth == ReviewDepth.TRIVIAL:
+        return []
+    elif depth == ReviewDepth.INLINE_ONLY:
+        return ["deep-think", "github-pr-lifecycle"]
+    elif depth == ReviewDepth.STANDARD:
+        return ["deep-think", "github-pr-lifecycle", "excalidraw"]
+    elif depth == ReviewDepth.ARCH:
+        return ["deep-think", "github-pr-lifecycle", "excalidraw", "brooks-lint"]
+    return ["deep-think"]
 
 STATE_FILE = Path(
     os.environ.get("RIPTIDE_DATA_DIR", "/tmp/riptide-data")
@@ -173,7 +240,7 @@ def _spawn_deepthink(
     run_at = (datetime.now() + timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%S")
 
     # Cross-session awareness: clean up stale jobs, then atomically reserve
-    from riptide.orchestrator import StateStore
+    from riptide.state import StateStore
     state = StateStore()
     state.cleanup_stale_pending()
     job_id = f"{name}-{head_sha[:12]}-{uuid.uuid4().hex[:12]}"
@@ -186,10 +253,30 @@ def _spawn_deepthink(
         data = _gather_review_data(owner, repo, pr_number, head_sha)
 
         # Classify PR depth to determine skill loading
-        from riptide.review_pipeline import classify_review_depth, select_skills
         depth = classify_review_depth(data)
         skills = select_skills(depth)
         log.info(f"{owner}/{repo}#{pr_number} classified as {depth.value}, skills={skills}")
+
+        # Pre-generate Excalidraw diagram in Python (deterministic, no LLM needed)
+        # Run in background thread with timeout to avoid blocking webhook path
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError
+        diagram_url = None
+        def _gen_diagram():
+            from riptide.grafiphy.orchestrator import pre_generate_diagram
+            return pre_generate_diagram(data, dict(
+                owner=owner, repo=repo, number=pr_number,
+                title=pr_title, author=pr_author, total_loc=total_loc,
+            ))
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_gen_diagram)
+            try:
+                diagram_url = future.result(timeout=30)
+                if diagram_url:
+                    log.info(f"Pre-generated diagram for {owner}/{repo}#{pr_number}: {diagram_url}")
+            except TimeoutError:
+                log.warning(f"Pre-generate diagram timed out after 30s for {owner}/{repo}#{pr_number}")
+            except Exception as e:
+                log.warning(f"Pre-generate diagram failed (non-fatal): {e}")
 
         prompt = _build_orchestrator_prompt(
             owner=owner,
@@ -200,6 +287,7 @@ def _spawn_deepthink(
             total_loc=total_loc,
             head_sha=head_sha,
             data=data,
+            diagram_url=diagram_url,
         )
     except Exception as e:
         state.mark_failed(job_id)
@@ -404,11 +492,14 @@ def _build_orchestrator_prompt(
     total_loc: int,
     head_sha: str,
     data: dict,
+    diagram_url: Optional[str] = None,
 ) -> str:
-    """Build a small orchestrator prompt that delegates to subagents.
+    """
+    Build a small orchestrator prompt that delegates to subagents.
 
     The prompt is ~40 lines instead of ~280 lines.
     All data is pre-gathered in Python and passed as structured context.
+    If diagram_url is provided, the LLM references it instead of generating.
     """
     # Format files changed
     files_str = "\n".join(
@@ -434,6 +525,9 @@ def _build_orchestrator_prompt(
     if not graph_str:
         graph_str = "(No graphify analysis available)"
 
+    diagram_section = f"\n## Pre-generated Architecture Diagram\n[View Diagram]({diagram_url})\n" if diagram_url else ""
+    diagram_step = "\n### Step 4: Architecture Diagram\nThe architecture diagram is pre-generated and embedded above. Reference it in your Code Analysis section.\n" if diagram_url else ""
+
     return f"""PR #{pr_number} in {owner}/{repo} — {total_loc} LOC changed.
 
 ## Context (pre-gathered)
@@ -456,7 +550,7 @@ def _build_orchestrator_prompt(
 
 ### Graphify Analysis
 {graph_str}
-
+{diagram_section}
 ## Your Task: Orchestrate Review
 
 You are a senior engineer. Delegate review tasks to subagents, then synthesize.
@@ -466,11 +560,11 @@ Spawn a subagent with:
 - Role: Code reviewer
 - Task: Call `skill_view('deep-think')` first, then analyze the PR diff, post 1-3 inline review comments with GitHub suggestion blocks
 - Output: JSON list of findings [{{file, line, severity, title, detail}}]
+Severity must be one of: critical, warning, suggestion, info, approved.
 
 ### Step 2: Write Findings JSON
 After the inline review subagent finishes, write its findings to /tmp/findings.json as JSON:
 [{{severity, title, detail, file, line}}]
-Severity must be one of: critical, warning, suggestion, info, approved.
 
 ### Step 3: Assemble + Post Review (deterministic)
 Run the assembly script — it validates, formats, and posts. Do NOT hand-format the review.
@@ -490,7 +584,7 @@ The script appends the model/provider to the sign-off deterministically.
 - Reference inline comments in the summary
 - The Code Analysis and Explanation sections are REQUIRED — never omit them
 - If a section has nothing to report, say so explicitly ("No significant findings") rather than omitting it
-
+{diagram_step}
 REPO PATH: ~/workspace/{repo}/
 """
 

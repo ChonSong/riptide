@@ -270,7 +270,7 @@ def _handle_fix(client, match: dict, conn: sqlite3.Connection):
     # (Non-installed/external repos have no webhook path, so this is a no-op
     # for the poller's primary use case.)
     try:
-        from riptide.orchestrator import StateStore
+        from riptide.state import StateStore
         state = StateStore()
         name_prefix = f"riptide-fix-{owner}-{repo}-{pr_number}"
         if state.has_pending_job(name_prefix):
