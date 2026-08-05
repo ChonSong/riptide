@@ -4,11 +4,7 @@ Tests for review pipeline classification and skill selection.
 """
 
 import pytest
-from riptide.review_pipeline import (
-    ReviewDepth,
-    classify_review_depth,
-    select_skills,
-)
+import riptide.deepthink as _d
 
 
 # ── Classification Tests ────────────────────────────────────────────────────
@@ -31,25 +27,25 @@ class TestClassifyReviewDepth:
         data = self._make_data(
             files=[{"filename": "README.md", "additions": 3, "deletions": 1}],
         )
-        assert classify_review_depth(data) == ReviewDepth.TRIVIAL
+        assert _d.classify_review_depth(data) == _d.ReviewDepth.TRIVIAL
 
     def test_trivial_under_10_loc_no_logic(self):
         data = self._make_data(
             files=[{"filename": "docs/guide.md", "additions": 5, "deletions": 2}],
         )
-        assert classify_review_depth(data) == ReviewDepth.TRIVIAL
+        assert _d.classify_review_depth(data) == _d.ReviewDepth.TRIVIAL
 
     def test_inline_only_single_file_small(self):
         data = self._make_data(
             files=[{"filename": "fix.py", "additions": 15, "deletions": 5}],
         )
-        assert classify_review_depth(data) == ReviewDepth.INLINE_ONLY
+        assert _d.classify_review_depth(data) == _d.ReviewDepth.INLINE_ONLY
 
     def test_inline_only_50_loc_boundary(self):
         data = self._make_data(
             files=[{"filename": "fix.py", "additions": 30, "deletions": 19}],
         )
-        assert classify_review_depth(data) == ReviewDepth.INLINE_ONLY
+        assert _d.classify_review_depth(data) == _d.ReviewDepth.INLINE_ONLY
 
     def test_standard_normal_pr(self):
         data = self._make_data(
@@ -59,7 +55,7 @@ class TestClassifyReviewDepth:
             ],
             god_nodes=[{"name": "a.py", "edges": 10}],
         )
-        assert classify_review_depth(data) == ReviewDepth.STANDARD
+        assert _d.classify_review_depth(data) == _d.ReviewDepth.STANDARD
 
     def test_arch_many_files_high_impact(self):
         data = self._make_data(
@@ -69,14 +65,14 @@ class TestClassifyReviewDepth:
             ],
             god_nodes=[{"name": "core.py", "edges": 25}],
         )
-        assert classify_review_depth(data) == ReviewDepth.ARCH
+        assert _d.classify_review_depth(data) == _d.ReviewDepth.ARCH
 
     def test_arch_large_loc_high_impact(self):
         data = self._make_data(
             files=[{"filename": "big.py", "additions": 250, "deletions": 50}],
             god_nodes=[{"name": "core.py", "edges": 30}],
         )
-        assert classify_review_depth(data) == ReviewDepth.ARCH
+        assert _d.classify_review_depth(data) == _d.ReviewDepth.ARCH
 
     def test_many_files_low_impact_standard(self):
         """Many files but low graphify impact → STANDARD, not ARCH."""
@@ -87,7 +83,7 @@ class TestClassifyReviewDepth:
             ],
             god_nodes=[{"name": "small.py", "edges": 5}],
         )
-        assert classify_review_depth(data) == ReviewDepth.STANDARD
+        assert _d.classify_review_depth(data) == _d.ReviewDepth.STANDARD
 
 
 # ── Skill Selection Tests ───────────────────────────────────────────────────
@@ -97,19 +93,19 @@ class TestSelectSkills:
     """Tests for skill selection based on review depth."""
 
     def test_trivial_no_skills(self):
-        assert select_skills(ReviewDepth.TRIVIAL) == []
+        assert _d.select_skills(_d.ReviewDepth.TRIVIAL) == []
 
     def test_inline_only_skills(self):
-        assert select_skills(ReviewDepth.INLINE_ONLY) == [
+        assert _d.select_skills(_d.ReviewDepth.INLINE_ONLY) == [
             "deep-think", "github-pr-lifecycle"
         ]
 
     def test_standard_skills(self):
-        assert select_skills(ReviewDepth.STANDARD) == [
+        assert _d.select_skills(_d.ReviewDepth.STANDARD) == [
             "deep-think", "github-pr-lifecycle", "excalidraw"
         ]
 
     def test_arch_skills_includes_brooks(self):
-        assert select_skills(ReviewDepth.ARCH) == [
+        assert _d.select_skills(_d.ReviewDepth.ARCH) == [
             "deep-think", "github-pr-lifecycle", "excalidraw", "brooks-lint"
         ]

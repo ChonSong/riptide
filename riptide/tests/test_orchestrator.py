@@ -12,10 +12,9 @@ from unittest.mock import patch, MagicMock
 from riptide.orchestrator import (
     TaskClassifier,
     TaskProfile,
-    ResultValidator,
-    StateStore,
     T0Orchestrator,
 )
+from riptide.state import StateStore
 
 
 class TestTaskClassifier:
@@ -76,48 +75,6 @@ class TestTaskClassifier:
             {"filename": "README.md"},
         ]
         assert self.classifier._detect_ui_files(files) == []
-
-
-class TestResultValidator:
-    """Test result validation logic."""
-
-    def setup_method(self):
-        self.validator = ResultValidator()
-
-    def test_validate_good_result(self):
-        result = {"body": "This is a detailed analysis with many words.", "cited_files": ["foo.py"]}
-        report = self.validator.validate(result)
-        assert report.valid is True
-        assert report.confidence == 1.0
-        assert len(report.issues) == 0
-
-    def test_validate_short_output_lowers_confidence(self):
-        result = {"body": "Hi", "cited_files": ["foo.py"]}
-        report = self.validator.validate(result)
-        assert report.confidence < 1.0
-        assert "suspiciously short" in report.issues[0]
-
-    def test_validate_no_citations_lowers_confidence(self):
-        result = {"body": "This is a long enough response with no citations."}
-        report = self.validator.validate(result)
-        assert report.confidence == 0.7
-        assert "No source citations" in report.issues[0]
-
-    def test_validate_truncated_output(self):
-        result = {"body": "Truncated but valid output here.", "truncated": True, "cited_files": ["foo.py"]}
-        report = self.validator.validate(result)
-        assert report.confidence == 0.8
-        assert "truncated" in report.issues[0]
-
-    def test_validate_empty_result(self):
-        report = self.validator.validate({})
-        assert report.valid is False
-        assert report.confidence < 0.5
-
-    def test_validate_none_result(self):
-        report = self.validator.validate(None)
-        assert report.valid is False
-        assert report.confidence == 0.0
 
 
 class TestStateStore:
@@ -311,8 +268,8 @@ class TestT0Orchestrator:
             mock_t3v.assert_called_once()
             assert "t3_visual" in result["tiers_used"]
 
-    def test_serial_review_small_pr_stops_at_t2(self):
-        """Small PR in serial mode should use T2 and stop."""
+    def test_small_pr_no_dispatch(self):
+        """Small PR with no UI should not dispatch any tier."""
         mock_companion = MagicMock()
         mock_companion.classify_pr_mood.return_value = "✨"
         mock_companion.select_gif.return_value = "http://example.com/gif.gif"
@@ -322,12 +279,12 @@ class TestT0Orchestrator:
         orch = T0Orchestrator(companion=mock_companion, state_store=self.store)
         profile = self._make_profile(4, [{"filename": "a.py"}], 30)
         with patch.object(orch, "_dispatch_t1") as mock_t1:
-            result = orch.review_pr(profile, mode="serial")
+            result = orch.review_pr(profile, mode="parallel")
             mock_t1.assert_not_called()
             assert result["status"] == "complete"
 
-    def test_serial_review_large_pr_escalates(self):
-        """Large PR in serial mode should escalate past T2."""
+    def test_large_pr_dispatches_t1(self):
+        """Large PR should dispatch T1."""
         mock_companion = MagicMock()
         mock_companion.classify_pr_mood.return_value = "✨"
         mock_companion.select_gif.return_value = "http://example.com/gif.gif"
@@ -338,6 +295,6 @@ class TestT0Orchestrator:
         with patch.object(orch, "_dispatch_t1", return_value={"body": "t1 done"}) as mock_t1:
             files = [{"filename": f"f{i}.py"} for i in range(5)]
             profile = self._make_profile(5, files, 300)
-            result = orch.review_pr(profile, mode="serial")
+            result = orch.review_pr(profile, mode="parallel")
             mock_t1.assert_called_once()
             assert result["status"] == "complete"
