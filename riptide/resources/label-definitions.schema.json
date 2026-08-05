@@ -1,0 +1,97 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Riptide Label Definitions",
+  "description": "Canonical label taxonomy for the Riptide labeling engine",
+  "type": "object",
+  "required": ["version", "shared_labels", "repo_components", "classification_rules"],
+  "properties": {
+    "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "shared_labels": {
+      "type": "object",
+      "description": "Labels valid on every repo, organized by dimension",
+      "properties": {
+        "dimensions": {
+          "type": "object",
+          "properties": {
+            "type": { "$ref": "#/definitions/dimension" },
+            "priority": { "$ref": "#/definitions/dimension" },
+            "scope": { "$ref": "#/definitions/dimension" },
+            "status": { "$ref": "#/definitions/dimension" },
+            "area": { "$ref": "#/definitions/dimension" },
+            "sweeper": { "$ref": "#/definitions/dimension" },
+            "bot": { "$ref": "#/definitions/dimension" }
+          }
+        }
+      }
+    },
+    "repo_components": {
+      "type": "object",
+      "properties": {
+        "repos": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "required": ["description", "color", "paths"],
+              "properties": {
+                "description": { "type": "string" },
+                "color": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+                "paths": { "type": "array", "items": { "type": "string" } }
+              }
+            }
+          }
+        }
+      }
+    },
+    "classification_rules": {
+      "type": "object",
+      "properties": {
+        "type": { "type": "array", "items": { "$ref": "#/definitions/rule" } },
+        "priority": { "type": "array", "items": { "$ref": "#/definitions/rule" } },
+        "scope": { "type": "array", "items": { "$ref": "#/definitions/rule" } },
+        "status": { "type": "array", "items": { "$ref": "#/definitions/rule" } },
+        "area": { "type": "array", "items": { "$ref": "#/definitions/rule" } }
+      }
+    },
+    "ai_fallback_config": {
+      "type": "object",
+      "properties": {
+        "model": { "type": "string" },
+        "endpoint": { "type": "string" },
+        "confidence_threshold": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    }
+  },
+  "definitions": {
+    "dimension": {
+      "type": "object",
+      "required": ["description", "labels"],
+      "properties": {
+        "description": { "type": "string" },
+        "color": { "type": "string" },
+        "labels": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["description", "color"],
+            "properties": {
+              "description": { "type": "string" },
+              "color": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" }
+            }
+          }
+        }
+      }
+    },
+    "rule": {
+      "type": "object",
+      "required": ["label"],
+      "properties": {
+        "label": { "type": "string" },
+        "pattern": { "type": "string", "description": "Regex pattern (applied to title+body or classified labels)" },
+        "paths": { "type": "array", "items": { "type": "string" }, "description": "File path glob patterns" },
+        "condition": { "type": "string", "description": "Python expression (e.g., 'loc > 100')" }
+      }
+    }
+  }
+}

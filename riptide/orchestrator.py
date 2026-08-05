@@ -593,7 +593,7 @@ class T0Orchestrator:
             
             result = _run_proofshot_default(
                 profile.pr_number,
-                url=os.environ.get("RIPTIDE_PROOFSHOT_URL", "http://localhost:8788"),
+                url="http://localhost:8788",
                 seed_path=None,
                 output_dir=Path(f"/tmp/proofshot-pr-{profile.owner}-{profile.repo}-{profile.pr_number}"),
             )
