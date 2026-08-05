@@ -1,16 +1,15 @@
 """
-Tests for scripts/deploy.sh — auto-deploy lock + timeout deferral.
+Tests for scripts/deploy.sh — auto-deploy lock + verify.
 
 Validates:
 - Interprocess lock serializes concurrent deploys (second exits cleanly)
-- Timeout defers deploy instead of restarting mid-session
-- pgrep regex correctly matches Hermes processes
+- Deploy proceeds without waiting for sessions (no build step)
+- Service restart + verification works
 """
 
 import os
 import subprocess
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -81,77 +80,28 @@ class TestDeployLock:
         assert "Deploy complete" in log_content or "Deploy started" in log_content
 
 
-class TestPgrepRegex:
-    """Test that pgrep regex correctly identifies Hermes processes."""
+class TestDeployNoWait:
+    """Test that deploy does NOT wait for sessions (no build step)."""
 
-    def test_pgrep_matches_hermes_cron(self):
-        """pgrep -Ef should match 'hermes cron' process pattern."""
-        # The regex "hermes.*(cron|agent)" should match these patterns
-        # We test the regex pattern directly with grep since pgrep needs real processes
-        test_patterns = [
-            "12345 hermes cron run",
-            "12345 hermes agent session",
-            "12345 /usr/bin/hermes cron",
-        ]
-        for pattern in test_patterns:
-            result = subprocess.run(
-                ["grep", "-E", "hermes.*(cron|agent)"],
-                input=pattern,
-                capture_output=True,
-                text=True,
-            )
-            assert result.returncode == 0, f"Should match: {pattern}"
-
-    def test_pgrep_excludes_noise(self):
-        """The regex should NOT match vim, cat, grep, deploy.sh."""
-        noise_patterns = [
-            "12345 vim hermes_config.py",
-            "12345 cat hermes.log",
-            "12345 grep hermes",
-            "12345 bash scripts/deploy.sh",
-        ]
-        for pattern in noise_patterns:
-            result = subprocess.run(
-                ["grep", "-E", "hermes.*(cron|agent)"],
-                input=pattern,
-                capture_output=True,
-                text=True,
-            )
-            assert result.returncode != 0, f"Should NOT match: {pattern}"
-
-
-class TestDeployTimeout:
-    """Test timeout deferral behavior."""
-
-    def test_timeout_defers_deploy(self, tmp_repo):
-        """When sessions timeout, deploy should exit 0 (defer) not crash."""
-        # Mock pgrep to always return sessions by creating a fake hermes process
-        # We'll test the timeout logic by setting a very short timeout
+    def test_deploy_proceeds_without_waiting(self, tmp_repo):
+        """Deploy should complete quickly without waiting for Hermes sessions."""
+        import time
+        log_file = tmp_repo / "deploy.log"
+        start = time.monotonic()
         result = subprocess.run(
-            ["bash", "-c", """
-                set -euo pipefail
-                WAIT_TIMEOUT=2
-                POLL_INTERVAL=1
-                LOG_FILE=$(mktemp)
-                echo "test" > "$LOG_FILE"
-                waited=0
-                while [ $waited -lt $WAIT_TIMEOUT ]; do
-                    running=1  # Simulate always having sessions
-                    if [ "$running" -eq 0 ]; then
-                        break
-                    fi
-                    sleep $POLL_INTERVAL
-                    waited=$((waited + POLL_INTERVAL))
-                done
-                if [ $waited -ge $WAIT_TIMEOUT ]; then
-                    echo "TIMEOUT: deferred"
-                    exit 0
-                fi
-            """],
+            ["bash", str(DEPLOY_SCRIPT)],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=30,
+            cwd=str(tmp_repo),
+            env={**os.environ, "RIPTIDE_DEPLOY_LOCK": str(tmp_repo / "deploy.lock"), "RIPTIDE_DEPLOY_LOG": str(log_file)},
         )
-        # Should exit 0 (deferred)
+        elapsed = time.monotonic() - start
         assert result.returncode == 0
-        assert "TIMEOUT" in result.stdout
+        # Should complete in under 10s (no 300s wait loop)
+        assert elapsed < 10, f"Deploy took {elapsed:.1f}s — likely stuck in wait loop"
+        assert log_file.exists()
+        log_content = log_file.read_text()
+        # Should NOT contain "Waiting for" messages
+        assert "Waiting for" not in log_content
+        assert "Deploy complete" in log_content
