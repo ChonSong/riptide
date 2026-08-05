@@ -1,12 +1,12 @@
 {
   "$schema": "label-definitions.schema.json",
-  "version": "1.0.0",
-  "description": "Canonical label taxonomy for the Riptide labeling bot. All label names, colors, descriptions, and per-repo component mappings.",
-  "created": "2026-07-29",
-  "maintainer": "riptide-labeler (bot 4)",
+  "version": "1.1.0",
+  "description": "Canonical label taxonomy for the Riptide labeling engine. All labels, colors, descriptions, and per-repo component mappings.",
+  "updated": "2026-08-04",
+  "maintainer": "riptide-labeler",
 
   "shared_labels": {
-    "description": "Labels valid on every repo. Dimensions: type/, priority/, scope/, status/, bot/.",
+    "description": "Labels valid on every repo. Dimensions: type/, priority/, scope/, status/, area/, sweeper/, bot/.",
     "dimensions": {
       "type": {
         "description": "Nature of the change or request",
@@ -56,6 +56,37 @@
           "status/reviewed":      { "description": "Has received at least one human review pass", "color": "#D876E3" }
         }
       },
+      "area": {
+        "description": "Cross-cutting concern area",
+        "color": "#c2e0c6",
+        "labels": {
+          "area/auth":         { "description": "Authentication, OAuth, credential pools", "color": "#c2e0c6" },
+          "area/billing":      { "description": "Account usage, credit usage, billing", "color": "#c2e0c6" },
+          "area/compression":  { "description": "Context compression and continuation sessions", "color": "#c2e0c6" },
+          "area/config":       { "description": "Config system, migrations, profiles", "color": "#c2e0c6" },
+          "area/docker":       { "description": "Docker image, Compose, packaging", "color": "#c2e0c6" },
+          "area/memory":       { "description": "Memory subsystem: store, providers, sync", "color": "#c2e0c6" },
+          "area/sessions":     { "description": "Session lifecycle, resume, persistence", "color": "#c2e0c6" },
+          "area/streaming":    { "description": "Streaming responses: gateway delivery, provider wire", "color": "#c2e0c6" },
+          "area/install":      { "description": "Installer, updater, packaging, wheels, doctor", "color": "#c2e0c6" },
+          "area/i18n":         { "description": "Localization, locales, translations", "color": "#c2e0c6" },
+          "area/usage-cost":   { "description": "Token accounting, usage reporting, billing, cost tracking", "color": "#c2e0c6" },
+          "area/labels":       { "description": "Label taxonomy, classification rules, labeler engine", "color": "#c2e0c6" }
+        }
+      },
+      "sweeper": {
+        "description": "Sweeper audit risk classification (cross-cutting)",
+        "color": "#fbca04",
+        "labels": {
+          "sweeper:blast-contained":  { "description": "Blast radius: contained — one narrow path / opt-in / few users", "color": "#0e8a16" },
+          "sweeper:blast-moderate":   { "description": "Blast radius: moderate — a subsystem or single platform", "color": "#bfd4f2" },
+          "sweeper:blast-broad":      { "description": "Blast radius: broad — a core path most sessions hit", "color": "#fbca04" },
+          "sweeper:blast-massive":    { "description": "Blast radius: massive — everyone, every turn (invariant surface)", "color": "#b60205" },
+          "sweeper:risk-automation":  { "description": "Risk: may affect CI, automerge, label sync, or maintainer automation", "color": "#e99695" },
+          "sweeper:risk-caching":     { "description": "Risk: may break/degrade prompt caching or cache-key stability", "color": "#b60205" },
+          "sweeper:risk-compatibility": { "description": "Risk: may break existing users, config, migrations, defaults, or upgrades", "color": "#e99695" }
+        }
+      },
       "bot": {
         "description": "Automation markers — bot-internal, not classification",
         "color": "#E99695",
@@ -76,7 +107,7 @@
         "comp/deepthink":   { "description": "Bot 2: Cron-pumped Hermes deep-think PR reviews", "color": "#BFD4F2", "paths": ["riptide/deepthink.py"] },
         "comp/proofshot":   { "description": "Bot 3: Cron-pumped Playwright visual verification captures", "color": "#BFD4F2", "paths": ["riptide/proofshotter.py", "proofshot.config.json", "proofshot/**"] },
         "comp/diagram":     { "description": "Excalidraw diagram generation, grafiphy integration", "color": "#BFD4F2", "paths": ["riptide/grafiphy/**", "**/excalidraw_*"] },
-        "comp/labeler":     { "description": "Bot 4: Labeling engine — this file, labeler.py, labeler_test.py", "color": "#BFD4F2", "paths": ["riptide/labeler*", "riptide/resources/label-definitions*"] },
+        "comp/labeler":     { "description": "Labeling engine — labeler.py, label-definitions.json", "color": "#BFD4F2", "paths": ["riptide/labeler*", "riptide/resources/label-definitions*"] },
         "comp/infra":       { "description": "Deployment, Docker, Cloudflare tunnel, scripts", "color": "#BFD4F2", "paths": ["Dockerfile", "docker-compose.yml", "start.sh", ".github/**"] }
       },
       "ChonSong/proofshot": {
@@ -96,7 +127,7 @@
         "comp/deploy":       { "description": "Docker, Nix, deployment scripts, CI/CD configs", "color": "#BFD4F2", "paths": ["Dockerfile*", "docker-compose*", "flake*", "docker_init*", "scripts/**"] }
       },
       "NousResearch/hermes-agent": {
-        "comp/agent":      { "description": "Core agent runtime: loop, agent_init, prompt builder, responses endpoint", "color": "#6f42c1", "paths": ["src/hermes_agent/**"] },
+        "comp/agent":      { "description": "Core agent runtime: loop, agent_init, prompt builder", "color": "#6f42c1", "paths": ["src/hermes_agent/**"] },
         "comp/cli":        { "description": "CLI entry point, hermes_cli/, setup wizard", "color": "#6f42c1", "paths": ["src/hermes_cli/**"] },
         "comp/gateway":    { "description": "Gateway runner, session dispatch, delivery", "color": "#6f42c1", "paths": ["src/gateway/**"] },
         "comp/tools":      { "description": "Tool registry, model_tools, toolsets", "color": "#6f42c1", "paths": ["src/tools/**"] },
@@ -130,37 +161,60 @@
   },
 
   "classification_rules": {
-    "description": "Deterministic rules for label assignment. Applied before AI fallback.",
+    "description": "Deterministic rules for label assignment. Applied in order — first match wins per dimension.",
     "type": [
-      { "label": "type/bug",      "rule": "title starts with 'fix:' OR title contains 'bug'|'bugfix'|'hotfix'|'regression' OR issue body contains 'steps to reproduce' (case-insensitive)" },
-      { "label": "type/feature",  "rule": "title starts with 'feat:' OR title contains 'feature'|'add'|'new' (not as prefix of another word)" },
-      { "label": "type/docs",     "rule": "title starts with 'docs:' OR all changed files are .md / .rst / docs/ path" },
-      { "label": "type/refactor", "rule": "title starts with 'refactor:'|'chore:' OR title contains 'restructure'|'reorganize'" },
-      { "label": "type/perf",     "rule": "title starts with 'perf:' OR title contains 'performance'|'optimize'|'speed'|'latency'" },
-      { "label": "type/test",     "rule": "title starts with 'test:' OR all changed files are in test/ or *_test.* / *.test.* or *_spec.*" },
-      { "label": "type/security", "rule": "title/body contains 'security'|'vuln'|'cve'|'xss'|'injection'|'exploit'" },
-      { "label": "type/ci",       "rule": "title starts with 'ci:' OR changed files are exclusively .github/ or Dockerfile*" },
-      { "label": "type/deps",     "rule": "title starts with 'deps:'|'depend:' OR changed files are only requirements.*, package.*, Cargo.*, go.mod, go.sum, pyproject.toml" }
+      { "label": "type/bug",      "pattern": "^fix[:\\s]|\\b(bug|bugfix|hotfix|regression)\\b|steps to reproduce" },
+      { "label": "type/docs",     "pattern": "^docs[:\\s]|\\b(readme|documentation|wiki)\\b", "paths": ["*.md","*.rst","docs/**"] },
+      { "label": "type/feature",  "pattern": "^feat[:\\s]|\\b(feature|add)\\b" },
+      { "label": "type/refactor", "pattern": "^(refactor|chore)[:\\s]|\\b(restructure|reorganize)\\b" },
+      { "label": "type/perf",     "pattern": "^perf[:\\s]|\\b(performance|optimize|speed|latency)\\b" },
+      { "label": "type/test",     "pattern": "^test[:\\s]|\\b(testing|tests)\\b", "paths": ["test*/*","*_test.*","*.test.*","*_spec.*"] },
+      { "label": "type/security", "pattern": "\\b(security|vuln|cve|xss|injection|exploit)\\b" },
+      { "label": "type/ci",       "pattern": "^ci[:\\s]", "paths": [".github/**","Dockerfile*"] },
+      { "label": "type/deps",     "pattern": "^(deps|depend)[:\\s]|\\b(dependencies|requirements)\\b", "paths": ["requirements*.txt","package*.json","Cargo.*","go.mod","go.sum","pyproject.toml"] }
     ],
     "priority": [
-      { "label": "priority/critical", "rule": "title/body contains 'security'|'data loss'|'crash loop'|'P0'|'data breach'|'exploit'|'RCE'" },
-      { "label": "priority/high",     "rule": "title/body contains 'crash'|'down'|'blocking'|'broken'|'regression' OR scope is 'scope/massive' OR assigned to current milestone" },
-      { "label": "priority/medium",   "rule": ">200 lines changed OR mentions 'workaround' OR issue has reproduction steps provided" },
-      { "label": "priority/low",      "rule": "default for all new items" }
+      { "label": "priority/critical", "pattern": "\\b(security|data loss|crash loop|p0|data breach|exploit|rce)\\b" },
+      { "label": "priority/high",     "pattern": "\\b(crash|down|blocking|broken|regression)\\b", "condition": "loc >= 1000" },
+      { "label": "priority/medium",   "condition": "loc >= 200" },
+      { "label": "priority/low" }
     ],
     "scope": [
-      { "label": "scope/tiny",    "rule": "total lines changed (additions + deletions) < 10" },
-      { "label": "scope/small",   "rule": "total lines changed >= 10 AND < 100" },
-      { "label": "scope/medium",  "rule": "total lines changed >= 100 AND < 500" },
-      { "label": "scope/large",   "rule": "total lines changed >= 500 AND < 1000" },
-      { "label": "scope/massive", "rule": "total lines changed >= 1000" }
+      { "label": "scope/tiny",    "condition": "loc < 10" },
+      { "label": "scope/small",   "condition": "10 <= loc < 100" },
+      { "label": "scope/medium",  "condition": "100 <= loc < 500" },
+      { "label": "scope/large",   "condition": "500 <= loc < 1000" },
+      { "label": "scope/massive", "condition": "loc >= 1000" }
     ],
     "status": [
-      { "label": "status/draft",           "rule": "PR is in draft state (GitHub PR.draft == true)" },
-      { "label": "status/needs-triage",    "rule": "confidence score < 0.7 on type/ classification" },
-      { "label": "status/needs-repro",     "rule": "type is bug AND no reproduction steps detected in body" },
-      { "label": "status/stale",           "rule": "no activity (comment, commit, edit) for 30+ days (cron sweep only)" },
-      { "label": "status/blocked",         "rule": "body contains 'blocked on'|'waiting for'|'depends on'" }
+      { "label": "status/draft",        "condition": "pr.draft == true" },
+      { "label": "status/needs-triage", "condition": "confidence < 0.7" },
+      { "label": "status/needs-repro",  "pattern": "type/bug", "condition": "no_repro_steps" },
+      { "label": "status/blocked",      "pattern": "\\b(blocked on|waiting for|depends on)\\b" },
+      { "label": "status/stale",        "condition": "inactive_days >= 30" }
+    ],
+    "area": [
+      { "label": "area/auth",        "pattern": "\\b(auth|oauth|credential|login|session|passkey)\\b" },
+      { "label": "area/billing",     "pattern": "\\b(billing|usage|credit|cost)\\b" },
+      { "label": "area/compression", "pattern": "\\b(compression|compress|context.window|truncat)\\b" },
+      { "label": "area/config",      "pattern": "\\b(config|migration|profile|settings)\\b" },
+      { "label": "area/docker",      "pattern": "\\b(docker|container|compose)\\b", "paths": ["Dockerfile*","docker-compose*"] },
+      { "label": "area/memory",      "pattern": "\\b(memory|store|cache|provider.*sync)\\b" },
+      { "label": "area/sessions",    "pattern": "\\b(session|resume|history|persistence)\\b" },
+      { "label": "area/streaming",   "pattern": "\\b(streaming|sse|chunk|delivery|gateway)\\b" },
+      { "label": "area/install",     "pattern": "\\b(install|updater|packaging|wheel|doctor)\\b" },
+      { "label": "area/i18n",        "pattern": "\\b(i18n|localization|locale|translation)\\b" },
+      { "label": "area/usage-cost",  "pattern": "\\b(token.*account|usage.*report|spending)\\b" },
+      { "label": "area/labels",      "pattern": "\\b(label|taxonomy|classification)\\b" }
+    ],
+    "sweeper": [
+      { "label": "sweeper:blast-massive",    "condition": "loc >= 1000 AND touches_core_path" },
+      { "label": "sweeper:blast-broad",      "condition": "loc >= 500 OR touches_core_path" },
+      { "label": "sweeper:blast-moderate",   "condition": "loc >= 100" },
+      { "label": "sweeper:blast-contained",  "condition": "loc < 100" },
+      { "label": "sweeper:risk-automation",  "pattern": "\\b(ci|automerge|label.sync|webhook|cron)\\b" },
+      { "label": "sweeper:risk-caching",     "pattern": "\\b(cache|prompt.cach|cache.key)\\b" },
+      { "label": "sweeper:risk-compatibility", "pattern": "\\b(breaking|migration|upgrade|deprecated)\\b" }
     ]
   },
 

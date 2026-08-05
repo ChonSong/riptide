@@ -18,6 +18,7 @@ import logging
 import threading
 import subprocess
 import traceback
+import requests
 from pathlib import Path
 from typing import Optional
 
@@ -26,9 +27,50 @@ from pydantic import BaseModel
 
 from .github_app import verify_webhook_signature, GitHubAppClient
 from .orchestrator import T0Orchestrator, TaskClassifier, StateStore
+from .labeler import Labeler
 
 # Companion is optional — silently unavailable if RIPTIDE_COMPANION_REPOS is unset
 _companion = None
+
+# Labeler is optional — silently unavailable if RIPTIDE_LABELER_ENABLED != "1"
+_labeler = None
+
+
+def _reconcile_labels(github, installation_id, owner, repo, pr_number, new_labels, labeler):
+    """Remove stale bot-managed labels, preserve human-applied ones."""
+    try:
+        # Get current labels on the issue
+        issue_url = f"{github.base_url}/repos/{owner}/{repo}/issues/{pr_number}"
+        resp = requests.get(issue_url, headers=github._headers(installation_id), timeout=15)
+        resp.raise_for_status()
+        current_labels = [l["name"] for l in resp.json().get("labels", [])]
+
+        # Determine which labels are bot-managed (in our taxonomy)
+        all_bot_labels = labeler._get_all_labels()
+
+        # Remove bot-managed labels that are NOT in the new classification
+        for label in current_labels:
+            if label in all_bot_labels and label not in new_labels:
+                try:
+                    github.remove_label_from_issue(installation_id, owner, repo, pr_number, label)
+                except Exception:
+                    pass  # Label may have been removed already
+    except Exception as e:
+        log.warning(f"Label reconciliation failed: {e}")
+
+
+def get_labeler():
+    global _labeler
+    if _labeler is None:
+        if os.environ.get("RIPTIDE_LABELER_ENABLED", "1") != "1":
+            _labeler = False  # sentinel — don't retry
+            return None
+        try:
+            _labeler = Labeler()
+        except Exception as e:
+            log.warning("Labeler not available: %s", e)
+            _labeler = False
+    return _labeler if _labeler else None
 
 
 def get_companion():
@@ -241,6 +283,26 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
                 f"[{delivery_id}] T0 orchestrator spawned for {repo_full}#{pr_number}"
             )
 
+            # Also spawn labeler thread (non-blocking)
+            labeler = get_labeler()
+            if labeler and github:
+                def _safe_label():
+                    try:
+                        labels = labeler.classify_pr(pr_detail, files, repo_full)
+                        # Setup labels on repo first (creates missing ones)
+                        labeler.setup_labels_on_repo(installation_id, owner, repo_name, github)
+                        # Reconcile: remove stale bot-managed labels, preserve human labels
+                        _reconcile_labels(github, installation_id, owner, repo_name, pr_number, labels, labeler)
+                        # Add labels to PR
+                        github.add_labels_to_issue(installation_id, owner, repo_name, pr_number, labels)
+                        log.info(f"[{delivery_id}] Labels applied to {repo_full}#{pr_number}: {labels}")
+                    except Exception as e:
+                        log.error(f"[{delivery_id}] Labeler failed: {e}")
+
+                label_thread = threading.Thread(target=_safe_label, daemon=True, name=f"label-{repo_name}-{pr_number}")
+                label_thread.start()
+                log.info(f"[{delivery_id}] Labeler spawned for {repo_full}#{pr_number}")
+
     # PR merged into default branch → auto-deploy
     elif action == "closed" and pr.get("merged"):
         default_branch = os.environ.get("RIPTIDE_DEPLOY_BRANCH", "main")
@@ -365,6 +427,29 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
                     )
             except Exception as e:
                 log.error(f"[{delivery_id}] Fix command failed: {e}")
+
+        # Route 2c: Relabel command (@riptide-bot relabel)
+        if "@riptide-bot relabel" in body.lower():
+            log.info(
+                f"[{delivery_id}] Relabel command on {owner}/{repo_name}#{pr_number} by {commenter}"
+            )
+            try:
+                client = github_client()
+                labeler = get_labeler()
+                if labeler:
+                    pr_detail = client.get_pr_details(installation_id, owner, repo_name, pr_number)
+                    files = client.get_pr_files(installation_id, owner, repo_name, pr_number)
+                    labels = labeler.classify_pr(pr_detail, files, f"{owner}/{repo_name}")
+                    labeler.setup_labels_on_repo(installation_id, owner, repo_name, client)
+                    # Reconcile: remove stale bot-managed labels before applying new ones
+                    _reconcile_labels(client, installation_id, owner, repo_name, pr_number, labels, labeler)
+                    client.add_labels_to_issue(installation_id, owner, repo_name, pr_number, labels)
+                    client.post_pr_comment(
+                        installation_id, owner, repo_name, pr_number,
+                        f"🏷️ Labels re-applied: {', '.join(labels)}"
+                    )
+            except Exception as e:
+                log.error(f"[{delivery_id}] Relabel command failed: {e}")
 
     return Response(status_code=200)
 
