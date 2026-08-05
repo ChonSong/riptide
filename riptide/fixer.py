@@ -72,12 +72,8 @@ def handle_fix_command(
 
     description: optional free-text after `fix` (already stripped).
     """
-    # Determine effective installation_id for client calls.
-    # If the client is a GhCliClient, installation_id is None (uses PAT).
-    effective_installation_id = installation_id
-
     try:
-        pr_details = client.get_pr_details(effective_installation_id, owner, repo, pr_number)
+        pr_details = client.get_pr_details(installation_id, owner, repo, pr_number)
     except Exception as e:
         log.warning("Failed to fetch PR details for fix: %s", e)
         return (

@@ -5,6 +5,7 @@ import pytest
 
 from riptide.fixer import (
     FIX_RE,
+    OUR_USERNAME,
     handle_fix_command,
     _is_push_eligible,
     _is_fork_push_eligible,
@@ -101,6 +102,20 @@ class TestIsPushEligible:
         assert _is_push_eligible("other", "repo", "alice") is False
 
 
+# ── Fork push eligibility ────────────────────────────────────────────────────
+
+
+class TestIsForkPushEligible:
+    def test_same_repo_always_eligible(self):
+        assert _is_fork_push_eligible(False, "alice") is True
+
+    def test_fork_authored_by_us_eligible(self):
+        assert _is_fork_push_eligible(True, OUR_USERNAME) is True
+
+    def test_fork_authored_by_stranger_ineligible(self):
+        assert _is_fork_push_eligible(True, "stranger") is False
+
+
 # ── Fork detection ───────────────────────────────────────────────────────────
 
 
@@ -128,6 +143,17 @@ class TestForkDetection:
             result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "ChonSong")
             assert result is not None
             assert "comment-only patch" in result
+
+    def test_fork_authored_by_us_push_eligible(self):
+        # Fork PR authored by OUR_USERNAME: push fixes directly (we own the head branch).
+        client = MagicMock()
+        details = self._pr_details("other/riptide")
+        details["user"] = {"login": OUR_USERNAME}
+        client.get_pr_details.return_value = details
+        with patch("riptide.fixer._spawn_fix", return_value=True):
+            result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, OUR_USERNAME)
+            assert result is not None
+            assert "push fixes directly" in result
 
     def test_missing_head_repo_treated_as_fork(self):
         client = MagicMock()
