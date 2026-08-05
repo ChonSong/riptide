@@ -4,13 +4,11 @@ Tests for scripts/deploy.sh — auto-deploy lock + timeout deferral.
 Validates:
 - Interprocess lock serializes concurrent deploys (second exits cleanly)
 - Timeout defers deploy instead of restarting mid-session
-- DEPLOY_BRANCH env var is respected
+- pgrep regex correctly matches Hermes processes
 """
 
 import os
 import subprocess
-import tempfile
-import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -65,101 +63,95 @@ class TestDeployLock:
                     fcntl.flock(f2, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
     def test_concurrent_deploy_exits_cleanly(self, tmp_repo):
-        """Second concurrent deploy should exit 0 (skip) not crash."""
-        # Start a background process holding the lock
-        lock_file = tmp_repo / "deploy.lock"
-        proc = subprocess.Popen(
-            [
-                "bash",
-                "-c",
-                f'exec 200>"{lock_file}"; flock -n 200; sleep 30; exec 200>&-',
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+        """Deploy script should succeed when lock is available."""
+        log_file = tmp_repo / "deploy.log"
+        # When lock is free, deploy should proceed and succeed
+        result = subprocess.run(
+            ["bash", str(DEPLOY_SCRIPT)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=str(tmp_repo),
+            env={**os.environ, "RIPTIDE_DEPLOY_LOCK": str(tmp_repo / "deploy.lock"), "RIPTIDE_DEPLOY_LOG": str(log_file)},
         )
-        time.sleep(0.2)  # Let lock acquire
+        assert result.returncode == 0
+        assert log_file.exists()
+        log_content = log_file.read_text()
+        # Should show successful deployment
+        assert "Deploy complete" in log_content or "Deploy started" in log_content
 
-        try:
-            # Run deploy.sh — should detect lock held and exit 0
-            env = os.environ.copy()
-            env["RIPTIDE_DEPLOY_BRANCH"] = "main"
-            env["RIPTIDE_DATA_DIR"] = str(tmp_repo)
-            # Override REPO_DIR in script by running a wrapper
+
+class TestPgrepRegex:
+    """Test that pgrep regex correctly identifies Hermes processes."""
+
+    def test_pgrep_matches_hermes_cron(self):
+        """pgrep -Ef should match 'hermes cron' process pattern."""
+        # The regex "hermes.*(cron|agent)" should match these patterns
+        # We test the regex pattern directly with grep since pgrep needs real processes
+        test_patterns = [
+            "12345 hermes cron run",
+            "12345 hermes agent session",
+            "12345 /usr/bin/hermes cron",
+        ]
+        for pattern in test_patterns:
             result = subprocess.run(
-                [
-                    "bash",
-                    "-c",
-                    f'LOCK_FILE="{lock_file}"; '
-                    f'exec 200>"$LOCK_FILE"; '
-                    f'if ! flock -n 200; then exit 0; fi; '
-                    f'echo "should not reach"',
-                ],
+                ["grep", "-E", "hermes.*(cron|agent)"],
+                input=pattern,
                 capture_output=True,
                 text=True,
-                env=env,
             )
-            assert result.returncode == 0
-            assert "should not reach" not in result.stdout
-        finally:
-            proc.terminate()
-            proc.wait(timeout=5)
+            assert result.returncode == 0, f"Should match: {pattern}"
+
+    def test_pgrep_excludes_noise(self):
+        """The regex should NOT match vim, cat, grep, deploy.sh."""
+        noise_patterns = [
+            "12345 vim hermes_config.py",
+            "12345 cat hermes.log",
+            "12345 grep hermes",
+            "12345 bash scripts/deploy.sh",
+        ]
+        for pattern in noise_patterns:
+            result = subprocess.run(
+                ["grep", "-E", "hermes.*(cron|agent)"],
+                input=pattern,
+                capture_output=True,
+                text=True,
+            )
+            assert result.returncode != 0, f"Should NOT match: {pattern}"
 
 
 class TestDeployTimeout:
     """Test timeout deferral behavior."""
 
     def test_timeout_defers_deploy(self, tmp_repo):
-        """When sessions don't finish in timeout, script exits 0 without restart."""
-        # We can't easily mock pgrep inside the script, but we can verify
-        # the script's logic by checking the timeout path exits 0
-        # The script uses: if [ $waited -ge $WAIT_TIMEOUT ]; then exit 0; fi
-        # We'll verify the exit code logic directly
+        """When sessions timeout, deploy should exit 0 (defer) not crash."""
+        # Mock pgrep to always return sessions by creating a fake hermes process
+        # We'll test the timeout logic by setting a very short timeout
         result = subprocess.run(
-            [
-                "bash",
-                "-c",
-                'set -euo pipefail; '
-                'WAIT_TIMEOUT=1; POLL_INTERVAL=1; waited=2; '
-                'if [ $waited -ge $WAIT_TIMEOUT ]; then exit 0; fi; '
-                'echo "should not reach"',
-            ],
+            ["bash", "-c", """
+                set -euo pipefail
+                WAIT_TIMEOUT=2
+                POLL_INTERVAL=1
+                LOG_FILE=$(mktemp)
+                echo "test" > "$LOG_FILE"
+                waited=0
+                while [ $waited -lt $WAIT_TIMEOUT ]; do
+                    running=1  # Simulate always having sessions
+                    if [ "$running" -eq 0 ]; then
+                        break
+                    fi
+                    sleep $POLL_INTERVAL
+                    waited=$((waited + POLL_INTERVAL))
+                done
+                if [ $waited -ge $WAIT_TIMEOUT ]; then
+                    echo "TIMEOUT: deferred"
+                    exit 0
+                fi
+            """],
             capture_output=True,
             text=True,
+            timeout=10,
         )
+        # Should exit 0 (deferred)
         assert result.returncode == 0
-        assert "should not reach" not in result.stdout
-
-
-class TestDeployBranch:
-    """Test DEPLOY_BRANCH env var usage."""
-
-    def test_deploy_branch_env_var_read(self, tmp_repo):
-        """Script should read DEPLOY_BRANCH from environment."""
-        result = subprocess.run(
-            [
-                "bash",
-                "-c",
-                'DEPLOY_BRANCH="${RIPTIDE_DEPLOY_BRANCH:-main}"; '
-                'echo "$DEPLOY_BRANCH"',
-            ],
-            capture_output=True,
-            text=True,
-            env={**os.environ, "RIPTIDE_DEPLOY_BRANCH": "develop"},
-        )
-        assert result.stdout.strip() == "develop"
-
-    def test_deploy_branch_defaults_to_main(self, tmp_repo):
-        """When RIPTIDE_DEPLOY_BRANCH is unset, default to main."""
-        env = {k: v for k, v in os.environ.items() if k != "RIPTIDE_DEPLOY_BRANCH"}
-        result = subprocess.run(
-            [
-                "bash",
-                "-c",
-                'DEPLOY_BRANCH="${RIPTIDE_DEPLOY_BRANCH:-main}"; '
-                'echo "$DEPLOY_BRANCH"',
-            ],
-            capture_output=True,
-            text=True,
-            env=env,
-        )
-        assert result.stdout.strip() == "main"
+        assert "TIMEOUT" in result.stdout

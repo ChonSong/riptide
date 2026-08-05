@@ -9,11 +9,11 @@
 set -euo pipefail
 
 REPO_DIR="/home/sc/workspace/riptide"
-LOG_FILE="/tmp/riptide-deploy.log"
+LOG_FILE="${RIPTIDE_DEPLOY_LOG:-/tmp/riptide-deploy.log}"
 WAIT_TIMEOUT=300  # 5 minutes max wait
 POLL_INTERVAL=10
 DEPLOY_BRANCH="${RIPTIDE_DEPLOY_BRANCH:-main}"
-LOCK_FILE="/tmp/riptide-deploy.lock"
+LOCK_FILE="${RIPTIDE_DEPLOY_LOCK:-/tmp/riptide-deploy.lock}"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"; }
 
@@ -37,8 +37,9 @@ log "Checking for active Hermes cron jobs..."
 waited=0
 while [ $waited -lt $WAIT_TIMEOUT ]; do
     # Check for running hermes agent processes (cron-spawned sessions)
-    # Exclude the cron scheduler itself and grep
-    running=$(pgrep -f "hermes.*(cron|agent)" | wc -l)
+    # Use extended regex (-E) for proper group matching
+    # Exclude the cron scheduler itself, grep, and this script
+    running=$(pgrep -Ef "hermes.*(cron|agent)" 2>/dev/null | grep -v -E "(pgrep|deploy\.sh|hermes cron)" | wc -l || true)
     if [ "$running" -eq 0 ]; then
         log "No active Hermes sessions — proceeding"
         break

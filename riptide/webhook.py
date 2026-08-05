@@ -322,10 +322,9 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
             else:
                 try:
                     proc = subprocess.Popen(
-                        ["systemd-run", "--user", "--scope", "--property=KillMode=process", "--collect", deploy_script],
+                        ["systemd-run", "--user", "--scope", "--property=KillMode=process", deploy_script],
                         stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        start_new_session=True,
+                        stderr=subprocess.STDOUT,
                     )
                     log.info(f"[{delivery_id}] Auto-deploy triggered (pid={proc.pid})")
                 except FileNotFoundError:
