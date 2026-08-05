@@ -135,6 +135,12 @@ class StateStore:
             "CREATE INDEX IF NOT EXISTS idx_jobs_pr_status ON jobs (pr_number, status)"
         )
 
+        # One-time migration from poller's metadata.db (if it exists)
+        # Run BEFORE schema version update so migration failures remain retryable
+        if version < 2:
+            self._migrate_poller_comments()
+
+        # Update schema version only after all migrations succeed
         if version < self.SCHEMA_VERSION:
             conn.execute("DELETE FROM schema_version")
             conn.execute(
@@ -142,10 +148,6 @@ class StateStore:
                 (self.SCHEMA_VERSION,),
             )
         conn.commit()
-        
-        # One-time migration from poller's metadata.db (if it exists)
-        if version < 2:
-            self._migrate_poller_comments()
 
     def _migrate_poller_comments(self):
         """One-time migration from poller's metadata.db into the new state.db."""
