@@ -142,6 +142,51 @@ class StateStore:
                 (self.SCHEMA_VERSION,),
             )
         conn.commit()
+        
+        # One-time migration from poller's metadata.db (if it exists)
+        if version < 2:
+            self._migrate_poller_comments()
+
+    def _migrate_poller_comments(self):
+        """One-time migration from poller's metadata.db into the new state.db."""
+        if not POLLER_DB_PATH.exists():
+            return
+        try:
+            with sqlite3.connect(str(POLLER_DB_PATH)) as src:
+                table_check = src.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='poller_processed_comments'"
+                ).fetchone()
+                if not table_check:
+                    log.info(f"No poller_processed_comments table found in {POLLER_DB_PATH}")
+                    return
+                
+                old_columns = {row[1] for row in src.execute("PRAGMA table_info(poller_processed_comments)").fetchall()}
+                has_pending = "pending_response" in old_columns
+                
+                if has_pending:
+                    rows = src.execute(
+                        "SELECT comment_id, processed_at, result, pending_response FROM poller_processed_comments"
+                    ).fetchall()
+                else:
+                    rows = src.execute(
+                        "SELECT comment_id, processed_at, result, '' FROM poller_processed_comments"
+                    ).fetchall()
+            
+            conn = self._get_conn()
+            try:
+                conn.execute("BEGIN")
+                for comment_id, processed_at, result, pending_response in rows:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO processed_comments (comment_id, processed_at, result, pending_response) VALUES (?, ?, ?, ?)",
+                        (comment_id, processed_at, result, pending_response),
+                    )
+                conn.commit()
+                log.info(f"Migrated {len(rows)} comment records from {POLLER_DB_PATH}")
+            except Exception:
+                conn.rollback()
+                raise
+        except Exception as e:
+            log.warning(f"Poller migration skipped: {e}")
 
     # ── Deliveries (Companion dedup) ───────────────────────────────────────────
 
@@ -329,55 +374,3 @@ class StateStore:
 
 # Module-level convenience (poller's old DB path for migration)
 POLLER_DB_PATH = Path.home() / ".local/share/riptide/metadata.db"
-
-
-def migrate_poller_comments(target: StateStore):
-    """
-    One-time migration from poller's metadata.db into the new state.db.
-
-    Wraps all inserts in a single transaction for atomicity and performance.
-    Validates the old table exists before reading. Handles schema differences
-    gracefully (old table may lack pending_response column).
-    """
-    if not POLLER_DB_PATH.exists():
-        return
-    try:
-        # Read from old DB
-        with sqlite3.connect(str(POLLER_DB_PATH)) as src:
-            # Check if old table exists
-            table_check = src.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='poller_processed_comments'"
-            ).fetchone()
-            if not table_check:
-                log.info(f"No poller_processed_comments table found in {POLLER_DB_PATH}")
-                return
-
-            # Check old table schema (may lack pending_response)
-            old_columns = {row[1] for row in src.execute("PRAGMA table_info(poller_processed_comments)").fetchall()}
-            has_pending = "pending_response" in old_columns
-
-            if has_pending:
-                rows = src.execute(
-                    "SELECT comment_id, processed_at, result, pending_response FROM poller_processed_comments"
-                ).fetchall()
-            else:
-                rows = src.execute(
-                    "SELECT comment_id, processed_at, result, '' FROM poller_processed_comments"
-                ).fetchall()
-
-        # Insert into new DB in a single transaction
-        conn = target._get_conn()
-        try:
-            conn.execute("BEGIN")
-            for comment_id, processed_at, result, pending_response in rows:
-                conn.execute(
-                    "INSERT OR IGNORE INTO processed_comments (comment_id, processed_at, result, pending_response) VALUES (?, ?, ?, ?)",
-                    (comment_id, processed_at, result, pending_response),
-                )
-            conn.commit()
-            log.info(f"Migrated {len(rows)} comment records from {POLLER_DB_PATH}")
-        except Exception:
-            conn.rollback()
-            raise
-    except Exception as e:
-        log.warning(f"Poller migration skipped: {e}")
