@@ -80,10 +80,11 @@ INJECTION_PATTERNS = [
 ]
 
 # Path traversal — best-effort detection
-# Matches common patterns: open(var + var), f-string paths, os.path.join with user input
+# Matches common patterns: open(var + var), f-string paths in filesystem sinks,
+# os.path.join with user input
 PATH_TRAVERSAL_PATTERNS = [
     re.compile(r"""(?:open|read|write)\s*\(\s*[^,]+\s*\+\s*[^,]+\s*\)"""),
-    re.compile(r"""f["'][^"']*\{[^}]*\}[^"']*["']\s*\)"""),
+    re.compile(r"""(?:open|read|write|os\.path\.join|shutil\.move|shutil\.copy)\s*\(\s*f["'][^"']*\{[^}]*\}[^"']*["']"""),
     re.compile(r"""os\.path\.join\s*\([^)]*\+\s*"""),
 ]
 
@@ -111,7 +112,7 @@ def _is_silently_ignored(added_lines: list[str], match_line_idx: int) -> bool:
     """Check if an exception handler body is silently ignored (pass/empty).
     
     Returns True if the body is `pass` or empty, False if it logs, raises,
-    or otherwise handles the exception.
+    returns a fallback, or otherwise handles the exception.
     """
     # Look at the next few lines (the handler body)
     for i in range(match_line_idx + 1, min(match_line_idx + 4, len(added_lines))):
@@ -122,12 +123,12 @@ def _is_silently_ignored(added_lines: list[str], match_line_idx: int) -> bool:
         if stripped == "pass":
             return True
         # If we hit another except/def/class/end of block, body was empty
-        if stripped.startswith(("except", "else:", "finally:", "def ", "class ", "return", "break", "continue")):
+        if stripped.startswith(("except", "else:", "finally:", "def ", "class ")):
             return True
-        # If there's a raise or logging call, it's properly handled
+        # If there's a raise, logging call, return, break, continue — it's handled
         if PROPER_HANDLING.search(stripped):
             return False
-        # Any other statement (e.g., return, assignment) — not silently ignored
+        # Any other statement (return fallback, assignment, etc.) — not silently ignored
         return False
     return True
 
@@ -164,8 +165,8 @@ class DiffAnalyzer:
 
         # Check each file's patch
         for f in files:
-            patch = f.get("patch", "")
-            if not patch:
+            patch = f.get("patch") or ""
+            if not patch or not isinstance(patch, str):
                 continue
             fname = f.get("filename", "?")
             self._check_security(patch, fname, report)
@@ -268,7 +269,7 @@ class DiffAnalyzer:
                         func_lines = []
 
         # Check final function
-        if current_func and len(func_lines) > MAX_FUNCTION_LINES:
+        if current_func and len(func_lines) >= MAX_FUNCTION_LINES:
             report.findings.append(Finding(
                 category="complexity",
                 severity="warning",
@@ -326,7 +327,9 @@ class DiffAnalyzer:
         for f in files:
             if f.get("status") not in ("added", "modified"):
                 continue
-            patch = f.get("patch", "")
+            patch = f.get("patch") or ""
+            if not isinstance(patch, str):
+                continue
             for line in self._get_added_lines(patch):
                 stripped = line.strip()
                 if stripped.startswith("import ") or stripped.startswith("from "):

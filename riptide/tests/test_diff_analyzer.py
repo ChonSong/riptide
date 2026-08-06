@@ -117,13 +117,11 @@ SWALLOWED_LOGGING_PATCH = """\
 """
 
 HARDCODED_SECRET_PATCH = """\
-+API_KEY = "{key_fragment_a}{key_fragment_b}"
-+password = "{pwd_fragment_a}{pwd_fragment_b}"
++API_KEY = "{ka}{kb}{kc}{kd}"
++password = "{pa}{pb}"
 """.format(
-    key_fragment_a="a1b2c3d4e5f6g7h8",
-    key_fragment_b="i9j0k1l2m3n4o5p6",
-    pwd_fragment_a="super",
-    pwd_fragment_b="_secret_123",
+    ka="abcd", kb="1234", kc="efgh", kd="5678",
+    pa="super_", pa2="secret_", pb="9999",
 )
 
 SQL_INJECTION_PATCH = """\
@@ -142,7 +140,20 @@ EVAL_PATCH = """\
 SHELL_INJECTION_PATCH = """\
 +os.system("ping " + hostname)
 +subprocess.call(cmd, shell=True)
++"""
+
+RETURN_FALLBACK_PATCH = """\
++try:
++    value = int(user_input)
++except ValueError:
++    value = 0
++return value
 """
+
+HARMLESS_FSTRING_PATCH = """\
++logger.info(f"Processing {count} items for {user_id}")
++result = do_work(user_id)
++"""
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -192,6 +203,14 @@ class TestSecurityPatterns:
         report = analyzer.analyze(files)
         security_findings = [f for f in report.findings if f.category == "security"]
         assert len(security_findings) == 0
+
+    def test_harmless_fstring_no_path_traversal(self, analyzer):
+        """Logger f-strings should not trigger path traversal."""
+        files = [make_file("logger.py", HARMLESS_FSTRING_PATCH, additions=2)]
+        report = analyzer.analyze(files)
+        path_findings = [f for f in report.findings if "path traversal" in f.message.lower()]
+        assert len(path_findings) == 0
+        assert report.verdict == "pass"
 
 
 # ── Complexity tests ─────────────────────────────────────────────────────────
@@ -315,6 +334,12 @@ class TestErrorHandling:
         error_findings = [f for f in report.findings if f.category == "error_handling"]
         assert len(error_findings) == 0
 
+    def test_return_fallback_not_reported(self, analyzer):
+        files = [make_file("fallback.py", RETURN_FALLBACK_PATCH, additions=5)]
+        report = analyzer.analyze(files)
+        error_findings = [f for f in report.findings if f.category == "error_handling"]
+        assert len(error_findings) == 0
+
 
 # ── Structural tests ─────────────────────────────────────────────────────────
 
@@ -387,6 +412,16 @@ class TestAnalyzerEdgeCases:
 
     def test_files_without_patches(self, analyzer):
         files = [{"filename": "empty.py", "patch": "", "additions": 0, "deletions": 0}]
+        report = analyzer.analyze(files)
+        assert not report.findings
+
+    def test_files_with_null_patches(self, analyzer):
+        files = [{"filename": "null.py", "patch": None, "additions": 0, "deletions": 0}]
+        report = analyzer.analyze(files)
+        assert not report.findings
+
+    def test_files_with_non_string_patches(self, analyzer):
+        files = [{"filename": "bad.py", "patch": 123, "additions": 0, "deletions": 0}]
         report = analyzer.analyze(files)
         assert not report.findings
 
