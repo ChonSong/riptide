@@ -4,6 +4,7 @@ Tests for the deterministic diff analyzer (Phase 1).
 Covers security patterns, complexity, error handling, and structural checks.
 """
 
+import re
 import pytest
 
 from riptide.diff_analyzer import DiffAnalyzer, DiffReport, Finding
@@ -211,6 +212,26 @@ class TestSecurityPatterns:
         path_findings = [f for f in report.findings if "path traversal" in f.message.lower()]
         assert len(path_findings) == 0
         assert report.verdict == "pass"
+
+
+class TestRegexPatternsValid:
+    """Ensure all regex patterns compile without error at import time."""
+
+    def test_all_patterns_compile(self):
+        """Verify INJECTION_PATTERNS and PATH_TRAVERSAL_PATTERNS are valid."""
+        from riptide.diff_analyzer import INJECTION_PATTERNS, PATH_TRAVERSAL_PATTERNS
+        for pattern, _ in INJECTION_PATTERNS:
+            assert isinstance(pattern, re.Pattern), f"INJECTION_PATTERNS contains invalid pattern: {pattern}"
+        for pattern in PATH_TRAVERSAL_PATTERNS:
+            assert isinstance(pattern, re.Pattern), f"PATH_TRAVERSAL_PATTERNS contains invalid pattern: {pattern}"
+
+    def test_eval_pattern_rejects_prefix(self):
+        """Ensure (?<![\w.])eval pattern works correctly."""
+        from riptide.diff_analyzer import INJECTION_PATTERNS
+        eval_pattern = [p for p, m in INJECTION_PATTERNS if "eval" in m.lower()][0]
+        assert eval_pattern.search("eval(user_input)")
+        assert not eval_pattern.search("myeval(user_input)")
+        assert not eval_pattern.search("pre_eval(user_input)")
 
 
 # ── Complexity tests ─────────────────────────────────────────────────────────

@@ -583,12 +583,38 @@ class Companion:
         # Phase 1: Deterministic analysis (primary path)
         deterministic_report = None
         if self.enable_deterministic:
-            deterministic_report = self._analyzer.analyze(files)
-            logger.info(
-                "Deterministic analysis for %s#%d: %d findings, verdict=%s",
-                full_name, pr_number, len(deterministic_report.findings),
-                deterministic_report.verdict,
-            )
+            try:
+                deterministic_report = self._analyzer.analyze(files)
+                logger.info(
+                    "Deterministic analysis for %s#%d: %d findings, verdict=%s",
+                    full_name, pr_number, len(deterministic_report.findings),
+                    deterministic_report.verdict,
+                )
+            except Exception as e:
+                logger.warning("Deterministic analysis failed for %s#%d: %s — falling back to LLM", full_name, pr_number, e)
+                # Fallback to legacy LLM path
+                tldr = self._generate_tldr_with_retry(title, author, files, graph_context, is_delta=is_delta)
+                if not tldr:
+                    logger.warning("TLDR failed %s#%d — initiating self-heal", full_name, pr_number)
+                    self._handle_degradation(installation_id, owner, repo, pr_number, full_name)
+                    return
+
+                # Detect UI files for ProofShot section
+                ui_extensions = {'.css', '.scss', '.less', '.html', '.jsx', '.tsx', '.vue', '.svelte', '.astro'}
+                ui_files = [f for f in files if any(f.get("filename", "").endswith(ext) for ext in ui_extensions)]
+                eli5 = self._generate_eli5(title, files, is_delta=is_delta)
+
+                body = self._format_comment(emoji, author, tldr, graph_context, eli5, ui_files,
+                                            owner=owner, repo=repo, pr_number=pr_number,
+                                            title=title, files=files, is_delta=is_delta)
+                try:
+                    self.client.post_pr_comment(installation_id, owner, repo, pr_number, body)
+                    logger.info("Posted TLDR (LLM fallback) for %s#%d", full_name, pr_number)
+                    if current_sha:
+                        self._set_last_sha(owner, repo, pr_number, current_sha)
+                except Exception as e:
+                    logger.error("Failed to post: %s", e)
+                return
 
         # Generate TL;DR — deterministic first, LLM fallback only if disabled
         tldr = None
@@ -603,13 +629,13 @@ class Companion:
                 self._handle_degradation(installation_id, owner, repo, pr_number, full_name)
                 return
         else:
-            # Deterministic ran but no findings — use a concise summary
-            tldr = self._format_deterministic_tldr(deterministic_report, graph_context)
+            # Deterministic ran but no findings — skip posting (handled below)
+            pass
 
         # 1.4: Only post when there's something actionable to say
         if deterministic_report and not deterministic_report.has_actionable:
             logger.info(
-                "No actionable findings for %s##%d — skipping comment",
+                "No actionable findings for %s#%d — skipping comment",
                 full_name, pr_number,
             )
             return

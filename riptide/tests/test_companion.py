@@ -5,6 +5,7 @@ Covers PR classification, UI detection, TL;DR generation, and Ollama edge cases.
 """
 
 import os
+import re
 import time
 import threading
 from unittest.mock import patch, MagicMock
@@ -403,3 +404,48 @@ class TestSpawnSelfHeal:
             with patch.object(companion, "_spawn_self_heal"):
                 companion._handle_degradation(123, "other-org", "repo", 42, "other-org/repo")
                 companion.client.post_pr_comment.assert_called_once()
+
+
+class TestDeterministicAnalysis:
+    """Tests for the deterministic analysis integration in Companion."""
+
+    def test_skip_comment_when_no_actionable_findings(self, mock_ollama):
+        companion = make_companion()
+        companion.enable_deterministic = True
+        companion.enable_graphify = False
+        companion.client.post_pr_comment = MagicMock()
+        companion._get_last_sha = MagicMock(return_value=None)
+
+        # Patch the analyzer to return a report with no findings
+        mock_report = MagicMock()
+        mock_report.has_actionable = False
+        mock_report.findings = []
+        mock_report.verdict = "pass"
+        with patch.object(companion._analyzer, "analyze", return_value=mock_report):
+            companion._execute(
+                123, "owner", "repo", 42,
+                "feat: trivial change", "author",
+                [{"filename": "README.md", "patch": "+# Hello", "additions": 1, "deletions": 0, "status": "modified"}]
+            )
+        # Should NOT post a comment when no actionable findings
+        companion.client.post_pr_comment.assert_not_called()
+
+    def test_fallback_to_llm_when_analyzer_raises(self, mock_ollama):
+        companion = make_companion()
+        companion.enable_deterministic = True
+        companion.client.post_pr_comment = MagicMock()
+        companion._get_last_sha = MagicMock(return_value=None)
+
+        # Patch the analyzer to raise an exception
+        with patch.object(companion._analyzer, "analyze", side_effect=re.error("bad regex")):
+            with patch.object(companion, "_generate_tldr_with_retry", return_value="LLM fallback TL;DR") as mock_llm:
+                companion._execute(
+                    123, "owner", "repo", 42,
+                    "feat: something", "author",
+                    [{"filename": "src/main.py", "patch": "+x = 1", "additions": 1, "deletions": 0, "status": "modified"}]
+                )
+        # Should fall back to LLM path
+        mock_llm.assert_called_once()
+        companion.client.post_pr_comment.assert_called_once()
+        body = companion.client.post_pr_comment.call_args[0][4]
+        assert "LLM fallback TL;DR" in body
