@@ -19,7 +19,6 @@ import threading
 import subprocess
 import requests
 import traceback
-import requests
 from pathlib import Path
 from typing import Optional
 
