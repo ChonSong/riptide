@@ -675,22 +675,47 @@ class Companion:
         ui_extensions = {'.css', '.scss', '.less', '.html', '.jsx', '.tsx', '.vue', '.svelte', '.astro'}
         ui_files = [f for f in files if any(f.get("filename", "").endswith(ext) for ext in ui_extensions)]
 
-        # Generate ELI5 (optional — skip if model fails)
-        eli5 = self._generate_eli5(title, files, is_delta=is_delta) if not self.enable_deterministic else None
+        if self.enable_deterministic and deterministic_report and deterministic_report.has_actionable:
+            # ── Two-tier response (Vision Pillar 2) ─────────────────────────
+            # Tier 1: deterministic comment + progress marker (no LLM required)
+            tier1_body = self._build_tier1_body(emoji, author, tldr, deterministic_report)
+            comment_id = None
+            try:
+                posted = self.client.post_pr_comment(installation_id, owner, repo, pr_number, tier1_body)
+                comment_id = posted.get("id")
+                logger.info("Posted Tier 1 (deterministic) for %s#%d comment_id=%s", full_name, pr_number, comment_id)
+            except Exception as e:
+                logger.error("Failed to post Tier 1: %s", e)
+                return  # Can't enrich if Tier 1 failed
 
-        body = self._format_comment(emoji, author, tldr, graph_context, eli5, ui_files,
-                                    owner=owner, repo=repo, pr_number=pr_number,
-                                    title=title, files=files, is_delta=is_delta,
-                                    deterministic_report=deterministic_report)
+            # Tier 2: LLM enrichment (ELI5), then PATCH the same comment in place
+            eli5 = self._generate_eli5(title, files, is_delta=is_delta)
+            enriched_body = self._format_comment(emoji, author, tldr, graph_context, eli5, ui_files,
+                                                 owner=owner, repo=repo, pr_number=pr_number,
+                                                 title=title, files=files, is_delta=is_delta,
+                                                 deterministic_report=deterministic_report)
+            try:
+                self.client.update_pr_comment(installation_id, owner, repo, comment_id, enriched_body)
+                logger.info("Enriched Tier 2 for %s#%d comment_id=%s", full_name, pr_number, comment_id)
+            except Exception as e:
+                # Tier 1 comment remains — do NOT delete, do NOT post duplicate
+                logger.warning("Tier 2 enrichment failed for %s#%d (Tier 1 remains): %s", full_name, pr_number, e)
+        else:
+            # Legacy path (LLM fallback / deterministic disabled): single POST
+            eli5 = self._generate_eli5(title, files, is_delta=is_delta) if not self.enable_deterministic else None
+            body = self._format_comment(emoji, author, tldr, graph_context, eli5, ui_files,
+                                        owner=owner, repo=repo, pr_number=pr_number,
+                                        title=title, files=files, is_delta=is_delta,
+                                        deterministic_report=deterministic_report)
+            try:
+                self.client.post_pr_comment(installation_id, owner, repo, pr_number, body)
+                logger.info("Posted TLDR for %s#%d", full_name, pr_number)
+            except Exception as e:
+                logger.error("Failed to post: %s", e)
 
-        try:
-            self.client.post_pr_comment(installation_id, owner, repo, pr_number, body)
-            logger.info("Posted TLDR for %s#%d", full_name, pr_number)
-            # Record the SHA we just commented on
-            if current_sha:
-                self._set_last_sha(owner, repo, pr_number, current_sha)
-        except Exception as e:
-            logger.error("Failed to post: %s", e)
+        # Record the SHA we just commented on
+        if current_sha:
+            self._set_last_sha(owner, repo, pr_number, current_sha)
 
     def build_context_bundle(self, files: list[dict], graph_context: dict | None,
                               pr_details: dict | None = None) -> dict:
@@ -986,6 +1011,23 @@ ELI5:"""
             parts.append(f"- ...and {len(report.findings) - 5} more findings")
 
         return "\n".join(parts)
+
+    def _build_tier1_body(self, emoji: str, author: str, tldr: str, deterministic_report) -> str:
+        """Build the Tier 1 deterministic comment body (no LLM required).
+
+        Contains verdict, findings, and a progress marker indicating
+        enrichment is in progress. This is posted first, then enriched
+        in place via PATCH once the LLM-generated ELI5 is available.
+        """
+        verdict_emoji = {"pass": "✅", "review": "⚠️", "block": "🛑"}.get(deterministic_report.verdict, "✅")
+        header = f"## {emoji} {verdict_emoji} Review\n\n@{author}:\n{tldr}"
+
+        # Deterministic footer — no enrichment promises beyond ELI5
+        footer = (
+            "\n\n---\n<sub>🤖 Generated by Riptide · deterministic analysis (Phase 1)"
+            " · 🔍 enrichment in progress…</sub>"
+        )
+        return header + footer
 
     @staticmethod
     def _get_bot2_status(owner: str, repo: str, pr_number: int) -> Optional[str]:
