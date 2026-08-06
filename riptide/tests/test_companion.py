@@ -416,12 +416,12 @@ class TestDeterministicAnalysis:
         companion.client.post_pr_comment = MagicMock()
         companion._get_last_sha = MagicMock(return_value=None)
 
-        # Patch the analyzer to return a report with no findings
+        # Patch the context bundle to return a report with no findings
         mock_report = MagicMock()
         mock_report.has_actionable = False
         mock_report.findings = []
         mock_report.verdict = "pass"
-        with patch.object(companion._analyzer, "analyze", return_value=mock_report):
+        with patch("riptide.companion.build_context_bundle", return_value={"report": mock_report}):
             companion._execute(
                 123, "owner", "repo", 42,
                 "feat: trivial change", "author",
@@ -482,7 +482,7 @@ class TestTwoTierResponse:
         mock_report.findings = [
             MagicMock(severity="critical", message="Hardcoded secret", file="auth.py", category="security")
         ]
-        with patch.object(companion._analyzer, "analyze", return_value=mock_report):
+        with patch("riptide.companion.build_context_bundle", return_value={"report": mock_report}):
             companion._execute(
                 123, "owner", "repo", 42,
                 "feat: add auth", "author",
@@ -521,7 +521,7 @@ class TestTwoTierResponse:
         mock_report.findings = [
             MagicMock(severity="warning", message="Complex function", file="util.py", category="complexity")
         ]
-        with patch.object(companion._analyzer, "analyze", return_value=mock_report):
+        with patch("riptide.companion.build_context_bundle", return_value={"report": mock_report}):
             companion._execute(
                 123, "owner", "repo", 42,
                 "feat: complex logic", "author",
@@ -534,6 +534,35 @@ class TestTwoTierResponse:
         companion.client.update_pr_comment.assert_called_once()
         # No second POST (no duplicate)
         assert companion.client.post_pr_comment.call_count == 1
+
+    def test_two_tier_tier1_post_failure_does_not_record_sha(self, mock_ollama):
+        """If Tier 1 POST raises, no SHA is recorded and no enrichment is attempted."""
+        companion = make_companion()
+        companion.enable_deterministic = True
+        companion.enable_graphify = False
+        companion._get_last_sha = MagicMock(return_value=None)
+        companion._set_last_sha = MagicMock()
+
+        companion.client.post_pr_comment = MagicMock(side_effect=Exception("API timeout"))
+        companion.client.update_pr_comment = MagicMock()
+
+        mock_report = MagicMock()
+        mock_report.has_actionable = True
+        mock_report.verdict = "review"
+        mock_report.summary = "Issue detected"
+        mock_report.findings = [
+            MagicMock(severity="warning", message="Complex function", file="util.py", category="complexity")
+        ]
+        with patch("riptide.companion.build_context_bundle", return_value={"report": mock_report}):
+            companion._execute(
+                123, "owner", "repo", 42,
+                "feat: complex logic", "author",
+                [{"filename": "src/util.py", "patch": "+def complex(): pass", "additions": 1, "deletions": 0, "status": "modified"}]
+            )
+
+        # Tier 1 failed → no PATCH (enrichment), no SHA recorded
+        companion.client.update_pr_comment.assert_not_called()
+        companion._set_last_sha.assert_not_called()
 
     def test_two_tier_skips_when_no_actionable_findings(self, mock_ollama):
         """When deterministic report has no findings, neither Tier 1 nor Tier 2 runs."""
@@ -549,7 +578,7 @@ class TestTwoTierResponse:
         mock_report.has_actionable = False
         mock_report.findings = []
         mock_report.verdict = "pass"
-        with patch.object(companion._analyzer, "analyze", return_value=mock_report):
+        with patch("riptide.companion.build_context_bundle", return_value={"report": mock_report}):
             companion._execute(
                 123, "owner", "repo", 42,
                 "feat: trivial change", "author",
