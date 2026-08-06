@@ -43,7 +43,7 @@ A lonely code-review bot named **Riptide** spends its days scanning every wave (
 | Element | Technique | Tool |
 |---------|-----------|------|
 | **Characters** | 3D models with NPR (non-photorealistic) toon shading | Blender / Maya |
-| **Environments** | Hand-painted 2D backgrounds, parodied depth | Photoshop / Procreate |
+| **Environments** | Hand-painted 2D backgrounds, parallax depth via multi-layer scrolling (camera-based: each layer moves at a fraction of camera speed) | Photoshop / Procreate |
 | **Ocean / Sea** | Fluid simulation + custom shaders for code-as-water | Houdini / Blender FLIP |
 | **The Wave** | Procedural particle systems — ink drops that coalesce | Houdini / EmberGen |
 | **UI overlays (code)** | Animated SVG/CSS, glowing text nodes | After Effects |
@@ -202,19 +202,25 @@ A lonely code-review bot named **Riptide** spends its days scanning every wave (
 
 **Shot complexity:**
 
-| Shot | Characters | FX | Est. render time |
-|------|-----------|-----|------------------|
-| 1 — The Shore | Riptide | Ocean sim, particle sand | 8 hrs/frame |
-| 2 — The Review | Riptide | Code node projection (procedural) | 4 hrs/frame |
-| 3 — Cycle montage | Riptide (×10) | Rapid wave sims | 3 hrs/frame |
-| 4 — Wave arrives | Riptide + Wave | Ink-drop sim (hero) | 12 hrs/frame |
-| 5 — Scan fails | Riptide | Glitch VFX, projection failure | 6 hrs/frame |
-| 6 — Companion arrives | Companion + Wave | Warmth glow, particle attraction | 8 hrs/frame |
-| 7 — The Choice | All | Split-screen comp, dual lighting | 10 hrs/frame |
-| 8 — Letting Go | Riptide + Wave | Reflection shader (new), emotional close-up | 15 hrs/frame |
-| 9 — Every Wave | All + Sea | Full sim, bioluminescence, crowd waves | 20 hrs/frame |
+| Shot | Characters | FX | Frames (duration) | Est. render |
+|------|-----------|-----|-------------------|-------------|
+| 1 — The Shore | Riptide | Ocean sim, particle sand | 720 (30s) | 8 hrs/frame |
+| 2 — The Review | Riptide | Code node projection (procedural) | 480 (20s) | 4 hrs/frame |
+| 3 — Cycle montage | Riptide (×10) | Rapid wave sims | 360 (15s) | 3 hrs/frame |
+| 4 — Wave arrives | Riptide + Wave | Ink-drop sim (hero) | 600 (25s) | 12 hrs/frame |
+| 5 — Scan fails | Riptide | Glitch VFX, projection failure | 480 (20s) | 6 hrs/frame |
+| 6 — Companion arrives | Companion + Wave | Warmth glow, particle attraction | 360 (15s) | 8 hrs/frame |
+| 7 — The Choice | All | Split-screen comp, dual lighting | 480 (20s) | 10 hrs/frame |
+| 8 — Letting Go | Riptide + Wave | Reflection shader (new), emotional close-up | 360 (15s) | 15 hrs/frame |
+| 9 — Every Wave | All + Sea | Full sim, bioluminescence, crowd waves | 600 (25s) | 20 hrs/frame |
 
-**Total estimated render:** ~6,000 frame-hours (24fps × 210 seconds × avg 1.2 complexity factor)
+**Total frames:** 4,440 (24fps × 185s weighted average, ~210s total with transitions)
+
+**Total render hours:** 720×8 + 480×4 + 360×3 + 600×12 + 480×6 + 360×8 + 480×10 + 360×15 + 600×20 = **~28,260 frame-hours**
+
+**With 1.2× complexity factor (FX iterations, sim re-cooks):** ~33,912 frame-hours
+
+*Render farm cost at $1.50/GPU-hour (A100): ~$50,900 — original $10K estimate was pre-complexity-factor; updated below.*
 
 ### Phase 4: Lighting & Rendering (3–4 weeks)
 
@@ -275,40 +281,40 @@ A lonely code-review bot named **Riptide** spends its days scanning every wave (
 | **Original score** | $35,000 | 60-piece orchestra |
 | **Sound design + Foley** | $12,000 | Custom recordings |
 | **Mix (5.1)** | $8,000 | Studio time |
-| **Render farm** | $10,000 | ~6,000 frame-hours |
-| **Misc (project management, legal, contingency)** | $15,000 | 10% buffer |
-| **TOTAL** | **~$275,000** | |
+| **Render farm** | $51,000 | ~33,912 frame-hours (1.2× complexity factor) at $1.50/GPU-hr |
+| **Misc (project management, legal, contingency)** | $30,000 | 10% buffer on $301K subtotal |
+| **TOTAL** | **~$331,000** | |
 
-> *Comparable to Pixar's SparkShorts budget ($250K–$500K range)*
+> *Comparable to Pixar's SparkShorts budget ($250K–$500K range, per 2023 SparkShorts program data). This estimate covers production through delivery; marketing/distribution costs are separate.*
 
 ---
 
 ## 🗓️ Timeline
 
-| Week | Milestone |
-|------|-----------|
-| 1–3 | Pre-production (story, concept art, animatic, scratch audio) |
-| 4–6 | Asset creation (modeling, rigging, shader dev) |
-| 7–9 | Animation (blocking → spline → polish) |
-| 10–12 | Lighting, rendering, compositing (parallel) |
-| 10–12 | Audio final (parallel) |
-| 13 | Delivery, mastering, festival submission |
+| Week | Milestone | Overlaps |
+|------|-----------|----------|
+| 1–3 | Pre-production (story, concept art, animatic, scratch audio) | — |
+| 3–6 | Asset creation (modeling, rigging, shader dev) | Overlaps with pre-production (weeks 3–4) — concept art continues while modeling starts |
+| 6–9 | Animation (blocking → spline → polish) | Overlaps with asset creation (weeks 6–7) — blocking starts while rigging finishes |
+| 9–12 | Lighting, rendering, compositing | Full parallel with audio final (weeks 9–12) |
+| 9–12 | Audio final (parallel) | Full parallel with lighting/rendering/compositing |
+| 13 | Delivery, mastering, festival submission | — |
 
-**Total:** 13 weeks (3 months) from greenlock to master.
+**Total:** 13 weeks from greenlock to master. Weeks 3–4 and 6–7 have overlap phases to compress the critical path.
 
 ---
 
 ## 🎯 Festival Strategy
 
-| Festival | Deadline | Category |
-|----------|----------|----------|
-| **Annecy** | February | Official Selection (Short Film) |
-| **Ottawa** | March | Independent Animation |
-| **SIGGRAPH** | May | Computer Animation Festival (Electronic Theater) |
-| **Fantasia** | April | Animation |
-| **AFI Fest** | October | Animated Short |
-| **Sundance** | August | Short Film |
-| **BAFTA** | December | Animated Short |
+| Festival | Year | Deadline | Category | Source | Owner |
+|----------|------|----------|----------|--------|-------|
+| **Annecy** | 2027 | 15 October 2026 | Official Selection (Short Film) | [annecy.org/submission](https://www.annecy.org/submission) | Director |
+| **SIGGRAPH** | 2027 | April 2027 (TBA) | Computer Animation Festival (Electronic Theater) | [s2027.siggraph.org](https://s2027.siggraph.org) | Director |
+| **Sundance** | 2027 | 1 August 2026 (priority) / 15 August 2026 (final) | Short Film | [sundance.org/submit](https://www.sundance.org/submit) | Producer |
+| **Ottawa** | 2027 | 1 July 2027 | Independent Animation | [ottawanimationfestival.ca](https://www.ottawanimationfestival.ca) | Director |
+| **Fantasia** | 2027 | 1 March 2027 | Animation | [fantasiafestival.com](https://www.fantasiafestival.com) | Producer |
+| **AFI Fest** | 2026 | 15 July 2026 (closed — target 2027) | Animated Short | [afi.com/afifest](https://www.afi.com/afifest) | Producer |
+| **BAFTA** | 2027 | 1 October 2026 | Animated Short | [bafta.org/film/awards](https://www.bafta.org/film/awards) | Producer |
 
 ---
 
@@ -328,7 +334,7 @@ A lonely code-review bot named **Riptide** spends its days scanning every wave (
 
 ## 📁 File Structure for Production
 
-```
+```text
 riptide-media/
 ├── 01_preproduction/
 │   ├── script.md

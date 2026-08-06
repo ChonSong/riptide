@@ -17,12 +17,14 @@ Your branch is up to date with 'origin/main'.
 
 ### Main Branch
 - HEAD: `c896ec6` (Merge pull request #60)
-- All CI green, 390 tests pass
+- All CI green, 418 tests pass
 
 ### Key Files
+
 | File | LOC | Purpose |
 |------|-----|---------|
-| `riptide/companion.py` | 936 | Bot 1: TL;DR + ELI5 + ProofShot flagger |
+| `riptide/companion.py` | ~1030 | Bot 1: Deterministic analysis + TL;DR + ProofShot flagger |
+| `riptide/diff_analyzer.py` | ~330 | Deterministic diff analysis (security, complexity, error handling) |
 | `riptide/deepthink.py` | 709 | Bot 2: Cron polling + Hermes deep-think spawner |
 | `riptide/proofshotter.py` | 778 | Bot 3: Visual verification |
 | `riptide/fixer.py` | ~250 | Bot 2b: Autonomous fix |
@@ -71,11 +73,11 @@ Your branch is up to date with 'origin/main'.
 
 ## 4. Development Plan (Updated)
 
-### Phase 1: Fix Foundation (Companion)
-- [ ] 1.1 Replace echo-TL;DR with deterministic analysis (security patterns, complexity, missing error handling)
-- [ ] 1.2 Graphify integration: list specific affected files in comment
-- [ ] 1.3 Structured comment template: Verdict + Findings + Impact + Suggestions
-- [ ] 1.4 Only post when there's something actionable to say
+### Phase 1: Fix Foundation (Companion) ✅ COMPLETE
+- [x] 1.1 Deterministic analysis (security, complexity, error handling) — `riptide/diff_analyzer.py`
+- [x] 1.2 Graphify integration — blast radius cited in findings
+- [x] 1.3 Structured comment template — verdict + findings + impact
+- [x] 1.4 Only post when actionable findings exist — skips clean PRs
 
 ### Phase 2: Excalidraw Delivery
 - [ ] 2.1 T0 includes diagram URL when generated
@@ -150,7 +152,7 @@ graphify update .                    # AST-only refresh (no API cost)
 cd /home/sc/workspace/riptide && python -m pytest riptide/tests/ -q
 
 # Compile check
-python -m py_compile riptide/companion.py riptide/deepthink.py riptide/proofshotter.py riptide/webhook.py riptide/github_app.py riptide/fixer.py
+python -m py_compile riptide/companion.py riptide/deepthink.py riptide/proofshotter.py riptide/webhook.py riptide/github_app.py riptide/fixer.py riptide/diff_analyzer.py
 
 # PR status
 gh pr view <number> --json statusCheckRollup
@@ -173,11 +175,11 @@ gh run list --branch <branch> --status failure
 
 ## 10. PR Recovery (Closed but Not Lost)
 
-All closed PRs still have branches on origin. Can be reopened anytime:
+Closed PRs that retain origin branches can be reopened. PR #57's branch was deleted — its feature is preserved in #60:
 
 | PR | Branch | Content |
 |----|--------|---------|
-| #57 | (deleted) | Auto-deploy revert — superseded by #60 |
+| #57 | ❌ deleted | Auto-deploy revert — superseded by #60 (do not reopen) |
 | #44 | `coderabbitai/autofix/f3c8c93` | CodeRabbit auto-fixes for #38 |
 
 All other closed PRs were either merged or their features were incorporated into #60.
@@ -186,9 +188,10 @@ All other closed PRs were either merged or their features were incorporated into
 
 ## 11. Next Session Starting Point
 
-1. Start Phase 1: Companion redesign (the highest-priority fix)
-2. Use `session_search` to find detailed context from this session if needed
-3. Project board: https://github.com/users/ChonSong/projects/3
+1. **Phase 1 is complete** — deterministic Companion analysis merged via PR #61
+2. **Next: Phase 2** — Excalidraw delivery (T0 includes diagram URL, deterministic attachment)
+3. Use `session_search` to find detailed context from this session if needed
+4. Project board: https://github.com/users/ChonSong/projects/3
 
 ---
 

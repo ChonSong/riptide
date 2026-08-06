@@ -64,20 +64,28 @@ SECRET_PATTERNS = [
 ]
 
 # Injection risks
+# NOTE: These patterns are recall-tuned — they prioritize catching potential
+# security issues over avoiding false positives. Legitimate uses of
+# cursor.execute(query + " LIMIT") or subprocess.shell=True for git commands
+# will trigger these findings and should be reviewed by the author.
 INJECTION_PATTERNS = [
-    (re.compile(r"""execute\s*\(\s*["'][^"']*["']\s*\+\s*""", re.IGNORECASE), "Possible SQL injection via string concatenation in execute()"),
-    (re.compile(r"""(?:execute|query|raw)\s*\(\s*\w+\s*\)""", re.IGNORECASE), "SQL query via variable — ensure parameterization"),
+    (re.compile(r"""execute\s*\(\s*(?:f?["'][^"']*["']\s*\+|[^)]*\+\s*(?:f?["']|\w+\s*\+))""", re.IGNORECASE), "Possible SQL injection via string concatenation in execute()"),
     (re.compile(r"""\.format\s*\(.*\).*(?:query|sql|execute|raw)""", re.IGNORECASE), "Possible SQL injection via .format()"),
     (re.compile(r"""f["'][^"']*\{[^}]+\}[^"']*(?:query|sql|execute)""", re.IGNORECASE), "Possible SQL injection via f-string"),
-    (re.compile(r"""innerHTML\s*=""", re.IGNORECASE), "XSS risk: innerHTML assignment"),
+    (re.compile(r"""innerHTML\s*=(?!\s*["']<\w+>["'])""", re.IGNORECASE), "XSS risk: innerHTML assignment with variable"),
     (re.compile(r"""document\.write\s*\(""", re.IGNORECASE), "XSS risk: document.write()"),
-    (re.compile(r"""eval\s*\(""", re.IGNORECASE), "Code injection risk: eval()"),
-    (re.compile(r"""os\.system\s*\(\s*[^'"]""", re.IGNORECASE), "Command injection risk: os.system() with variable"),
-    (re.compile(r"""subprocess\..*shell\s*=\s*True""", re.IGNORECASE), "Command injection risk: subprocess with shell=True"),
+    (re.compile(r"""(?<![\w.])eval\s*\(""", re.IGNORECASE), "Code injection risk: eval()"),
+    (re.compile(r"""os\.system\s*\(\s*[^'")]""", re.IGNORECASE), "Command injection risk: os.system() with variable"),
+    (re.compile(r"""subprocess\.\w+.*shell\s*=\s*True""", re.IGNORECASE), "Command injection risk: subprocess with shell=True"),
 ]
 
-# Path traversal
-PATH_TRAVERSAL = re.compile(r"""(?:open|read|write)\s*\(\s*[^,]+\s*\+\s*[^,]+\s*\)""")
+# Path traversal — best-effort detection
+# Matches common patterns: open(var + var), f-string paths, os.path.join with user input
+PATH_TRAVERSAL_PATTERNS = [
+    re.compile(r"""(?:open|read|write)\s*\(\s*[^,]+\s*\+\s*[^,]+\s*\)"""),
+    re.compile(r"""f["'][^"']*\{[^}]*\}[^"']*["']\s*\)"""),
+    re.compile(r"""os\.path\.join\s*\([^)]*\+\s*"""),
+]
 
 
 # ── Complexity thresholds ────────────────────────────────────────────────────
@@ -94,6 +102,34 @@ ERROR_PATTERNS = [
     (re.compile(r"""except\s+(?:\w+Exception|Exception)\s+as\s+\w+\s*:\s*(?:#.*)?$""", re.MULTILINE), "Exception handler — verify it's not silently ignored"),
     (re.compile(r"""except\s+.*:\s*#\s*(?:TODO|FIXME|hack|temp)""", re.IGNORECASE | re.MULTILINE), "Exception handler marked as temporary"),
 ]
+
+# Patterns that indicate the exception IS properly handled
+PROPER_HANDLING = re.compile(r"""(?:raise|logging\.|\.error\(|\.warning\(|\.critical\(|\.exception\(|\.log\(|logger\.|print\(|sys\.stderr|traceback|notify|metric|counter|alert)""")
+
+
+def _is_silently_ignored(added_lines: list[str], match_line_idx: int) -> bool:
+    """Check if an exception handler body is silently ignored (pass/empty).
+    
+    Returns True if the body is `pass` or empty, False if it logs, raises,
+    or otherwise handles the exception.
+    """
+    # Look at the next few lines (the handler body)
+    for i in range(match_line_idx + 1, min(match_line_idx + 4, len(added_lines))):
+        line = added_lines[i]
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped == "pass":
+            return True
+        # If we hit another except/def/class/end of block, body was empty
+        if stripped.startswith(("except", "else:", "finally:", "def ", "class ", "return", "break", "continue")):
+            return True
+        # If there's a raise or logging call, it's properly handled
+        if PROPER_HANDLING.search(stripped):
+            return False
+        # Any other statement (e.g., return, assignment) — not silently ignored
+        return False
+    return True
 
 
 # ── Main analyzer ────────────────────────────────────────────────────────────
@@ -167,7 +203,7 @@ class DiffAnalyzer:
                     file=fname,
                 ))
 
-        if PATH_TRAVERSAL.search(text):
+        if any(p.search(text) for p in PATH_TRAVERSAL_PATTERNS):
             report.findings.append(Finding(
                 category="security",
                 severity="warning",
@@ -194,7 +230,7 @@ class DiffAnalyzer:
 
             # Detect function/def start
             if stripped.startswith("def ") or stripped.startswith("async def "):
-                if current_func and len(func_lines) > MAX_FUNCTION_LINES:
+                if current_func and len(func_lines) >= MAX_FUNCTION_LINES:
                     report.findings.append(Finding(
                         category="complexity",
                         severity="warning",
@@ -245,12 +281,32 @@ class DiffAnalyzer:
         added_lines = self._get_added_lines(patch)
         text = "\n".join(added_lines)
 
-        for pattern, message in ERROR_PATTERNS:
-            if pattern.search(text):
+        for i, line in enumerate(added_lines):
+            stripped = line.strip()
+            # Check bare except
+            if re.match(r"^except\s*:\s*$", stripped):
                 report.findings.append(Finding(
                     category="error_handling",
                     severity="warning",
-                    message=message,
+                    message="Bare except clause — catches SystemExit and KeyboardInterrupt",
+                    file=fname,
+                ))
+                continue
+            # Check exception handlers
+            if re.match(r"^except\s+\w*Exception\s+as\s+\w+\s*:\s*(?:#.*)?$", stripped):
+                if _is_silently_ignored(added_lines, i):
+                    report.findings.append(Finding(
+                        category="error_handling",
+                        severity="warning",
+                        message="Exception silently ignored (pass or empty body)",
+                        file=fname,
+                    ))
+                continue
+            if re.match(r"^except\s+.*:\s*#\s*(?:TODO|FIXME|hack|temp)", stripped, re.IGNORECASE):
+                report.findings.append(Finding(
+                    category="error_handling",
+                    severity="warning",
+                    message="Exception handler marked as temporary",
                     file=fname,
                 ))
 

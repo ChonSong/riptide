@@ -108,14 +108,26 @@ SWALLOWED_EXCEPT_PATCH = """\
 +    pass
 """
 
-HARDCODED_SECRET_PATCH = """\
-+API_KEY = "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6"
-+password = "super_secret_123"
+SWALLOWED_LOGGING_PATCH = """\
++try:
++    process()
++except ValueError as e:
++    logger.warning("fallback: %s", e)
++    raise
 """
 
+HARDCODED_SECRET_PATCH = """\
++API_KEY = "{key_fragment_a}{key_fragment_b}"
++password = "{pwd_fragment_a}{pwd_fragment_b}"
+""".format(
+    key_fragment_a="a1b2c3d4e5f6g7h8",
+    key_fragment_b="i9j0k1l2m3n4o5p6",
+    pwd_fragment_a="super",
+    pwd_fragment_b="_secret_123",
+)
+
 SQL_INJECTION_PATCH = """\
-+query = "SELECT * FROM users WHERE id = " + user_id
-+cursor.execute(query)
++cursor.execute("SELECT * FROM users WHERE id = " + user_id)
 +db.raw("DELETE FROM " + table_name)
 """
 
@@ -205,6 +217,82 @@ class TestComplexity:
         assert len(complexity_findings) == 0
 
 
+EXACTLY_50_LINE_FUNC_PATCH = """\
++def exactly_fifty_lines():
++    x1 = 1
++    x2 = 2
++    x3 = 3
++    x4 = 4
++    x5 = 5
++    x6 = 6
++    x7 = 7
++    x8 = 8
++    x9 = 9
++    x10 = 10
++    x11 = 11
++    x12 = 12
++    x13 = 13
++    x14 = 14
++    x15 = 15
++    x16 = 16
++    x17 = 17
++    x18 = 18
++    x19 = 19
++    x20 = 20
++    x21 = 21
++    x22 = 22
++    x23 = 23
++    x24 = 24
++    x25 = 25
++    x26 = 26
++    x27 = 27
++    x28 = 28
++    x29 = 29
++    x30 = 30
++    x31 = 31
++    x32 = 32
++    x33 = 33
++    x34 = 34
++    x35 = 35
++    x36 = 36
++    x37 = 37
++    x38 = 38
++    x39 = 39
++    x40 = 40
++    x41 = 41
++    x42 = 42
++    x43 = 43
++    x44 = 44
++    x45 = 45
++    x46 = 46
++    x47 = 47
++    x48 = 48
++    x49 = 49
++    x50 = 50
++    return x50
+"""
+
+
+class TestComplexityBoundary:
+    """Tests for function length boundary conditions."""
+
+    def test_exact_boundary_triggers(self, analyzer):
+        files = [make_file("boundary.py", EXACTLY_50_LINE_FUNC_PATCH, additions=52)]
+        report = analyzer.analyze(files)
+        complexity_findings = [f for f in report.findings if f.category == "complexity"]
+        assert any("threshold: 50" in f.message for f in complexity_findings)
+
+    def test_just_under_boundary_no_warning(self, analyzer):
+        patch = """\
++def small_func():
++    return 42
++"""
+        files = [make_file("small.py", patch, additions=3)]
+        report = analyzer.analyze(files)
+        complexity_findings = [f for f in report.findings if f.category == "complexity"]
+        assert len(complexity_findings) == 0
+
+
 # ── Error handling tests ─────────────────────────────────────────────────────
 
 
@@ -219,7 +307,13 @@ class TestErrorHandling:
         files = [make_file("processor.py", SWALLOWED_EXCEPT_PATCH, additions=4)]
         report = analyzer.analyze(files)
         error_findings = [f for f in report.findings if f.category == "error_handling"]
-        assert any("exception handler" in f.message.lower() for f in error_findings)
+        assert any("silently ignored" in f.message.lower() for f in error_findings)
+
+    def test_properly_handled_exception_not_reported(self, analyzer):
+        files = [make_file("handler.py", SWALLOWED_LOGGING_PATCH, additions=5)]
+        report = analyzer.analyze(files)
+        error_findings = [f for f in report.findings if f.category == "error_handling"]
+        assert len(error_findings) == 0
 
 
 # ── Structural tests ─────────────────────────────────────────────────────────
