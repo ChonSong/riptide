@@ -13,23 +13,10 @@ Pure Python, no LLM. Deterministic output.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 from riptide.diff_analyzer import DiffAnalyzer, DiffReport
-
-
-# ── Core files (touches_core detection) ─────────────────────────────────────
-
-CORE_FILES = {
-    "server.py",
-    "webhook.py",
-    "orchestrator.py",
-    "deepthink.py",
-    "companion.py",
-    "diff_analyzer.py",
-    "state.py",
-}
 
 
 # ── Concept classification ──────────────────────────────────────────────────
@@ -76,19 +63,6 @@ class DiffConcept:
     deletions: int
     status: str          # "added", "modified", "removed"
     has_patch: bool
-
-
-@dataclass
-class ContextBundle:
-    """Structured bundle of deterministic signals for a PR."""
-
-    findings: list[dict] = field(default_factory=list)
-    stats: dict = field(default_factory=dict)
-    verdict: str = "pass"
-    summary: str = ""
-    concepts: list[DiffConcept] = field(default_factory=list)
-    aggregate: dict = field(default_factory=dict)
-    test_status: dict = field(default_factory=lambda: {"available": False, "status": None})
 
 
 # ── Concept classifier ──────────────────────────────────────────────────────

@@ -237,8 +237,8 @@ class TestBuildContextBundle:
         bundle = build_context_bundle(files, graph_context=None)
         assert bundle["aggregate"]["touches_core"] is False
 
-    def test_touches_core_via_core_list(self):
-        """Files in CORE_FILES should be classified as core concept."""
+    def test_touches_core_via_core_rule(self):
+        """Core files (matching the CONCEPT_RULES core regex) are classified as core concept."""
         files = [
             make_file("webhook.py"),
         ]
