@@ -17,8 +17,8 @@ import time
 import logging
 import threading
 import subprocess
-import traceback
 import requests
+import traceback
 from pathlib import Path
 from typing import Optional
 
