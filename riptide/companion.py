@@ -28,6 +28,7 @@ from typing import Optional
 import requests
 
 from riptide.diff_analyzer import DiffAnalyzer, DiffReport
+from riptide.context_bundle import build_context_bundle, concept_summary
 
 logger = logging.getLogger("riptide.companion")
 
@@ -386,6 +387,9 @@ class Companion:
         # Deterministic analyzer
         self._analyzer = DiffAnalyzer()
 
+        # Context bundle (Vision Pillar 1)
+        self._context_bundle = None
+
         logger.info(
             "Companion initialised: model=%s repos=%s deterministic=%s",
             self.model, sorted(self.allowed_repos) if self.allowed_repos else "(none)",
@@ -580,6 +584,16 @@ class Companion:
         emoji = classify_pr_mood(title, files)
         graph_context = self._get_graph_context(files) if self.enable_graphify else None
 
+        # Vision Pillar 1: Build deterministic context bundle
+        pr_body = pr_details.get("body", "") if pr_details else ""
+        pr_draft = pr_details.get("draft", False) if pr_details else False
+        self._context_bundle = build_context_bundle(
+            files,
+            graph_context,
+            pr_details={"title": title, "body": pr_body, "author": author, "draft": pr_draft},
+        )
+        logger.info("Context bundle: %s", concept_summary(self._context_bundle))
+
         # Phase 1: Deterministic analysis (primary path)
         deterministic_report = None
         if self.enable_deterministic:
@@ -660,6 +674,15 @@ class Companion:
                 self._set_last_sha(owner, repo, pr_number, current_sha)
         except Exception as e:
             logger.error("Failed to post: %s", e)
+
+    def build_context_bundle(self, files: list[dict], graph_context: dict | None,
+                              pr_details: dict | None = None) -> dict:
+        """Build a deterministic context bundle (Vision Pillar 1).
+
+        Stores result on self._context_bundle and returns it.
+        """
+        self._context_bundle = build_context_bundle(files, graph_context, pr_details)
+        return self._context_bundle
 
     def _get_graph_context(self, changed_files):
         graphify_bin = os.environ.get("GRAPHIFY_BIN", "graphify")
