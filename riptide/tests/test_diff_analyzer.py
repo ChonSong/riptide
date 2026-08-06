@@ -156,6 +156,21 @@ HARMLESS_FSTRING_PATCH = """\
 +result = do_work(user_id)
 +"""
 
+RESPONSE_WRITE_PATCH = """\
++response.write("Content: " + str(data))
++stream.read(buffer + chunk)
++"""
+
+PATH_TRAVERSAL_TRUE_POSITIVE = """\
++open(f"var/data/{user_id}" + "/config.txt", "r")
++path = os.path.join("root", prefix + suffix)
++"""
+
+PATH_TRAVERSAL_FSTRING_LARGE = """\
++with open(f"/tmp/{user_id}/file.txt", "r") as f:
++    data = f.read()
++"""
+
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -212,6 +227,20 @@ class TestSecurityPatterns:
         path_findings = [f for f in report.findings if "path traversal" in f.message.lower()]
         assert len(path_findings) == 0
         assert report.verdict == "pass"
+
+    def test_response_write_no_path_traversal(self, analyzer):
+        """response.write and stream.read with concatenation should not trigger."""
+        files = [make_file("server.py", RESPONSE_WRITE_PATCH, additions=2)]
+        report = analyzer.analyze(files)
+        path_findings = [f for f in report.findings if "path traversal" in f.message.lower()]
+        assert len(path_findings) == 0
+
+    def test_path_traversal_true_positive(self, analyzer):
+        """Actual filesystem path construction should trigger."""
+        files = [make_file("handler.py", PATH_TRAVERSAL_TRUE_POSITIVE, additions=2)]
+        report = analyzer.analyze(files)
+        path_findings = [f for f in report.findings if "path traversal" in f.message.lower()]
+        assert len(path_findings) >= 1
 
 
 class TestRegexPatternsValid:
@@ -360,6 +389,58 @@ class TestErrorHandling:
         report = analyzer.analyze(files)
         error_findings = [f for f in report.findings if f.category == "error_handling"]
         assert len(error_findings) == 0
+
+    def test_broadened_exception_header_with_unchanged_body(self, analyzer):
+        """Verify that exception handlers with unchanged context body are correctly classified."""
+        # This patch has the handler in unchanged context (not added)
+        patch = """\
+ try:
+     process()
+ except ValueError as e:
+     logger.info("handled: %s", e)
+     raise
+"""
+        files = [make_file("handler.py", patch, additions=0)]
+        report = analyzer.analyze(files)
+        error_findings = [f for f in report.findings if f.category == "error_handling"]
+        # The handler has a proper body (logging + raise), should NOT be flagged
+        assert len(error_findings) == 0
+
+
+# ── Function tracking / dedent tests ────────────────────────────────────────
+
+SHORT_FUNC_PLUS_MODULE_LEVEL = """\
++def short_function():
++    return 42
++x = 1
++y = 2
++class Foo:
++    pass
+"""
+
+
+class TestFunctionBoundary:
+    def test_short_function_not_overcounted(self, analyzer):
+        """A short function followed by module-level code should not inflate count."""
+        files = [make_file("module.py", SHORT_FUNC_PLUS_MODULE_LEVEL, additions=7)]
+        report = analyzer.analyze(files)
+        complexity_findings = [f for f in report.findings if f.category == "complexity"]
+        assert len(complexity_findings) == 0
+
+    def test_dedent_closes_function(self, analyzer):
+        """Dedenting to module level should close the active function."""
+        patch = """\
++def func_a():
++    x = 1
++y = 100
++def func_b():
++    z = 2
++"""
+        files = [make_file("module.py", patch, additions=6)]
+        report = analyzer.analyze(files)
+        complexity_findings = [f for f in report.findings if f.category == "complexity"]
+        # Neither function is 50+ lines
+        assert len(complexity_findings) == 0
 
 
 # ── Structural tests ─────────────────────────────────────────────────────────

@@ -80,11 +80,10 @@ INJECTION_PATTERNS = [
 ]
 
 # Path traversal — best-effort detection
-# Matches common patterns: open(var + var), f-string paths in filesystem sinks,
-# os.path.join with user input
+# Matches: open(var + var), f-string paths in filesystem sinks, os.path.join/shutil with user input
 PATH_TRAVERSAL_PATTERNS = [
-    re.compile(r"""(?:open|read|write)\s*\(\s*[^,]+\s*\+\s*[^,]+\s*\)"""),
-    re.compile(r"""(?:open|read|write|os\.path\.join|shutil\.move|shutil\.copy)\s*\(\s*f["'][^"']*\{[^}]*\}[^"']*["']"""),
+    re.compile(r"""(?:open|os\.open|io\.open)\s*\(\s*[^,]+\s*\+\s*[^,]+\s*\)"""),
+    re.compile(r"""(?:open|os\.path\.join|shutil\.move|shutil\.copy|os\.rename|os\.replace|os\.unlink|os\.remove)\s*\(\s*f["'][^"']*\{[^}]*\}[^"']*["']"""),
     re.compile(r"""os\.path\.join\s*\([^)]*\+\s*"""),
 ]
 
@@ -108,16 +107,25 @@ ERROR_PATTERNS = [
 PROPER_HANDLING = re.compile(r"""(?:raise|logging\.|\.error\(|\.warning\(|\.critical\(|\.exception\(|\.log\(|logger\.|print\(|sys\.stderr|traceback|notify|metric|counter|alert)""")
 
 
-def _is_silently_ignored(added_lines: list[str], match_line_idx: int) -> bool:
+def _is_silently_ignored(patch_lines: list[str], match_line_idx: int) -> bool:
     """Check if an exception handler body is silently ignored (pass/empty).
+    
+    Inspects the complete diff hunk (including unchanged context lines)
+    to accurately classify exception-handler bodies.
     
     Returns True if the body is `pass` or empty, False if it logs, raises,
     returns a fallback, or otherwise handles the exception.
     """
-    # Look at the next few lines (the handler body)
-    for i in range(match_line_idx + 1, min(match_line_idx + 4, len(added_lines))):
-        line = added_lines[i]
+    # Look at the next few lines (the handler body) in the full patch
+    for i in range(match_line_idx + 1, min(match_line_idx + 5, len(patch_lines))):
+        line = patch_lines[i]
+        # Skip diff headers and empty lines
         stripped = line.strip()
+        if not stripped or stripped.startswith(("+++", "---", "@@")):
+            continue
+        # Remove diff prefix (+/- ) for analysis
+        if stripped.startswith(("+", "-")):
+            stripped = stripped[1:].strip()
         if not stripped or stripped.startswith("#"):
             continue
         if stripped == "pass":
@@ -245,8 +253,23 @@ class DiffAnalyzer:
                 continue
 
             if current_func:
-                func_lines.append(line)
                 level = self._nesting_level(line)
+
+                # If we dedent back to or below function definition level, close the function
+                if level <= nesting_stack[0] and not stripped.startswith(("@", "#")):
+                    if len(func_lines) >= MAX_FUNCTION_LINES:
+                        report.findings.append(Finding(
+                            category="complexity",
+                            severity="warning",
+                            message=f"Function '{current_func}' is {len(func_lines)} lines (threshold: {MAX_FUNCTION_LINES})",
+                            file=fname,
+                        ))
+                    current_func = None
+                    func_lines = []
+                    nesting_stack = []
+                    continue
+
+                func_lines.append(line)
 
                 # Track nesting depth
                 if level > 0:
@@ -280,7 +303,18 @@ class DiffAnalyzer:
     def _check_error_handling(self, patch: str, fname: str, report: DiffReport):
         """Check for anti-patterns in error handling."""
         added_lines = self._get_added_lines(patch)
-        text = "\n".join(added_lines)
+        # Full patch lines for context-aware handler body inspection
+        patch_lines = [line for line in patch.split("\n") if not line.startswith(("+++", "---", "@@"))]
+        # Map added_lines indices to patch_lines indices
+        added_to_patch_idx = {}
+        patch_idx = 0
+        for add_idx, add_line in enumerate(added_lines):
+            while patch_idx < len(patch_lines):
+                if patch_lines[patch_idx].lstrip().startswith(add_line):
+                    added_to_patch_idx[add_idx] = patch_idx
+                    patch_idx += 1
+                    break
+                patch_idx += 1
 
         for i, line in enumerate(added_lines):
             stripped = line.strip()
@@ -295,7 +329,8 @@ class DiffAnalyzer:
                 continue
             # Check exception handlers
             if re.match(r"^except\s+\w*Exception\s+as\s+\w+\s*:\s*(?:#.*)?$", stripped):
-                if _is_silently_ignored(added_lines, i):
+                patch_idx = added_to_patch_idx.get(i, i)
+                if _is_silently_ignored(patch_lines, patch_idx):
                     report.findings.append(Finding(
                         category="error_handling",
                         severity="warning",

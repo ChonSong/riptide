@@ -433,6 +433,7 @@ class TestDeterministicAnalysis:
     def test_fallback_to_llm_when_analyzer_raises(self, mock_ollama):
         companion = make_companion()
         companion.enable_deterministic = True
+        companion.enable_graphify = False
         companion.client.post_pr_comment = MagicMock()
         companion._get_last_sha = MagicMock(return_value=None)
 
