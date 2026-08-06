@@ -27,6 +27,8 @@ from typing import Optional
 
 import requests
 
+from riptide.diff_analyzer import DiffAnalyzer, DiffReport
+
 logger = logging.getLogger("riptide.companion")
 
 # ── Emoji classification ─────────────────────────────────────────────────────
@@ -374,15 +376,20 @@ class Companion:
                 self.allowed_repos = {r.strip() for r in raw.split(",") if r.strip()}
 
         self.enable_graphify = os.environ.get("COMPANION_ENABLE_GRAPHIFY", "1") == "1"
+        self.enable_deterministic = os.environ.get("COMPANION_ENABLE_DETERMINISTIC", "1") == "1"
 
         # Cooldown config
         self._pr_alert_cooldown = 600   # 10 min per PR
         self._global_alert_cooldown = 600  # 10 min global
         self._owned_org = os.environ.get("RIPTIDE_OWNED_ORG", "ChonSong")
 
+        # Deterministic analyzer
+        self._analyzer = DiffAnalyzer()
+
         logger.info(
-            "Companion initialised: model=%s repos=%s",
+            "Companion initialised: model=%s repos=%s deterministic=%s",
             self.model, sorted(self.allowed_repos) if self.allowed_repos else "(none)",
+            self.enable_deterministic,
         )
         threading.Thread(target=self.warm_up, daemon=True).start()
 
@@ -573,11 +580,38 @@ class Companion:
         emoji = classify_pr_mood(title, files)
         graph_context = self._get_graph_context(files) if self.enable_graphify else None
 
-        # Generate TL;DR — with retry + self-heal on persistent failure
-        tldr = self._generate_tldr_with_retry(title, author, files, graph_context, is_delta=is_delta)
-        if not tldr:
-            logger.warning("TLDR failed %s#%d — initiating self-heal", full_name, pr_number)
-            self._handle_degradation(installation_id, owner, repo, pr_number, full_name)
+        # Phase 1: Deterministic analysis (primary path)
+        deterministic_report = None
+        if self.enable_deterministic:
+            deterministic_report = self._analyzer.analyze(files)
+            logger.info(
+                "Deterministic analysis for %s#%d: %d findings, verdict=%s",
+                full_name, pr_number, len(deterministic_report.findings),
+                deterministic_report.verdict,
+            )
+
+        # Generate TL;DR — deterministic first, LLM fallback only if disabled
+        tldr = None
+        if deterministic_report and deterministic_report.has_actionable:
+            # 1.3: Structured comment template
+            tldr = self._format_deterministic_tldr(deterministic_report, graph_context)
+        elif not self.enable_deterministic:
+            # Legacy path: LLM echo (only when deterministic is disabled)
+            tldr = self._generate_tldr_with_retry(title, author, files, graph_context, is_delta=is_delta)
+            if not tldr:
+                logger.warning("TLDR failed %s#%d — initiating self-heal", full_name, pr_number)
+                self._handle_degradation(installation_id, owner, repo, pr_number, full_name)
+                return
+        else:
+            # Deterministic ran but no findings — use a concise summary
+            tldr = self._format_deterministic_tldr(deterministic_report, graph_context)
+
+        # 1.4: Only post when there's something actionable to say
+        if deterministic_report and not deterministic_report.has_actionable and not graph_context:
+            logger.info(
+                "No actionable findings for %s#%d — skipping comment",
+                full_name, pr_number,
+            )
             return
 
         # Detect UI files for ProofShot section
@@ -585,11 +619,12 @@ class Companion:
         ui_files = [f for f in files if any(f.get("filename", "").endswith(ext) for ext in ui_extensions)]
 
         # Generate ELI5 (optional — skip if model fails)
-        eli5 = self._generate_eli5(title, files, is_delta=is_delta)
+        eli5 = self._generate_eli5(title, files, is_delta=is_delta) if not self.enable_deterministic else None
 
         body = self._format_comment(emoji, author, tldr, graph_context, eli5, ui_files,
                                     owner=owner, repo=repo, pr_number=pr_number,
-                                    title=title, files=files, is_delta=is_delta)
+                                    title=title, files=files, is_delta=is_delta,
+                                    deterministic_report=deterministic_report)
 
         try:
             self.client.post_pr_comment(installation_id, owner, repo, pr_number, body)
@@ -864,6 +899,31 @@ ELI5:"""
         bad = ["private message", "cannot provide", "can't provide", "cannot summarize", "can't summarize", "i cannot", "i can't", "as an ai", "i'm sorry", "i am sorry", "unable to"]
         return not any(p in text.lower() for p in bad)
 
+    def _format_deterministic_tldr(self, report: DiffReport, graph_context) -> str:
+        """1.3: Structured TL;DR from deterministic analysis."""
+        verdict_emoji = {"pass": "✅", "review": "⚠️", "block": "🛑"}.get(report.verdict, "✅")
+        parts = [f"{verdict_emoji} {report.summary}"]
+
+        # Add specific findings as bullet points (max 5)
+        for finding in report.findings[:5]:
+            icon = {"critical": "🔴", "warning": "🟡", "info": "🔵"}.get(finding.severity, "⚪")
+            file_ref = f" (`{finding.file.split('/')[-1]}`)" if finding.file else ""
+            parts.append(f"- {icon} {finding.message}{file_ref}")
+
+        if len(report.findings) > 5:
+            parts.append(f"- ...and {len(report.findings) - 5} more findings")
+
+        # Graphify blast radius
+        if graph_context and graph_context.get("nodes", 0) > 0:
+            raw = graph_context["raw"]
+            useful = [l.strip() for l in raw.split("\n") if l.strip() and not l.strip().startswith(("Affected", "Relations", "Depth", "---")) and "→" in l.strip()]
+            if useful:
+                parts.append(f"\n📊 Blast radius: {'; '.join(useful[:3])}")
+            elif graph_context.get("files_checked", 0) > 0:
+                parts.append(f"\n📊 Blast radius: {graph_context['files_checked']} files, {graph_context['nodes']} code paths")
+
+        return "\n".join(parts)
+
     @staticmethod
     def _get_bot2_status(owner: str, repo: str, pr_number: int) -> Optional[str]:
         """Read deepthink state and return a Bot 2 status line for the comment footer."""
@@ -891,14 +951,19 @@ ELI5:"""
             return None
 
     def _format_comment(self, emoji, author, tldr, graph_context, eli5=None, ui_files=None,
-                        owner=None, repo=None, pr_number=None, title=None, files=None, is_delta=False):
+                        owner=None, repo=None, pr_number=None, title=None, files=None, is_delta=False,
+                        deterministic_report: DiffReport | None = None):
         """
-        Build the Markdown comment body using the Phase 4 TLDR spec.
-        Includes optional ELI5 (Explain Like I'm 5) section.
-        Includes ProofShot section if UI files changed.
+        Build the Markdown comment body.
+        Uses deterministic findings if available, otherwise falls back to legacy format.
         """
         prefix = "🔄 " if is_delta else ""
-        parts = [f"## {prefix}{emoji} TL;DR\n\n@{author} — {tldr}"]
+
+        # Use structured verdict header if deterministic report available
+        if deterministic_report and deterministic_report.verdict in ("review", "block"):
+            parts = [f"## {prefix}{emoji} Review Required\n\n@{author}:\n{tldr}"]
+        else:
+            parts = [f"## {prefix}{emoji} TL;DR\n\n@{author} — {tldr}"]
 
         if graph_context and graph_context.get("nodes", 0) > 0:
             raw = graph_context["raw"]
@@ -927,9 +992,9 @@ ELI5:"""
                 parts.append(f"\n{bot2_status}")
 
         # Sign-off
-        parts.append(f"\n\n---\n<sub>🤖 Generated by Riptide · PR review via local Ollama ({self.model}) · `@riptide-bot companion skip` to opt out")
+        parts.append(f"\n\n---\n<sub>🤖 Generated by Riptide · deterministic analysis")
         if owner and repo:
-            parts.append(f" · `@riptide-bot review` for deep-think</sub>")
+            parts.append(f" · `@riptide-bot companion skip` to opt out · `@riptide-bot review` for deep-think</sub>")
         else:
             parts.append("</sub>")
 
