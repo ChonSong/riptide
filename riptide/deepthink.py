@@ -27,6 +27,8 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
+from riptide.state import StateStore
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -129,26 +131,36 @@ STATE_FILE = Path(
 
 
 def _load_state() -> dict[str, dict]:
-    """Load processed PR state: {owner/repo#number: {head_sha, reviewed_at}}"""
-    if STATE_FILE.exists():
-        try:
-            return json.loads(STATE_FILE.read_text())
-        except (json.JSONDecodeError, OSError):
-            return {}
-    return {}
+    """Back-compat: return all PR heuristics as {pr_key: {head_sha, reviewed_at}}.
+
+    WS-3 Stage 0: the authority is StateStore.pr_heuristics; this wrapper
+    preserves the old dict shape for callers/tests.
+    """
+    store = StateStore()
+    conn = store._get_conn()
+    rows = conn.execute(
+        "SELECT pr_key, last_sha, reviewed_at FROM pr_heuristics"
+    ).fetchall()
+    return {
+        pr_key: {"head_sha": last_sha, "reviewed_at": reviewed_at}
+        for pr_key, last_sha, reviewed_at in rows
+    }
 
 
 def _save_state(state: dict[str, dict]):
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(state, indent=2))
+    """Back-compat: persist PR heuristics into StateStore.pr_heuristics."""
+    store = StateStore()
+    for pr_key, entry in state.items():
+        if entry.get("head_sha"):
+            store.set_pr_last_sha(pr_key, entry["head_sha"])
+        if entry.get("reviewed_at"):
+            store.set_pr_reviewed_at(pr_key, entry["reviewed_at"])
 
 
 def _was_reviewed_today(owner: str, repo: str, pr_number: int) -> bool:
-    """Check if this PR was reviewed in the last 24 hours."""
+    """Check if this PR was reviewed in the last 24 hours (StateStore-backed)."""
     pr_key = f"{owner}/{repo}#{pr_number}"
-    state = _load_state()
-    entry = state.get(pr_key, {})
-    reviewed_at = entry.get("reviewed_at", "")
+    reviewed_at = StateStore().get_pr_heuristics(pr_key)["reviewed_at"]
     if not reviewed_at:
         return False
     try:
@@ -609,7 +621,7 @@ def run():
         log.error("hermes binary not found — can't spawn sessions")
         sys.exit(1)
 
-    state = _load_state()
+    state_store = StateStore()
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(minutes=STALENESS_MINUTES)
     triggered = 0
@@ -674,7 +686,8 @@ def run():
 
             # Dedup: same head SHA already processed OR reviewed in last 24h
             pr_key = f"{repo_full}#{pr_number}"
-            if state.get(pr_key, {}).get("head_sha") == head_sha:
+            h = state_store.get_pr_heuristics(pr_key)
+            if h["last_sha"] == head_sha:
                 log.info(f"  #{pr_number} skip — already processed (SHA {head_sha[:12]})")
                 skipped_dedup += 1
                 continue
@@ -691,8 +704,8 @@ def run():
             )
             if _spawn_deepthink(owner, repo_name, pr_number, pr_title, pr_author, total_loc, head_sha):
                 # Record dedup only on successful spawn
-                state[pr_key] = {"head_sha": head_sha, "reviewed_at": datetime.now(timezone.utc).isoformat()}
-                _save_state(state)
+                state_store.set_pr_last_sha(pr_key, head_sha)
+                state_store.set_pr_reviewed_at(pr_key, datetime.now(timezone.utc).isoformat())
                 triggered += 1
             else:
                 log.warning(f"  #{pr_number} spawn failed after retries — not recording state")

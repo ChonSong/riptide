@@ -250,3 +250,69 @@ class TestTemporaryDirectoryCleanup:
             
             # Should return None on failure
             assert result is None
+
+
+class TestPrHeuristics:
+    """WS-3 Stage 0: pr_heuristics table is the single authority for
+    skip/last_sha/reviewed_at across Companion and Deepthink."""
+
+    def setup_method(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self.tmp.name) / "state.db")
+        self.store = StateStore(self.db_path)
+
+    def teardown_method(self):
+        self.tmp.cleanup()
+
+    def test_defaults_are_empty(self):
+        h = self.store.get_pr_heuristics("ChonSong/riptide#1")
+        assert h == {"skip": False, "last_sha": None, "reviewed_at": None}
+
+    def test_set_skip_roundtrip(self):
+        self.store.set_pr_skip("ChonSong/riptide#1", True)
+        assert self.store.get_pr_heuristics("ChonSong/riptide#1")["skip"] is True
+        self.store.set_pr_skip("ChonSong/riptide#1", False)
+        assert self.store.get_pr_heuristics("ChonSong/riptide#1")["skip"] is False
+
+    def test_set_last_sha_roundtrip(self):
+        self.store.set_pr_last_sha("ChonSong/riptide#1", "abc123")
+        assert self.store.get_pr_heuristics("ChonSong/riptide#1")["last_sha"] == "abc123"
+        self.store.set_pr_last_sha("ChonSong/riptide#1", "def456")
+        assert self.store.get_pr_heuristics("ChonSong/riptide#1")["last_sha"] == "def456"
+
+    def test_set_reviewed_at_roundtrip(self):
+        self.store.set_pr_reviewed_at("ChonSong/riptide#1", "2026-08-07T00:00:00+00:00")
+        assert self.store.get_pr_heuristics("ChonSong/riptide#1")["reviewed_at"] == "2026-08-07T00:00:00+00:00"
+
+    def test_fields_independent(self):
+        """Setting one field must not clobber the others (upsert per-column)."""
+        self.store.set_pr_skip("ChonSong/riptide#1", True)
+        self.store.set_pr_last_sha("ChonSong/riptide#1", "abc123")
+        self.store.set_pr_reviewed_at("ChonSong/riptide#1", "2026-08-07T00:00:00+00:00")
+        h = self.store.get_pr_heuristics("ChonSong/riptide#1")
+        assert h == {
+            "skip": True,
+            "last_sha": "abc123",
+            "reviewed_at": "2026-08-07T00:00:00+00:00",
+        }
+
+    def test_persists_across_instances(self):
+        self.store.set_pr_skip("ChonSong/riptide#1", True)
+        other = StateStore(self.db_path)
+        assert other.get_pr_heuristics("ChonSong/riptide#1")["skip"] is True
+
+    def test_migration_creates_table_on_existing_db(self):
+        """A v4 DB upgrades to v5 without data loss."""
+        # Build a real DB, then downgrade it to simulate a v4 install:
+        # drop the pr_heuristics table and reset user_version.
+        seed = StateStore(self.db_path)
+        seed.set_pr_skip("ChonSong/riptide#1", True)
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("DROP TABLE pr_heuristics")
+        conn.execute("PRAGMA user_version = 4")
+        conn.commit()
+        conn.close()
+        upgraded = StateStore(self.db_path)
+        assert upgraded.get_pr_heuristics("ChonSong/riptide#1")["skip"] is False
+        upgraded.set_pr_skip("ChonSong/riptide#1", True)
+        assert upgraded.get_pr_heuristics("ChonSong/riptide#1")["skip"] is True

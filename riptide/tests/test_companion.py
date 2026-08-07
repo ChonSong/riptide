@@ -8,6 +8,7 @@ import os
 import re
 import time
 import threading
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -22,7 +23,14 @@ def make_companion(tmp_path=None):
     """Create a Companion instance with mocked github client and disabled warm-up."""
     client = MagicMock()
     with patch("threading.Thread"):
-        companion = Companion(client)
+        # WS-3 Stage 0: inject an isolated StateStore so tests never touch the
+        # real prod state.db and legacy-skip import is a no-op (no file).
+        from riptide.state import StateStore
+        import tempfile as _tempfile
+
+        state_dir = tmp_path if tmp_path else _tempfile.mkdtemp(prefix="companion-test-")
+        store = StateStore(str(Path(state_dir) / "state.db"))
+        companion = Companion(client, state_store=store)
     if tmp_path:
         companion._alert_file = tmp_path / "companion_alerts.json"
         companion._alert_lock = threading.Lock()
@@ -44,6 +52,53 @@ class TestOllamaEndpoint:
         with patch.dict(os.environ, {"OLLAMA_BASE_URL": "http://ollama:8080"}, clear=True):
             companion = make_companion()
             assert companion.ollama_base == "http://ollama:8080"
+
+
+# ── StateStore-backed heuristics (WS-3 Stage 0) ─────────────────────────────
+
+
+class TestStateStoreHeuristics:
+    """Skip/last_sha now persist in StateStore.pr_heuristics, not JSON files."""
+
+    def test_skip_persists_via_state_store(self, tmp_path):
+        companion = make_companion(tmp_path)
+        assert companion.set_skip("ChonSong", "riptide", 42, True) is True
+        assert companion._is_skipped("ChonSong", "riptide", 42) is True
+        # A fresh instance backed by the same store still sees the skip
+        fresh = make_companion(tmp_path)
+        assert fresh._is_skipped("ChonSong", "riptide", 42) is True
+
+    def test_resume_clears_skip(self, tmp_path):
+        companion = make_companion(tmp_path)
+        companion.set_skip("ChonSong", "riptide", 42, True)
+        companion.set_skip("ChonSong", "riptide", 42, False)
+        assert companion._is_skipped("ChonSong", "riptide", 42) is False
+
+    def test_last_sha_roundtrip(self, tmp_path):
+        companion = make_companion(tmp_path)
+        assert companion._get_last_sha("ChonSong", "riptide", 42) is None
+        assert companion._set_last_sha("ChonSong", "riptide", 42, "abc123") is True
+        assert companion._get_last_sha("ChonSong", "riptide", 42) == "abc123"
+
+    def test_skip_and_last_sha_coexist(self, tmp_path):
+        """Setting skip must not clobber last_sha and vice versa."""
+        companion = make_companion(tmp_path)
+        companion._set_last_sha("ChonSong", "riptide", 42, "abc123")
+        companion.set_skip("ChonSong", "riptide", 42, True)
+        assert companion._get_last_sha("ChonSong", "riptide", 42) == "abc123"
+        assert companion._is_skipped("ChonSong", "riptide", 42) is True
+
+    def test_legacy_skip_file_import(self, tmp_path):
+        """A pre-existing companion_skip.json must import into StateStore once."""
+        companion = make_companion(tmp_path)
+        legacy = tmp_path / "companion_skip.json"
+        legacy.write_text(
+            '{"ChonSong/riptide#42": {"skip": true, "last_sha": "legacy1"}}'
+        )
+        companion._skip_file = legacy
+        companion._import_legacy_skip_file()
+        assert companion._is_skipped("ChonSong", "riptide", 42) is True
+        assert companion._get_last_sha("ChonSong", "riptide", 42) == "legacy1"
 
 
 # ── classify_pr_mood ────────────────────────────────────────────────────────
