@@ -576,6 +576,44 @@ class TestTwoTierResponse:
         # Enriched body contains ELI5 (from mocked Ollama)
         assert "ELI5" in enriched_body
 
+    def test_two_tier_resync_patches_existing_thread_not_repost(self, mock_ollama):
+        """Stage 2: when a Tier-1 comment id is already stored, a re-sync PATCHes
+        the canonical thread instead of POSTing a duplicate."""
+        companion = make_companion()
+        companion.enable_deterministic = True
+        companion.enable_graphify = False
+        companion._get_last_sha = MagicMock(return_value=None)
+
+        companion.client.post_pr_comment = MagicMock(return_value={"id": 999})
+        companion.client.update_pr_comment = MagicMock(return_value={"id": 999})
+
+        mock_report = MagicMock()
+        mock_report.has_actionable = True
+        mock_report.verdict = "review"
+        mock_report.summary = "Security risk detected"
+        mock_report.findings = [
+            MagicMock(severity="critical", message="Hardcoded secret", file="auth.py", category="security")
+        ]
+
+        # Pre-seed the canonical thread id — simulates a prior Tier-1 POST.
+        companion._state.set_pr_tier1_comment_id("owner/repo#42", 777)
+
+        with patch("riptide.companion.build_context_bundle", return_value={"report": mock_report}):
+            companion._execute(
+                123, "owner", "repo", 42,
+                "feat: add auth", "author",
+                [{"filename": "src/auth.py", "patch": "+secret = 'hardcoded'", "additions": 1, "deletions": 0, "status": "modified"}]
+            )
+
+        # No new POST — the canonical thread is reused.
+        companion.client.post_pr_comment.assert_not_called()
+        # Tier 1 body PATCHed onto the existing thread, then enriched in place.
+        assert companion.client.update_pr_comment.call_count == 2
+        first_patch_args = companion.client.update_pr_comment.call_args_list[0].args
+        assert first_patch_args[3] == 777  # canonical thread id
+        # Stored id unchanged (still the canonical thread).
+        assert companion._state.get_pr_tier1_comment_id("owner/repo#42") == 777
+
     def test_two_tier_fails_gracefully_when_enrichment_fails(self, mock_ollama):
         """If Tier 2 PATCH fails, Tier 1 comment remains (no deletion, no duplicate)."""
         companion = make_companion()

@@ -45,7 +45,7 @@ class StateStore:
       and stable across timezones. Consumers must parse with datetime.fromisoformat().
     """
 
-    SCHEMA_VERSION = 5
+    SCHEMA_VERSION = 6
 
     def __init__(self, db_path: str = DEFAULT_DB_PATH):
         self.db_path = db_path
@@ -139,9 +139,21 @@ class StateStore:
                 pr_key TEXT PRIMARY KEY,
                 skip INTEGER NOT NULL DEFAULT 0,
                 last_sha TEXT,
-                reviewed_at TEXT
+                reviewed_at TEXT,
+                tier1_comment_id INTEGER
             )"""
         )
+
+        # v6: tier1_comment_id — the canonical Tier-1 comment thread per PR so
+        # re-syncs PATCH in place instead of re-POSTing, and later stages /
+        # commands can find the thread. ALTER is required for DBs created at
+        # v5 (CREATE IF NOT EXISTS won't add the column to an existing table).
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(pr_heuristics)").fetchall()}
+        if "tier1_comment_id" not in cols:
+            conn.execute(
+                "ALTER TABLE pr_heuristics ADD COLUMN tier1_comment_id INTEGER"
+            )
+            log.info("pr_heuristics: added tier1_comment_id column (v6)")
 
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_jobs_pr_status ON jobs (pr_number, status)"
@@ -429,6 +441,29 @@ class StateStore:
             "INSERT INTO pr_heuristics (pr_key, reviewed_at) VALUES (?, ?) "
             "ON CONFLICT(pr_key) DO UPDATE SET reviewed_at = excluded.reviewed_at",
             (pr_key, reviewed_at),
+        )
+        conn.commit()
+
+    def get_pr_tier1_comment_id(self, pr_key: str) -> Optional[int]:
+        """Return the canonical Tier-1 comment id for a PR, or None."""
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT tier1_comment_id FROM pr_heuristics WHERE pr_key = ?",
+            (pr_key,),
+        ).fetchone()
+        return row[0] if row else None
+
+    def set_pr_tier1_comment_id(self, pr_key: str, comment_id: Optional[int]):
+        """Persist the canonical Tier-1 comment thread for a PR.
+
+        Stage 2: re-syncs PATCH this comment in place instead of re-POSTing,
+        and later stages / commands find the thread here.
+        """
+        conn = self._get_conn()
+        conn.execute(
+            "INSERT INTO pr_heuristics (pr_key, tier1_comment_id) VALUES (?, ?) "
+            "ON CONFLICT(pr_key) DO UPDATE SET tier1_comment_id = excluded.tier1_comment_id",
+            (pr_key, comment_id),
         )
         conn.commit()
 

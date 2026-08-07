@@ -706,17 +706,31 @@ class Companion:
             # Tier 1: deterministic comment + progress marker (no LLM required)
             tier1_body = self._build_tier1_body(emoji, author, tldr, deterministic_report,
                                                 depth=getattr(self, "_depth", "standard"))
+            pr_key = f"{owner}/{repo}#{pr_number}"
+            # Stage 2: canonical thread — PATCH the existing Tier-1 comment on
+            # re-sync instead of re-POSTing a duplicate thread.
+            existing_id = self._state.get_pr_tier1_comment_id(pr_key)
             comment_id = None
             try:
-                posted = self.client.post_pr_comment(installation_id, owner, repo, pr_number, tier1_body)
-                comment_id = posted.get("id")
+                if existing_id is not None:
+                    comment_id = existing_id
+                    self.client.update_pr_comment(installation_id, owner, repo, comment_id, tier1_body)
+                    logger.info(
+                        "Patched existing Tier 1 for %s#%d comment_id=%s (re-sync)",
+                        full_name, pr_number, comment_id,
+                    )
+                else:
+                    posted = self.client.post_pr_comment(installation_id, owner, repo, pr_number, tier1_body)
+                    comment_id = posted.get("id")
+                    if comment_id is not None:
+                        self._state.set_pr_tier1_comment_id(pr_key, comment_id)
+                    logger.info("Posted Tier 1 (deterministic) for %s#%d comment_id=%s", full_name, pr_number, comment_id)
                 if comment_id is None:
                     logger.error(
-                        "Tier 1 posted for %s#%d but response had no comment id — skipping enrichment",
+                        "Tier 1 for %s#%d has no comment id — skipping enrichment",
                         full_name, pr_number,
                     )
                     return
-                logger.info("Posted Tier 1 (deterministic) for %s#%d comment_id=%s", full_name, pr_number, comment_id)
                 if current_sha:
                     self._set_last_sha(owner, repo, pr_number, current_sha)
             except Exception as e:
