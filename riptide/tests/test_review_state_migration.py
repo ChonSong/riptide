@@ -316,3 +316,57 @@ class TestPrHeuristics:
         assert upgraded.get_pr_heuristics("ChonSong/riptide#1")["skip"] is False
         upgraded.set_pr_skip("ChonSong/riptide#1", True)
         assert upgraded.get_pr_heuristics("ChonSong/riptide#1")["skip"] is True
+
+    # ── Stage 2: canonical Tier-1 comment thread ────────────────────────────
+
+    def test_tier1_comment_id_defaults_none(self):
+        assert self.store.get_pr_tier1_comment_id("ChonSong/riptide#1") is None
+
+    def test_tier1_comment_id_roundtrip(self):
+        self.store.set_pr_tier1_comment_id("ChonSong/riptide#1", 999)
+        assert self.store.get_pr_tier1_comment_id("ChonSong/riptide#1") == 999
+        self.store.set_pr_tier1_comment_id("ChonSong/riptide#1", 1000)
+        assert self.store.get_pr_tier1_comment_id("ChonSong/riptide#1") == 1000
+
+    def test_tier1_comment_id_independent_of_other_fields(self):
+        """Persisting the thread must not clobber skip/last_sha (per-column upsert)."""
+        self.store.set_pr_skip("ChonSong/riptide#1", True)
+        self.store.set_pr_last_sha("ChonSong/riptide#1", "abc123")
+        self.store.set_pr_tier1_comment_id("ChonSong/riptide#1", 999)
+        h = self.store.get_pr_heuristics("ChonSong/riptide#1")
+        assert h["skip"] is True
+        assert h["last_sha"] == "abc123"
+        assert self.store.get_pr_tier1_comment_id("ChonSong/riptide#1") == 999
+
+    def test_tier1_comment_id_clear(self):
+        self.store.set_pr_tier1_comment_id("ChonSong/riptide#1", 999)
+        self.store.set_pr_tier1_comment_id("ChonSong/riptide#1", None)
+        assert self.store.get_pr_tier1_comment_id("ChonSong/riptide#1") is None
+
+    def test_v5_db_upgrades_adds_tier1_column(self):
+        """A v5 DB (pr_heuristics without tier1_comment_id) upgrades to v6 without losing rows."""
+        # Simulate a v5 install: drop the v6-shaped table created by setup,
+        # recreate the old v5 shape, and insert a row.
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("DROP TABLE pr_heuristics")
+        conn.execute(
+            """CREATE TABLE pr_heuristics (
+                pr_key TEXT PRIMARY KEY,
+                skip INTEGER NOT NULL DEFAULT 0,
+                last_sha TEXT,
+                reviewed_at TEXT
+            )"""
+        )
+        conn.execute(
+            "INSERT INTO pr_heuristics (pr_key, skip, last_sha) VALUES ('ChonSong/riptide#1', 1, 'abc123')"
+        )
+        conn.commit()
+        conn.close()
+        upgraded = StateStore(self.db_path)
+        # Existing row survives with its values intact.
+        h = upgraded.get_pr_heuristics("ChonSong/riptide#1")
+        assert h == {"skip": True, "last_sha": "abc123", "reviewed_at": None}
+        assert upgraded.get_pr_tier1_comment_id("ChonSong/riptide#1") is None
+        # New column is writable.
+        upgraded.set_pr_tier1_comment_id("ChonSong/riptide#1", 555)
+        assert upgraded.get_pr_tier1_comment_id("ChonSong/riptide#1") == 555
