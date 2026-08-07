@@ -324,6 +324,11 @@ class TestBotMarker:
 class TestLLMVoter:
     """Test LLM fallback voter."""
 
+    def test_default_endpoint_is_11434(self):
+        """Regression: default endpoint must match the actual Ollama port (was 43311)."""
+        voter = LLMVoter()
+        assert voter.endpoint == "http://localhost:11434/api/generate"
+
     def test_classify_success(self):
         voter = LLMVoter()
         with patch("riptide.labeler.http_requests") as mock_requests:

@@ -29,6 +29,23 @@ def make_companion(tmp_path=None):
     return companion
 
 
+# ── Ollama endpoint ─────────────────────────────────────────────────────────
+
+
+class TestOllamaEndpoint:
+    """Default Ollama base must match the actual local port (regression: 43311)."""
+
+    def test_default_ollama_base_is_11434(self):
+        with patch.dict(os.environ, {}, clear=True):
+            companion = make_companion()
+            assert companion.ollama_base == "http://localhost:11434"
+
+    def test_ollama_base_honors_env_override(self):
+        with patch.dict(os.environ, {"OLLAMA_BASE_URL": "http://ollama:8080"}, clear=True):
+            companion = make_companion()
+            assert companion.ollama_base == "http://ollama:8080"
+
+
 # ── classify_pr_mood ────────────────────────────────────────────────────────
 
 

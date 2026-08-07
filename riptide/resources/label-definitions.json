@@ -221,7 +221,7 @@
   "ai_fallback_config": {
     "description": "When deterministic rules can't classify, falls back to local LLM.",
     "model": "qwen2.5-coder:7b",
-    "endpoint": "http://localhost:43311/api/generate",
+    "endpoint": "http://localhost:11434/api/generate",
     "confidence_threshold": 0.7,
     "triggers": [
       "Non-conventional-commit PR title (no type: prefix)",

@@ -27,7 +27,7 @@ LABEL_DEFINITIONS_PATH = Path(__file__).parent / "resources" / "label-definition
 class LLMVoter:
     """Fallback LLM for ambiguous classifications."""
 
-    def __init__(self, endpoint: str = "http://localhost:43311/api/generate",
+    def __init__(self, endpoint: str = "http://localhost:11434/api/generate",
                  model: str = "qwen2.5-coder:7b"):
         self.endpoint = endpoint
         self.model = model
@@ -87,7 +87,7 @@ class Labeler:
         if self._llm is None:
             ai_config = self.definitions.get("ai_fallback_config", {})
             self._llm = LLMVoter(
-                endpoint=ai_config.get("endpoint", "http://localhost:43311/api/generate"),
+                endpoint=ai_config.get("endpoint", "http://localhost:11434/api/generate"),
                 model=ai_config.get("model", "qwen2.5-coder:7b"),
             )
         return self._llm

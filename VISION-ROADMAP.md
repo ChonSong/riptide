@@ -1,7 +1,7 @@
 # Riptide — Vision-Aligned Long-Horizon Roadmap
 
-**Date:** 2026-08-06
-**Status:** Planning
+**Date:** 2026-08-07
+**Status:** Pillars 1–2 shipped to production (WS-1, WS-2 merged)
 **Repo:** `github.com/ChonSong/riptide`
 **Related:** GitHub Projects v2 → "Riptide Development" (PVT_kwHOBRbF9s4Bfg5M)
 
@@ -27,66 +27,63 @@
 
 ---
 
-## Current State vs Vision (2026-08-06)
+## Current State vs Vision (2026-08-07)
 
 | Vision Pillar | Current State | Gap |
 |---|---|---|
-| **1. Deterministic Data Inputs** | diff_analyzer.py (security/complexity/error), graphify blast radius, review depth classification, labeler rules, proofshot | No diff→concept conversion, no test-status ingestion, no structured deterministic "context bundle" |
-| **2. Two-Tiered Response** | Companion posts TL;DR; T0 orchestrator dispatches T1/T3 async | No explicit "fast now, enriched later" pattern with comment editing |
-| **3. Multi-Pass LLM** | Deepthink spawns one big Hermes session per PR | No split into aspect-specific passes (security pass, complexity pass, arch pass) |
-| **4. Latency Tolerance** | Async deepthink is silent | No progress indicator on the PR ("Riptide is reviewing…" comment, status footer) |
-| **5. High-Level Clarity** | diff_analyzer has structured findings; review comments can be verbose | No high-level executive summary tier; detail is not progressive |
+| **1. Deterministic Data Inputs** | ✅ **SHIPPED** — `context_bundle.py`: `build_context_bundle()` gathers diff stats, security/complexity findings (via bundled DiffAnalyzer), graphify blast radius, concept taxonomy (`CONCEPT_RULES` + `classify_concept`, UI/core/tests), DiffReport. Reused by Companion to avoid double analysis. | None blocking. Diff→concept + example annotations exist (WS-1). |
+| **2. Two-Tiered Response** | ✅ **SHIPPED** — Companion posts Tier 1 (deterministic verdict + "🔍 enrichment in progress…"), then PATCHes the same comment with ELI5 enrichment. Comment-id guarded; Tier 1 persists if enrichment fails. | Tier 2 is currently a single ELI5 pass — full multi-pass enrichment is WS-3. |
+| **3. Multi-Pass LLM** | Deepthink spawns one big Hermes session per PR (cron bot) | **WS-3 (NEXT)** — split into aspect-specific passes (security, complexity, arch, tests) |
+| **4. Latency Tolerance** | Tier 1 comment + "enrichment in progress…" marker shipped with WS-2 | Per-pass progress footers ("⚙️ deterministic done · 🧠 LLM pass 2/4…") — WS-4 |
+| **5. High-Level Clarity** | `_build_tier1_body()` ships verdict + top findings first, enrichment second | Progressive disclosure tiers — WS-5 |
 
 ---
 
 ## Workstreams (each = one PR)
 
-### WS-0: Merge #61 (companion deterministic) — FOUNDATION
-- **Status:** Branch ready, mergeable, BLOCKED (waiting review)
-- **Why first:** diff_analyzer.py IS the deterministic data input layer. Everything else builds on it.
-- **Action:** Rebase onto main (post-#60), merge.
+### WS-0: #61 (companion deterministic) — FOUNDATION ✅ MERGED (2026-08-06)
+- **Status:** Merged — diff_analyzer.py IS the deterministic data input layer.
+- **Result:** `feat(companion): replace LLM echo-TL;DR with deterministic diff analysis`.
 
-### WS-R: Research — learn from CodeRabbit/Greptile (delegate, 1 subagent)
-- **Goal:** Study how CodeRabbit/Greptile structure multi-pass review, progress indicators, comment editing, severity tuning.
-- **Output:** `COMPETITOR-PATTERNS.md` (repo root — `docs/` is gitignored) — concrete patterns to adopt.
-- **Why:** User's prior assessment exists (HANDOFF §2), but not deep pattern extraction on multi-pass/progress UX.
+### WS-R: Research — learn from CodeRabbit/Greptile ✅ MERGED (2026-08-06)
+- **Status:** Merged via #62 (with roadmap) — `COMPETITOR-PATTERNS.md` at repo root.
+- **Output:** Concrete patterns for multi-pass review, progress indicators, comment editing, severity tuning.
 
-### WS-1: Deterministic context bundle (Vision 1)
+### WS-1: Deterministic context bundle (Vision 1) ✅ MERGED (2026-08-07, #63)
 - **Goal:** A single deterministic pipeline that pre-gathers: diff stats, security findings, complexity findings, graphify blast radius, changed-file taxonomy (UI/core/tests), test status.
 - **Output:** `riptide/context_bundle.py` — `build_context_bundle(files, graph_context, pr_details=None) -> dict`.
-- **Innovation:** Diff→concept mapping — "this PR touches auth + payments + adds a test helper" using deterministic heuristics + example variables/pseudocode annotations.
-- **Delegation:** One subagent to deepthink implementation.
+- **Innovation:** Diff→concept mapping — `CONCEPT_RULES` + `classify_concept()` (webhook under `api/` → core via negative lookahead). Bundle exposes `bundle["report"]` (DiffReport) so Companion reuses it instead of running `analyze()` twice.
+- **Result:** Companion routes `_execute()` through `self.build_context_bundle()`; bundle-build failure falls back to LLM path.
 
-### WS-2: Two-tier response flow (Vision 2)
+### WS-2: Two-tier response flow (Vision 2) ✅ MERGED (2026-08-07, #64)
 - **Goal:** On PR event:
   1. **Tier 1 (instant, deterministic):** post comment from context bundle — verdict, findings, "enrichment in progress…"
   2. **Tier 2 (async, LLM):** Hermes/LongCat enriches THE SAME COMMENT (edit) with personality, ELI5, deeper context.
-- **Innovation:** Comment editing — canonical resource is the **PR top-level (issue) comment**: `POST /repos/{o}/{r}/issues/{n}/comments` to create, `PATCH /repos/{o}/{r}/issues/comments/{id}` to enrich in place. One thread, progressive enrichment (matches vision: "subsequently edited and enriched"). Companion's `post_pr_comment()` already uses the POST endpoint; WS-2 adds PATCH.
+- **Innovation:** Comment editing — canonical resource is the **PR top-level (issue) comment**: `POST /repos/{o}/{r}/issues/{n}/comments` to create, `PATCH /repos/{o}/{r}/issues/comments/{id}` to enrich in place. One thread, progressive enrichment (matches vision: "subsequently edited and enriched").
+- **Implementation:** `_build_tier1_body()` posts verdict + 🔍 progress marker; comment-id guard (no id → no enrichment); Tier 2 ELI5 PATCHes same comment; Tier 1 survives enrichment failure by design.
 - **Delegation:** One subagent to deepthink implementation.
 
-### WS-3: Multi-pass LLM (Vision 3)
-- **Goal:** Replace one-big-session with deterministic passes, each scoped:
-  - Pass A: Security findings → verify/explain (Ollama prep → LongCat verdict)
-  - Pass B: Complexity → refactor suggestions (Ollama prep)
-  - Pass C: Architecture/blast radius → graphify-informed analysis (LongCat)
-  - Pass D: Test coverage suggestions (deterministic)
+### WS-3: Unified Riptide pipeline (Vision 3+4+5) — NEXT
+- **Goal (per user):** ONE pipeline covering the entire Riptide process (proofshotter excluded) — best of both worlds: Companion's fast webhook Tier-1 + Deepthink's depth-gated deep review. `@riptide-bot` commands guide users through the pipeline; **only processes that write code (fix) are command-only**.
+- **Stages:**
+  - **Stage 0 — Gate (process heuristics, ONE store):** StateStore SQLite is the single authority for *in-flight job?*, *already reviewed this SHA?*, *skipped?*, *stale?*. `classify_review_depth()` runs here for **every** entry path (webhook + cron + command) — TRIVIAL → Tier 1 only; STANDARD/ARCH → full enrich.
+  - **Stage 1 — Deterministic core (runs ONCE, feeds everything):** `build_context_bundle()` (DiffAnalyzer + concepts + graph_context) + `pre_generate_diagram()` (Excalidraw). Every downstream consumer reads the bundle — nothing re-fetches.
+  - **Stage 2 — Tier 1 comment (auto on PR open/sync):** `_build_tier1_body()` verdict + 🔍 progress marker; POST once, becomes the canonical thread.
+  - **Stage 3 — Enrichment (auto for STANDARD/ARCH, or `@riptide-bot review`):** multi-pass LLM PATCHes the SAME comment: Pass A security → Pass B complexity → Pass C architecture → Pass D tests, each with a progress footer (WS-4 absorbed).
+  - **Stage 4 — Command-only (writes code):** `@riptide-bot fix [desc]` (authz-gated, existing fixer flow) and `@riptide-bot relabel`. Nothing else in the pipeline writes code (WS-5 absorbed: Tier 1 verdict-first + `@riptide-bot review` full mode = progressive disclosure).
+- **Heuristics centralization (so we don't attempt the same thing twice):**
+  - Retire `deepthink._gather_review_data()` re-fetch (diff/files/graphify duplicated by the bundle) — bundle is the single data path.
+  - Migrate companion `last_sha` + skip JSON and deepthink SHA+24h cooldown JSON into StateStore SQLite — one answer to "already reviewed?", "in-flight?", "skipped?", enforced by webhook AND cron paths.
+  - `classify_review_depth()`/`select_skills()` reused as-is for depth routing (both paths).
+  - One comment owner: Tier-1 comment is the canonical thread; `assemble_review` new-comment path is retired in favor of the Tier-2 PATCH slot.
 - **Model routing:** Ollama only for TRIVIAL depth (per user: "restricted to the trivial"); STANDARD/ARCH use LongCat.
 - **Delegation:** One subagent to deepthink implementation.
 
-### WS-4: Latency tolerance / progress UX (Vision 4)
-- **Goal:** Every async review shows progress:
-  - "🔄 Riptide is analyzing…" comment on dispatch
-  - Status footer updates: "⚙️ deterministic pass done · 🧠 LLM enrichment in progress"
-  - React emoji or comment edit on completion
-- **Delegation:** One subagent to deepthink implementation.
+### WS-4: Latency tolerance / progress UX — ABSORBED into WS-3 Stage 3
+- Per-pass PATCH footers ("⚙️ deterministic pass done · 🧠 LLM enrichment in progress") are the WS-2 PATCH pattern applied per pass. No separate workstream.
 
-### WS-5: High-level clarity (Vision 5)
-- **Goal:** Progressive disclosure in comments:
-  1. One-line verdict + emoji
-  2. Top 3 findings (expandable)
-  3. Deep detail only via `@riptide-bot review` full mode
-- **Innovation:** "Summary-first, detail-on-demand" — the default comment is short; full analysis in a collapsible/details block.
-- **Delegation:** One subagent to deepthink implementation.
+### WS-5: High-level clarity — ABSORBED into WS-3 Stages 2/4
+- Tier 1 is verdict-first; `@riptide-bot review` full mode is the deep-disclosure path; `@riptide-bot fix` is the only command that writes code. Progressive disclosure is the pipeline's shape, not a separate WS.
 
 ---
 
@@ -104,29 +101,29 @@
 ## Suggested Sequencing
 
 ```text
-WS-0 (#61 merge)        → foundation (deterministic data input exists)
+WS-0 (#61)  ✅ merged   → foundation (deterministic data input exists)
    ↓
-WS-R (research)         → learn from CodeRabbit/Greptile
+WS-R (#62)  ✅ merged   → learn from CodeRabbit/Greptile
    ↓
-WS-1 (context bundle)   → Vision 1 complete
+WS-1 (#63)  ✅ merged   → Vision 1 complete (context bundle)
    ↓
-WS-2 (two-tier flow)    → Vision 2 complete (needs WS-1)
+WS-2 (#64)  ✅ merged   → Vision 2 complete (two-tier response)
    ↓
-WS-3 (multi-pass)       → Vision 3 complete (needs WS-1, WS-2)
-   ↓
-WS-4 (progress UX)      → Vision 4 complete (needs WS-2)
-   ↓
-WS-5 (clarity)          → Vision 5 complete (can be anytime after WS-2)
+WS-3 (NEXT)            → UNIFIED pipeline (Vision 3+4+5):
+                         Stage 0 heuristics → Stage 1 bundle →
+                         Stage 2 Tier 1 → Stage 3 enrich → Stage 4 commands
+                         (needs WS-1, WS-2; absorbs former WS-4/WS-5)
 ```
 
-WS-1 → WS-2 → WS-3 have hard dependencies. WS-4/WS-5 can run after WS-2.
+WS-1 → WS-2 → WS-3 have hard dependencies. WS-4/WS-5 are absorbed into WS-3 (no separate PRs).
 
 ---
 
 ## Open Questions for User
 
-1. **#61 merge** — merge as-is now (rebase to post-#60), or fold into WS-1?
-2. **Comment editing** — OK to edit comments (PATCH API) for progressive enrichment, or prefer separate follow-up comments?
-3. **Test ingestion** — do we have access to CI test results via GitHub API for the context bundle (checks API), or only local tests?
+1. ~~WS-3 pass orchestration~~ **RESOLVED** — unified pipeline: multi-pass runs inside Companion's Tier-2 slot, editing the Tier-1 comment. Deepthink spawn path (`_spawn_deepthink`/`assemble_review` new-comment path) is retired, not run alongside.
+2. ~~Comment editing~~ **RESOLVED** — confirmed in production for ELI5; extended to per-pass PATCHes on the same comment (Stage 3 footers).
+3. **Test ingestion** — do we have access to CI test results via GitHub API for the context bundle (checks API), or only local tests? (WS-3 Pass D depends on this.)
 4. **Ollama availability** — is Ollama always running on the host (localhost:43311)? Needed for WS-3 prep-pass.
-5. **Progress UX** — preferred: edit the same comment, or new "status" comments per stage?
+5. ~~Progress UX~~ **RESOLVED** — edit the same comment per stage (per-pass footers), not separate status comments.
+6. **State migration scope** — migrate companion skip/last_sha + deepthink cooldown into StateStore SQLite in WS-3, or as a small standalone PR first? (Heuristics centralization; touches both bots.)

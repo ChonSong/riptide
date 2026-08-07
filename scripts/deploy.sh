@@ -19,6 +19,10 @@ log "=== Deploy started ==="
 
 cd "$REPO_DIR"
 
+# ── 0a. Runtime env (before pull — restarts pick these up) ──────────────────
+# Ollama runs on the standard port; Companion's prep/enrich passes need it.
+export OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://localhost:11434}"
+
 # ── 0. Interprocess lock — serialize concurrent deploys ──────────────────────
 exec 200>"$LOCK_FILE"
 if ! flock -n 200; then
