@@ -679,3 +679,70 @@ class TestTwoTierResponse:
         # Only POST (legacy path), no PATCH
         companion.client.post_pr_comment.assert_called_once()
         companion.client.update_pr_comment.assert_not_called()
+
+
+# ── Depth gating (WS-3 Stage 0) ─────────────────────────────────────────────
+
+
+class TestDepthGate:
+    """TRIVIAL depth → Tier 1 only; STANDARD/ARCH → Tier 1 + Tier 2 enrichment.
+
+    Uses the same classify_review_depth rules as Deepthink (riptide.depth).
+    """
+
+    def _run(self, companion, files, title="feat: change", mock_report=None):
+        companion.enable_deterministic = True
+        companion.enable_graphify = False
+        companion._get_last_sha = MagicMock(return_value=None)
+        if mock_report is None:
+            mock_report = MagicMock()
+            mock_report.has_actionable = True
+            mock_report.verdict = "review"
+            mock_report.summary = "Issue detected"
+            mock_report.findings = [
+                MagicMock(severity="warning", message="Something", file="f.py", category="complexity")
+            ]
+        companion.client.post_pr_comment = MagicMock(return_value={"id": 777})
+        companion.client.update_pr_comment = MagicMock(return_value={"id": 777})
+        with patch("riptide.companion.build_context_bundle", return_value={"report": mock_report}):
+            companion._execute(123, "owner", "repo", 42, title, "author", files)
+        return companion
+
+    def test_trivial_depth_posts_tier1_only(self, mock_ollama):
+        """Docs-only tiny change (<10 LOC, no logic) → Tier 1 posted, NO enrichment PATCH."""
+        companion = self._run(
+            make_companion(),
+            [{"filename": "README.md", "patch": "+hello", "additions": 1, "deletions": 0, "status": "modified"}],
+        )
+        assert companion.client.post_pr_comment.call_count == 1
+        companion.client.update_pr_comment.assert_not_called()
+        tier1_body = companion.client.post_pr_comment.call_args[0][4]
+        assert "no LLM enrichment needed" in tier1_body
+        assert "🔍 enrichment in progress" not in tier1_body
+
+    def test_inline_only_depth_enriches(self, mock_ollama):
+        """Single-file small logic change (<50 LOC) → Tier 1 + Tier 2 enrichment."""
+        companion = self._run(
+            make_companion(),
+            [{"filename": "src/util.py", "patch": "+def f(): pass", "additions": 1, "deletions": 0, "status": "modified"}],
+        )
+        companion.client.update_pr_comment.assert_called_once()
+        tier1_body = companion.client.post_pr_comment.call_args[0][4]
+        assert "🔍 enrichment in progress" in tier1_body
+
+    def test_standard_depth_enriches(self, mock_ollama):
+        """Multi-file change (>=2 files, >=50 LOC) → full two-tier flow."""
+        files = [
+            {"filename": f"src/mod{i}.py", "patch": f"+x{i} = 1", "additions": 5, "deletions": 0, "status": "modified"}
+            for i in range(3)
+        ]
+        companion = self._run(make_companion(), files)
+        companion.client.update_pr_comment.assert_called_once()
+
+    def test_depth_attached_to_instance(self, mock_ollama):
+        """_depth reflects the classified ReviewDepth value."""
+        companion = self._run(
+            make_companion(),
+            [{"filename": "README.md", "patch": "+hello", "additions": 1, "deletions": 0, "status": "modified"}],
+        )
+        assert companion._depth == "trivial"
