@@ -191,6 +191,17 @@ class GitHubAppClient:
         resp.raise_for_status()
         return resp.json()
 
+    def update_pr_comment(self, installation_id: int, owner: str, repo: str, comment_id: int, body: str) -> dict:
+        """Update (PATCH) an existing PR comment in place. Used for two-tier response enrichment."""
+        resp = requests.patch(
+            f"{self.base_url}/repos/{owner}/{repo}/issues/comments/{comment_id}",
+            headers=self._headers(installation_id, {"Content-Type": "application/json"}),
+            json={"body": body},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     def post_inline_comment(
         self,
         installation_id: int,

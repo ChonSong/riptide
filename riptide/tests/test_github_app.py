@@ -179,3 +179,40 @@ class TestGitHubAppClient:
             client.post_pr_comment(999, "test", "repo", 42, "My review comment")
             call_kwargs = mock_post.call_args[1]
             assert call_kwargs["json"] == {"body": "My review comment"}
+
+    def test_update_pr_comment_success(self, client):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"id": 7, "body": "Updated"}
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("requests.patch", return_value=mock_response) as mock_patch:
+            result = client.update_pr_comment(999, "test", "repo", 7, "Updated body")
+            assert result["id"] == 7
+            assert result["body"] == "Updated"
+            call_kwargs = mock_patch.call_args[1]
+            assert call_kwargs["json"] == {"body": "Updated body"}
+
+    def test_update_pr_comment_uses_correct_url(self, client):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"id": 123}
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("requests.patch", return_value=mock_response) as mock_patch:
+            client.update_pr_comment(999, "owner", "repo", 123, "body")
+            called_url = mock_patch.call_args[0][0]
+            assert called_url == "https://api.github.com/repos/owner/repo/issues/comments/123"
+
+    def test_update_pr_comment_sends_content_type_header(self, client):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"id": 5}
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("requests.patch", return_value=mock_response) as mock_patch:
+            client.update_pr_comment(999, "test", "repo", 5, "body")
+            call_kwargs = mock_patch.call_args[1]
+            headers = call_kwargs["headers"]
+            assert headers["Content-Type"] == "application/json"
+            assert "Bearer test-installation-token" in headers["Authorization"]

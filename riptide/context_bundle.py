@@ -115,8 +115,8 @@ def build_context_bundle(
     pr_details = pr_details or {}
 
     # 1. Run DiffAnalyzer
-    report: DiffAnalyzer = DiffAnalyzer()
-    diff_report: DiffReport = report.analyze(files)
+    analyzer: DiffAnalyzer = DiffAnalyzer()
+    diff_report: DiffReport = analyzer.analyze(files)
 
     findings = [
         {
@@ -173,6 +173,7 @@ def build_context_bundle(
 
     # 5. Build bundle dict
     bundle = {
+        "report": diff_report,  # DiffReport object — companion reuses this instead of re-running analyze()
         "findings": findings,
         "stats": diff_report.stats,
         "verdict": diff_report.verdict,

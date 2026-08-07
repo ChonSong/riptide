@@ -416,12 +416,12 @@ class TestDeterministicAnalysis:
         companion.client.post_pr_comment = MagicMock()
         companion._get_last_sha = MagicMock(return_value=None)
 
-        # Patch the analyzer to return a report with no findings
+        # Patch the context bundle to return a report with no findings
         mock_report = MagicMock()
         mock_report.has_actionable = False
         mock_report.findings = []
         mock_report.verdict = "pass"
-        with patch.object(companion._analyzer, "analyze", return_value=mock_report):
+        with patch("riptide.companion.build_context_bundle", return_value={"report": mock_report}):
             companion._execute(
                 123, "owner", "repo", 42,
                 "feat: trivial change", "author",
@@ -451,3 +451,159 @@ class TestDeterministicAnalysis:
         companion.client.post_pr_comment.assert_called_once()
         body = companion.client.post_pr_comment.call_args[0][4]
         assert "LLM fallback TL;DR" in body
+
+
+# ── Two-tier comment response (Vision Pillar 2) ──────────────────────────────
+
+
+class TestTwoTierResponse:
+    """Tests for the two-tier comment response flow.
+
+    Tier 1: deterministic comment posted immediately (no LLM).
+    Tier 2: LLM enrichment (ELI5) patches the SAME comment in place.
+    """
+
+    def test_two_tier_posts_then_patches_same_comment(self, mock_ollama):
+        """Two-tier flow: POST Tier 1 with progress marker, then PATCH same comment_id with enriched body."""
+        companion = make_companion()
+        companion.enable_deterministic = True
+        companion.enable_graphify = False
+        companion._get_last_sha = MagicMock(return_value=None)
+
+        # Configure client.post_pr_comment to return a comment id
+        companion.client.post_pr_comment = MagicMock(return_value={"id": 999})
+        companion.client.update_pr_comment = MagicMock(return_value={"id": 999})
+
+        # Patch the analyzer to return a report with actionable findings
+        mock_report = MagicMock()
+        mock_report.has_actionable = True
+        mock_report.verdict = "review"
+        mock_report.summary = "Security risk detected"
+        mock_report.findings = [
+            MagicMock(severity="critical", message="Hardcoded secret", file="auth.py", category="security")
+        ]
+        with patch("riptide.companion.build_context_bundle", return_value={"report": mock_report}):
+            companion._execute(
+                123, "owner", "repo", 42,
+                "feat: add auth", "author",
+                [{"filename": "src/auth.py", "patch": "+secret = 'hardcoded'", "additions": 1, "deletions": 0, "status": "modified"}]
+            )
+
+        # POST should be called exactly once
+        companion.client.post_pr_comment.assert_called_once()
+        post_call_args = companion.client.post_pr_comment.call_args[0]
+        tier1_body = post_call_args[4]
+        # Tier 1 body must contain the progress marker (no LLM required)
+        assert "🔍 enrichment in progress" in tier1_body
+
+        # PATCH (update) should be called exactly once with the SAME comment_id
+        companion.client.update_pr_comment.assert_called_once()
+        patch_call_args = companion.client.update_pr_comment.call_args[0]
+        assert patch_call_args[3] == 999  # same comment_id as returned by POST
+        enriched_body = patch_call_args[4]
+        # Enriched body contains ELI5 (from mocked Ollama)
+        assert "ELI5" in enriched_body
+
+    def test_two_tier_fails_gracefully_when_enrichment_fails(self, mock_ollama):
+        """If Tier 2 PATCH fails, Tier 1 comment remains (no deletion, no duplicate)."""
+        companion = make_companion()
+        companion.enable_deterministic = True
+        companion.enable_graphify = False
+        companion._get_last_sha = MagicMock(return_value=None)
+
+        companion.client.post_pr_comment = MagicMock(return_value={"id": 888})
+        companion.client.update_pr_comment = MagicMock(side_effect=Exception("API timeout"))
+
+        mock_report = MagicMock()
+        mock_report.has_actionable = True
+        mock_report.verdict = "review"
+        mock_report.summary = "Issue detected"
+        mock_report.findings = [
+            MagicMock(severity="warning", message="Complex function", file="util.py", category="complexity")
+        ]
+        with patch("riptide.companion.build_context_bundle", return_value={"report": mock_report}):
+            companion._execute(
+                123, "owner", "repo", 42,
+                "feat: complex logic", "author",
+                [{"filename": "src/util.py", "patch": "+def complex(): pass", "additions": 1, "deletions": 0, "status": "modified"}]
+            )
+
+        # Tier 1 posted
+        companion.client.post_pr_comment.assert_called_once()
+        # Tier 2 attempted
+        companion.client.update_pr_comment.assert_called_once()
+        # No second POST (no duplicate)
+        assert companion.client.post_pr_comment.call_count == 1
+
+    def test_two_tier_tier1_post_failure_does_not_record_sha(self, mock_ollama):
+        """If Tier 1 POST raises, no SHA is recorded and no enrichment is attempted."""
+        companion = make_companion()
+        companion.enable_deterministic = True
+        companion.enable_graphify = False
+        companion._get_last_sha = MagicMock(return_value=None)
+        companion._set_last_sha = MagicMock()
+
+        companion.client.post_pr_comment = MagicMock(side_effect=Exception("API timeout"))
+        companion.client.update_pr_comment = MagicMock()
+
+        mock_report = MagicMock()
+        mock_report.has_actionable = True
+        mock_report.verdict = "review"
+        mock_report.summary = "Issue detected"
+        mock_report.findings = [
+            MagicMock(severity="warning", message="Complex function", file="util.py", category="complexity")
+        ]
+        with patch("riptide.companion.build_context_bundle", return_value={"report": mock_report}):
+            companion._execute(
+                123, "owner", "repo", 42,
+                "feat: complex logic", "author",
+                [{"filename": "src/util.py", "patch": "+def complex(): pass", "additions": 1, "deletions": 0, "status": "modified"}]
+            )
+
+        # Tier 1 failed → no PATCH (enrichment), no SHA recorded
+        companion.client.update_pr_comment.assert_not_called()
+        companion._set_last_sha.assert_not_called()
+
+    def test_two_tier_skips_when_no_actionable_findings(self, mock_ollama):
+        """When deterministic report has no findings, neither Tier 1 nor Tier 2 runs."""
+        companion = make_companion()
+        companion.enable_deterministic = True
+        companion.enable_graphify = False
+        companion._get_last_sha = MagicMock(return_value=None)
+
+        companion.client.post_pr_comment = MagicMock()
+        companion.client.update_pr_comment = MagicMock()
+
+        mock_report = MagicMock()
+        mock_report.has_actionable = False
+        mock_report.findings = []
+        mock_report.verdict = "pass"
+        with patch("riptide.companion.build_context_bundle", return_value={"report": mock_report}):
+            companion._execute(
+                123, "owner", "repo", 42,
+                "feat: trivial change", "author",
+                [{"filename": "README.md", "patch": "+# Hello", "additions": 1, "deletions": 0, "status": "modified"}]
+            )
+
+        companion.client.post_pr_comment.assert_not_called()
+        companion.client.update_pr_comment.assert_not_called()
+
+    def test_two_tier_not_used_when_deterministic_disabled(self, mock_ollama):
+        """When deterministic is disabled, legacy single-POST path is used (no PATCH)."""
+        companion = make_companion()
+        companion.enable_deterministic = False
+        companion.enable_graphify = False
+        companion._get_last_sha = MagicMock(return_value=None)
+
+        companion.client.post_pr_comment = MagicMock(return_value={"id": 777})
+        companion.client.update_pr_comment = MagicMock()
+
+        companion._execute(
+            123, "owner", "repo", 42,
+            "feat: new feature", "author",
+            [{"filename": "src/main.py", "patch": "+def main(): pass", "additions": 1, "deletions": 0, "status": "modified"}]
+        )
+
+        # Only POST (legacy path), no PATCH
+        companion.client.post_pr_comment.assert_called_once()
+        companion.client.update_pr_comment.assert_not_called()
