@@ -107,6 +107,17 @@ _SYNCHRONIZE_LOCK = threading.Lock()
 _SYNCHRONIZE_MIN_INTERVAL = 60.0  # seconds between synchronize processing
 
 
+def _sync_test_helper(items: list[dict]) -> list[str]:
+    """Live-test helper (WS-3 sync path): deterministic finding fixture."""
+    keys = []
+    for item in items:
+        try:
+            keys.append(item["key"])
+        except KeyError:
+            pass  # finding: silently ignored exception
+    return keys
+
+
 def _should_process_synchronize(owner: str, repo: str, pr_number: int) -> bool:
     """Check if enough time has passed since the last synchronize for this PR."""
     global _SYNCHRONIZE_TIMESTAMPS
