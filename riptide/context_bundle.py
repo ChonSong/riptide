@@ -31,7 +31,7 @@ CONCEPT_RULES: list[tuple[re.Pattern[str], str]] = [
     # Payments
     (re.compile(r"(?:^|/|\\)(?:payment|billing|invoice|subscription|stripe|checkout|receipt|refund|plan|pricing)", re.I), "payments"),
     # API (exclude webhook — it's a core file handled below)
-    (re.compile(r"(?:^|/|\\)(?:api|endpoint|route|controller|resolver|graphql|rest|middleware)", re.I), "api"),
+    (re.compile(r"(?:^|/|\\)(?!.*webhook)(?:api|endpoint|route|controller|resolver|graphql|rest|middleware)", re.I), "api"),
     # UI
     (re.compile(r"\.(?:css|scss|less|html|jsx|tsx|vue|svelte|astro|svg)$", re.I), "ui"),
     (re.compile(r"(?:^|/|\\)(?:ui|component|layout|page|screen|widget|button|modal|navbar|sidebar|footer|header|theme|style)", re.I), "ui"),

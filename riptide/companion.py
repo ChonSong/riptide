@@ -696,10 +696,9 @@ class Companion:
                               pr_details: dict | None = None) -> dict:
         """Build a deterministic context bundle (Vision Pillar 1).
 
-        Stores result on self._context_bundle and returns it.
+        Returns the bundle; the caller assigns it to self._context_bundle.
         """
-        self._context_bundle = build_context_bundle(files, graph_context, pr_details)
-        return self._context_bundle
+        return build_context_bundle(files, graph_context, pr_details)
 
     def _get_graph_context(self, changed_files):
         graphify_bin = os.environ.get("GRAPHIFY_BIN", "graphify")

@@ -128,6 +128,7 @@ class TestClassifyConcept:
         [
             ("server.py", "core"),
             ("webhook.py", "core"),
+            ("src/api/webhook.py", "core"),  # webhook under api/ must not be api
             ("riptide/orchestrator.py", "core"),
             ("deepthink.py", "core"),
             ("companion.py", "core"),
