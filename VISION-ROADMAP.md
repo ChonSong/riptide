@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-06
 **Status:** Planning
-**Repo:** `/home/sc/workspace/riptide`
+**Repo:** `github.com/ChonSong/riptide`
 **Related:** GitHub Projects v2 → "Riptide Development" (PVT_kwHOBRbF9s4Bfg5M)
 
 ---
@@ -48,7 +48,7 @@
 
 ### WS-R: Research — learn from CodeRabbit/Greptile (delegate, 1 subagent)
 - **Goal:** Study how CodeRabbit/Greptile structure multi-pass review, progress indicators, comment editing, severity tuning.
-- **Output:** `docs/competitor-review-patterns.md` — concrete patterns to adopt.
+- **Output:** `COMPETITOR-PATTERNS.md` (repo root — `docs/` is gitignored) — concrete patterns to adopt.
 - **Why:** User's prior assessment exists (HANDOFF §2), but not deep pattern extraction on multi-pass/progress UX.
 
 ### WS-1: Deterministic context bundle (Vision 1)
@@ -61,7 +61,7 @@
 - **Goal:** On PR event:
   1. **Tier 1 (instant, deterministic):** post comment from context bundle — verdict, findings, "enrichment in progress…"
   2. **Tier 2 (async, LLM):** Hermes/LongCat enriches THE SAME COMMENT (edit) with personality, ELI5, deeper context.
-- **Innovation:** Comment editing via `PATCH /repos/{o}/{r}/issues/comments/{id}` — one thread, progressive enrichment (matches vision: "subsequently edited and enriched").
+- **Innovation:** Comment editing — canonical resource is the **PR top-level (issue) comment**: `POST /repos/{o}/{r}/issues/{n}/comments` to create, `PATCH /repos/{o}/{r}/issues/comments/{id}` to enrich in place. One thread, progressive enrichment (matches vision: "subsequently edited and enriched"). Companion's `post_pr_comment()` already uses the POST endpoint; WS-2 adds PATCH.
 - **Delegation:** One subagent to deepthink implementation.
 
 ### WS-3: Multi-pass LLM (Vision 3)
@@ -103,7 +103,7 @@
 
 ## Suggested Sequencing
 
-```
+```text
 WS-0 (#61 merge)        → foundation (deterministic data input exists)
    ↓
 WS-R (research)         → learn from CodeRabbit/Greptile
