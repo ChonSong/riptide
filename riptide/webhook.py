@@ -141,6 +141,10 @@ def _sync_test_helper_delta2(items: list[dict]) -> int:
     return total
 
 
+# WS-3 live-test marker: final sync to exercise the canonical-thread PATCH path
+# with the delta-mapping fix deployed. See PR #73 / commit 6130294.
+
+
 def _should_process_synchronize(owner: str, repo: str, pr_number: int) -> bool:
     """Check if enough time has passed since the last synchronize for this PR."""
     global _SYNCHRONIZE_TIMESTAMPS
