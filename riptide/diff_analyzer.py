@@ -310,7 +310,11 @@ class DiffAnalyzer:
         patch_idx = 0
         for add_idx, add_line in enumerate(added_lines):
             while patch_idx < len(patch_lines):
-                if patch_lines[patch_idx].lstrip().startswith(add_line):
+                raw_line = patch_lines[patch_idx]
+                # Strip the diff prefix (+/-/space) before comparing
+                if raw_line.startswith(("+", "-", " ")):
+                    raw_line = raw_line[1:]
+                if raw_line.lstrip().startswith(add_line.lstrip()):
                     added_to_patch_idx[add_idx] = patch_idx
                     patch_idx += 1
                     break

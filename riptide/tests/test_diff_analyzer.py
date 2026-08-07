@@ -406,6 +406,39 @@ class TestErrorHandling:
         # The handler has a proper body (logging + raise), should NOT be flagged
         assert len(error_findings) == 0
 
+    def test_swallowed_exception_in_delta_with_leading_context(self, analyzer):
+        """Regression: added-line→patch-line mapping must survive leading context.
+
+        The pre-fix mapping compared lstrip()ed patch lines against stripped added
+        lines, but patch lines retain their '+'/' ' diff prefixes, so the mapping
+        was always empty and the get(i, i) fallback misaligned indices whenever
+        context lines preceded the finding (delta re-review case). The finding
+        was silently dropped on synchronize re-reviews.
+        """
+        patch = """\
+@@ -10,5 +10,17 @@
+             keys.append(item["key"])
+         except Exception as e:
+             pass
++    keys.sort()
+     return keys
+ 
+ 
++def _new_helper(items):
++    \"\"\"Docstring — makes the misaligned fallback index return False (not pass).\"\"\"
++    result = []
++    for item in items:
++        try:
++            result.append(str(item))
++        except Exception as e:
++            pass
++    return result
++"""
+        files = [make_file("processor.py", patch, additions=12)]
+        report = analyzer.analyze(files)
+        error_findings = [f for f in report.findings if f.category == "error_handling"]
+        assert any("silently ignored" in f.message.lower() for f in error_findings)
+
 
 # ── Function tracking / dedent tests ────────────────────────────────────────
 
