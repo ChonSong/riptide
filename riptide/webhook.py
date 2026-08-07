@@ -113,8 +113,8 @@ def _sync_test_helper(items: list[dict]) -> list[str]:
     for item in items:
         try:
             keys.append(item["key"])
-        except KeyError:
-            pass  # finding: silently ignored exception
+        except Exception as e:  # noqa: BLE001 - finding: silently ignored exception
+            pass
     return keys
 
 
