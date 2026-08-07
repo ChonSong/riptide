@@ -101,7 +101,7 @@ log = logging.getLogger("riptide.webhook")
 app = FastAPI(title="Riptide Webhook Server")
 
 # ── Synchronize rate limiting ───────────────────────────────────────────────
-# Track last synchronize time per PR to avoid T0 flooding on frequent pushes
+# Track last synchronize time per PR to avoid flooding on frequent pushes
 _SYNCHRONIZE_TIMESTAMPS: dict[str, float] = {}
 _SYNCHRONIZE_LOCK = threading.Lock()
 _SYNCHRONIZE_MIN_INTERVAL = 60.0  # seconds between synchronize processing
