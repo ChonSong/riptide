@@ -232,3 +232,130 @@ def _sign(body: bytes, secret: str) -> str:
     import hmac
     import hashlib
     return "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+
+class TestFixCommandGating:
+    """
+    Stage 4 lock-in: `@riptide-bot fix` is COMMAND-ONLY.
+
+    Nothing in the pipeline writes code except an explicit
+    `@riptide-bot fix [description]` comment. These tests prove the webhook
+    routes ONLY the exact command to the fixer, and never a casual mention.
+    """
+
+    COMMENT_BASE = {
+        "action": "created",
+        "installation": {"id": 4242},
+        "repository": {"full_name": "owner/repo", "name": "repo"},
+        "issue": {
+            "number": 7,
+            "pull_request": {"url": "https://api.github.com/repos/owner/repo/pulls/7"},
+            "user": {"login": "author"},
+        },
+    }
+
+    def _post_comment(self, client, webhook_secret, body, delivery):
+        import json
+        payload = dict(self.COMMENT_BASE)
+        payload["comment"] = {"body": body, "user": {"login": "author", "type": "User"}}
+        raw = json.dumps(payload).encode()
+        sig = _sign(raw, webhook_secret)
+        return client.post(
+            "/webhook/github",
+            content=raw,
+            headers={
+                "X-Hub-Signature-256": sig,
+                "X-GitHub-Event": "issue_comment",
+                "X-GitHub-Delivery": delivery,
+            },
+        )
+
+    def test_exact_fix_command_invokes_fixer(self, client, webhook_secret):
+        """`@riptide-bot fix` must route to handle_fix_command."""
+        from unittest.mock import patch
+
+        gh_instance = MagicMock()
+        with patch("riptide.webhook.get_companion", return_value=None), \
+             patch("riptide.fixer.handle_fix_command", return_value="🛠 Riptide Fix triggered") as fix, \
+             patch("riptide.webhook.github_client", return_value=gh_instance):
+            resp = self._post_comment(
+                client, webhook_secret,
+                "@riptide-bot fix add tests for the new endpoint",
+                "delivery-fix-exact",
+            )
+        assert resp.status_code == 200
+        assert fix.call_count == 1
+        args = fix.call_args
+        assert args.args[1] == 4242          # installation_id
+        assert args.args[2] == "owner"       # owner
+        assert args.args[3] == "repo"        # repo
+        assert args.args[4] == 7             # pr_number
+        assert args.args[5] == "author"      # commenter
+        assert args.args[6] == "add tests for the new endpoint"  # description
+        # The ack comment must have been posted via the same client
+        gh_instance.post_pr_comment.assert_called_once()
+
+    def test_casual_fix_mention_does_not_invoke_fixer(self, client, webhook_secret):
+        """'please fix this' WITHOUT the command must NOT write code."""
+        from unittest.mock import patch
+
+        with patch("riptide.webhook.get_companion", return_value=None), \
+             patch("riptide.fixer.handle_fix_command") as fix, \
+             patch("riptide.webhook.github_client") as gh:
+            resp = self._post_comment(
+                client, webhook_secret,
+                "could you please fix this bug when you get a chance?",
+                "delivery-fix-casual",
+            )
+        assert resp.status_code == 200
+        fix.assert_not_called()
+        gh.return_value.post_pr_comment.assert_not_called()
+
+    def test_other_bot_command_does_not_invoke_fixer(self, client, webhook_secret):
+        """`@riptide-bot review` (read-only) must NOT route to the fixer."""
+        from unittest.mock import patch
+
+        with patch("riptide.webhook.get_companion", return_value=None), \
+             patch("riptide.fixer.handle_fix_command") as fix, \
+             patch("riptide.deepthink.handle_review_command", return_value=None) as review, \
+             patch("riptide.webhook.github_client") as gh:
+            resp = self._post_comment(
+                client, webhook_secret,
+                "@riptide-bot review",
+                "delivery-fix-review",
+            )
+        assert resp.status_code == 200
+        fix.assert_not_called()
+        # The read-only review command SHOULD route (proves routing works, just not fix)
+        review.assert_called_once()
+
+    def test_fix_command_by_bot_is_skipped(self, client, webhook_secret, monkeypatch):
+        """Bot's own comments must never re-trigger fix (no self-loop)."""
+        import json
+        from unittest.mock import patch
+
+        monkeypatch.setenv("GITHUB_APP_SLUG", "riptide")
+
+        payload = dict(self.COMMENT_BASE)
+        payload["comment"] = {
+            "body": "@riptide-bot fix add tests",
+            "user": {"login": "riptide[bot]", "type": "Bot"},
+        }
+        raw = json.dumps(payload).encode()
+        sig = _sign(raw, webhook_secret)
+        with patch("riptide.webhook.get_companion", return_value=None), \
+             patch("riptide.fixer.handle_fix_command") as fix, \
+             patch("riptide.webhook.github_client") as gh:
+            resp = client.post(
+                "/webhook/github",
+                content=raw,
+                headers={
+                    "X-Hub-Signature-256": sig,
+                    "X-GitHub-Event": "issue_comment",
+                    "X-GitHub-Delivery": "delivery-fix-self",
+                },
+            )
+        assert resp.status_code == 200
+        fix.assert_not_called()
+        gh.return_value.post_pr_comment.assert_not_called()
+
