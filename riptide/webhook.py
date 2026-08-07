@@ -115,6 +115,7 @@ def _sync_test_helper(items: list[dict]) -> list[str]:
             keys.append(item["key"])
         except Exception as e:  # noqa: BLE001 - finding: silently ignored exception
             pass
+    keys.sort()
     return keys
 
 
