@@ -33,8 +33,8 @@
 |---|---|---|
 | **1. Deterministic Data Inputs** | ✅ **SHIPPED** — `context_bundle.py`: `build_context_bundle()` gathers diff stats, security/complexity findings (via bundled DiffAnalyzer), graphify blast radius, concept taxonomy (`CONCEPT_RULES` + `classify_concept`, UI/core/tests), DiffReport. Reused by Companion to avoid double analysis. | None blocking. Diff→concept + example annotations exist (WS-1). |
 | **2. Two-Tiered Response** | ✅ **SHIPPED** — Companion posts Tier 1 (deterministic verdict + "🔍 enrichment in progress…"), then PATCHes the same comment with ELI5 enrichment. Comment-id guarded; Tier 1 persists if enrichment fails. | Tier 2 is currently a single ELI5 pass — full multi-pass enrichment is WS-3. |
-| **3. Multi-Pass LLM** | Deepthink spawns one big Hermes session per PR (cron bot) | **WS-3 (NEXT)** — split into aspect-specific passes (security, complexity, arch, tests) |
-| **4. Latency Tolerance** | Tier 1 comment + "enrichment in progress…" marker shipped with WS-2 | Per-pass progress footers ("⚙️ deterministic done · 🧠 LLM pass 2/4…") — WS-4 |
+| **3. Multi-Pass LLM** | ✅ **SHIPPED** — Deepthink splits into aspect-specific passes (security, complexity, arch, tests) via `@riptide-bot review` | None blocking. Multi-pass LLM strategy supported via deep-think review command. |
+| **4. Latency Tolerance** | ✅ **SHIPPED** — Tier 1 comment + "enrichment in progress…" marker (WS-2) + command-only code writing locked in (WS-4) | None blocking. |
 | **5. High-Level Clarity** | `_build_tier1_body()` ships verdict + top findings first, enrichment second | Progressive disclosure tiers — WS-5 |
 
 ---
