@@ -420,12 +420,12 @@ class Companion:
     def is_active_for(self, owner: str, repo: str) -> bool:
         return f"{owner}/{repo}" in self.allowed_repos if self.allowed_repos else False
 
-    def run_for_pr(self, installation_id, owner, repo, pr_number, title, author, changed_files):
+    def run_for_pr(self, installation_id, owner, repo, pr_number, title, author, changed_files, webhook_received_at=None):
         if not self._semaphore.acquire(blocking=False):
             logger.warning("Busy, skipping %s/%s#%d", owner, repo, pr_number)
             return
         try:
-            self._execute(installation_id, owner, repo, pr_number, title, author, changed_files)
+            self._execute(installation_id, owner, repo, pr_number, title, author, changed_files, webhook_received_at=webhook_received_at)
         finally:
             self._semaphore.release()
 
@@ -520,7 +520,7 @@ class Companion:
             logger.error("SHA update failed: %s", e)
             return False
 
-    def _execute(self, installation_id, owner, repo, pr_number, title, author, changed_files):
+    def _execute(self, installation_id, owner, repo, pr_number, title, author, changed_files, webhook_received_at=None):
         full_name = f"{owner}/{repo}"
 
         if self._is_skipped(owner, repo, pr_number):
@@ -663,6 +663,7 @@ class Companion:
 
                 body = self._format_comment(emoji, author, tldr, graph_context, eli5, ui_files,
                                             owner=owner, repo=repo, pr_number=pr_number,
+                                            webhook_received_at=webhook_received_at,
                                             title=title, files=files, is_delta=is_delta)
                 try:
                     self.client.post_pr_comment(installation_id, owner, repo, pr_number, body)
@@ -747,6 +748,7 @@ class Companion:
             enriched_body = self._format_comment(emoji, author, tldr, graph_context, eli5, ui_files,
                                                  owner=owner, repo=repo, pr_number=pr_number,
                                                  title=title, files=files, is_delta=is_delta,
+                                            webhook_received_at=webhook_received_at,
                                                  deterministic_report=deterministic_report, enriched=True)
             try:
                 self.client.update_pr_comment(installation_id, owner, repo, comment_id, enriched_body)
@@ -760,6 +762,7 @@ class Companion:
             body = self._format_comment(emoji, author, tldr, graph_context, eli5, ui_files,
                                         owner=owner, repo=repo, pr_number=pr_number,
                                         title=title, files=files, is_delta=is_delta,
+                                            webhook_received_at=webhook_received_at,
                                         deterministic_report=deterministic_report)
             try:
                 self.client.post_pr_comment(installation_id, owner, repo, pr_number, body)
@@ -1118,10 +1121,12 @@ ELI5:"""
 
     def _format_comment(self, emoji, author, tldr, graph_context, eli5=None, ui_files=None,
                         owner=None, repo=None, pr_number=None, title=None, files=None, is_delta=False,
-                        deterministic_report: DiffReport | None = None, enriched: bool = False):
+                        deterministic_report: DiffReport | None = None, enriched: bool = False,
+                        webhook_received_at=None):
         """
         Build the Markdown comment body.
         Uses deterministic findings if available, otherwise falls back to legacy format.
+        webhook_received_at: Unix timestamp when webhook was received (for timing metric).
         """
         prefix = "🔄 " if is_delta else ""
 
@@ -1168,5 +1173,12 @@ ELI5:"""
             parts.append(f" · `@riptide-bot companion skip` to opt out · `@riptide-bot review` for deep-think</sub>")
         else:
             parts.append("</sub>")
+
+        # Timing metric: webhook received → comment posted
+        if webhook_received_at:
+            import time as _time
+            elapsed = _time.time() - webhook_received_at
+            from riptide.test_utils import format_elapsed
+            parts.append(f"\n\n---\n<sub>⏱️ Review posted in {format_elapsed(elapsed)}</sub>")
 
         return "".join(parts)

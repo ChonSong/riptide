@@ -254,6 +254,7 @@ def _spawn_deepthink(
             data=data,
             diagram_url=diagram_url,
             deterministic=bundle,
+            pr_created_at=data.get("pr_created_at"),
         )
     except Exception as e:
         state.mark_failed(job_id)
@@ -321,6 +322,7 @@ def _gather_review_data(
     - god_nodes: list of {name, edges}
     - communities: list of {name, members}
     - graph_context: raw graphify output
+    - pr_created_at: ISO 8601 timestamp when the PR was opened
     """
     data = {
         "files_changed": [],
@@ -329,6 +331,7 @@ def _gather_review_data(
         "god_nodes": [],
         "communities": [],
         "graph_context": {},
+        "pr_created_at": None,
     }
 
     # 1. Fetch PR diff
@@ -342,11 +345,11 @@ def _gather_review_data(
     except Exception as e:
         log.warning(f"Failed to fetch diff: {e}")
 
-    # 2. Fetch PR files
+    # 2. Fetch PR files + created_at (for timing metric)
     try:
         result = subprocess.run(
             ["gh", "pr", "view", str(pr_number), "--repo", f"{owner}/{repo}",
-             "--json", "files"],
+             "--json", "files,createdAt"],
             capture_output=True, text=True, timeout=30,
         )
         if result.returncode == 0:
@@ -361,6 +364,9 @@ def _gather_review_data(
                 }
                 for f in raw_files
             ]
+            # Capture PR created_at for the timing metric
+            if files_data.get("createdAt"):
+                data["pr_created_at"] = files_data["createdAt"]
     except Exception as e:
         log.warning(f"Failed to fetch PR files: {e}")
 
@@ -481,6 +487,7 @@ def _build_orchestrator_prompt(
     data: dict,
     diagram_url: Optional[str] = None,
     deterministic: Optional[dict] = None,
+    pr_created_at: Optional[str] = None,
 ) -> str:
     """
     Build a small orchestrator prompt that delegates to subagents.
@@ -491,6 +498,7 @@ def _build_orchestrator_prompt(
     If deterministic is provided (WS-3 Stage 1 context bundle), its DiffReport
     findings + verdict are embedded so the session starts from the deterministic
     analysis instead of re-deriving it.
+    If pr_created_at is provided, the review includes a timing metric.
     """
     # Format files changed
     files_str = "\n".join(
@@ -594,10 +602,12 @@ Run the assembly script — it validates, formats, and posts. Do NOT hand-format
 python -m riptide.assemble_review \
   --findings /tmp/findings.json \
   --owner {owner} --repo {repo} --pr {pr_number} \
-  --model "{DEEPTHINK_MODEL}" --provider "{DEEPTHINK_PROVIDER}"
+  --model "{DEEPTHINK_MODEL}" --provider "{DEEPTHINK_PROVIDER}" \
+  --pr-created-at "{pr_created_at or ''}"
 ```
 
 The script appends the model/provider to the sign-off deterministically.
+If pr_created_at is set, a "⏱️ Review posted Xm after PR opened" metric is included.
 
 ### Rules
 - Max 3 inline comments, real issues only
