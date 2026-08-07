@@ -45,7 +45,7 @@ class StateStore:
       and stable across timezones. Consumers must parse with datetime.fromisoformat().
     """
 
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
 
     def __init__(self, db_path: str = DEFAULT_DB_PATH):
         self.db_path = db_path
@@ -130,6 +130,18 @@ class StateStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_processed_comments_pr_key ON processed_comments (pr_key)"
             )
+        # v5: pr_heuristics — single authority for per-PR process heuristics
+        # (skip/resume, last commented SHA, reviewed-at timestamp for cooldown).
+        # Replaces companion_skip.json + deepthink_acted_prs.json so every bot
+        # answers "already reviewed / skipped / stale?" from ONE store.
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS pr_heuristics (
+                pr_key TEXT PRIMARY KEY,
+                skip INTEGER NOT NULL DEFAULT 0,
+                last_sha TEXT,
+                reviewed_at TEXT
+            )"""
+        )
 
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_jobs_pr_status ON jobs (pr_number, status)"
@@ -372,6 +384,53 @@ class StateStore:
                 if pr_key in result_str and "spawned" in result_str:
                     return True
         return False
+
+    # ── PR heuristics (WS-3 Stage 0: single authority for skip/last_sha/cooldown) ──
+
+    def get_pr_heuristics(self, pr_key: str) -> dict:
+        """Return per-PR process heuristics, or empty defaults when unknown."""
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT skip, last_sha, reviewed_at FROM pr_heuristics WHERE pr_key = ?",
+            (pr_key,),
+        ).fetchone()
+        if row is None:
+            return {"skip": False, "last_sha": None, "reviewed_at": None}
+        return {
+            "skip": bool(row[0]),
+            "last_sha": row[1],
+            "reviewed_at": row[2],
+        }
+
+    def set_pr_skip(self, pr_key: str, skip: bool):
+        """Set the user-controlled skip flag for a PR."""
+        conn = self._get_conn()
+        conn.execute(
+            "INSERT INTO pr_heuristics (pr_key, skip) VALUES (?, ?) "
+            "ON CONFLICT(pr_key) DO UPDATE SET skip = excluded.skip",
+            (pr_key, 1 if skip else 0),
+        )
+        conn.commit()
+
+    def set_pr_last_sha(self, pr_key: str, last_sha: Optional[str]):
+        """Record the commit SHA the bot last commented on for a PR."""
+        conn = self._get_conn()
+        conn.execute(
+            "INSERT INTO pr_heuristics (pr_key, last_sha) VALUES (?, ?) "
+            "ON CONFLICT(pr_key) DO UPDATE SET last_sha = excluded.last_sha",
+            (pr_key, last_sha),
+        )
+        conn.commit()
+
+    def set_pr_reviewed_at(self, pr_key: str, reviewed_at: Optional[str]):
+        """Record when the PR was last reviewed (ISO 8601 UTC) for cooldown checks."""
+        conn = self._get_conn()
+        conn.execute(
+            "INSERT INTO pr_heuristics (pr_key, reviewed_at) VALUES (?, ?) "
+            "ON CONFLICT(pr_key) DO UPDATE SET reviewed_at = excluded.reviewed_at",
+            (pr_key, reviewed_at),
+        )
+        conn.commit()
 
 
 # Module-level convenience (poller's old DB path for migration)

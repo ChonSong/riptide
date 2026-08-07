@@ -353,7 +353,7 @@ def classify_pr_mood(title: str, changed_files: list[dict] | None = None) -> str
 
 
 class Companion:
-    def __init__(self, github_client):
+    def __init__(self, github_client, state_store=None):
         self.client = github_client
         self.ollama_base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
         self.model = os.environ.get("RIPTIDE_COMPANION_MODEL", "qwen2.5-coder:7b")
@@ -364,6 +364,14 @@ class Companion:
         self._skip_file.parent.mkdir(parents=True, exist_ok=True)
         self._alert_lock = threading.Lock()
         self._skip_lock = threading.Lock()
+
+        # WS-3 Stage 0: heuristics live in StateStore (single authority).
+        # Inject for tests; default to the real store. Legacy JSON skips are
+        # imported once so user skip/resume survives the migration.
+        from riptide.state import StateStore
+
+        self._state = state_store if state_store is not None else StateStore()
+        self._import_legacy_skip_file()
 
         self._semaphore = threading.Semaphore(1)
 
@@ -435,6 +443,24 @@ class Companion:
             return "🤖 Companion **resumed** for this PR."
         return None
 
+    def _import_legacy_skip_file(self):
+        """One-time import of legacy companion_skip.json into StateStore."""
+        try:
+            if not self._skip_file.exists():
+                return
+            data = self._load_data()
+            if not data:
+                return
+            for pr_key, entry in data.items():
+                norm = self._migrate_entry(entry)
+                if norm["skip"]:
+                    self._state.set_pr_skip(pr_key, True)
+                if norm.get("last_sha"):
+                    self._state.set_pr_last_sha(pr_key, norm["last_sha"])
+            logger.info("Imported %d legacy skip entries into StateStore", len(data))
+        except Exception as e:
+            logger.warning("Legacy skip import failed: %s", e)
+
     def _load_data(self) -> dict:
         """Load companion data file (structured per-PR dict)."""
         if not self._skip_file.exists():
@@ -459,13 +485,7 @@ class Companion:
         key = f"{owner}/{repo}#{pr_number}"
         try:
             with self._skip_lock:
-                data = self._load_data()
-                entry = self._migrate_entry(data.get(key, {}))
-                if skip:
-                    data[key] = {"skip": True, "last_sha": entry.get("last_sha")}
-                else:
-                    data[key] = {"skip": False, "last_sha": entry.get("last_sha")}
-                self._skip_file.write_text(json.dumps(data, indent=2, sort_keys=True))
+                self._state.set_pr_skip(key, skip)
                 return True
         except Exception as e:
             logger.error("Skip update failed: %s", e)
@@ -475,9 +495,7 @@ class Companion:
         key = f"{owner}/{repo}#{pr_number}"
         try:
             with self._skip_lock:
-                data = self._load_data()
-                entry = self._migrate_entry(data.get(key, {}))
-                return entry["skip"]
+                return self._state.get_pr_heuristics(key)["skip"]
         except Exception:
             pass
         return False
@@ -487,9 +505,7 @@ class Companion:
         key = f"{owner}/{repo}#{pr_number}"
         try:
             with self._skip_lock:
-                data = self._load_data()
-                entry = self._migrate_entry(data.get(key, {}))
-                return entry.get("last_sha")
+                return self._state.get_pr_heuristics(key)["last_sha"]
         except Exception:
             return None
 
@@ -498,10 +514,7 @@ class Companion:
         key = f"{owner}/{repo}#{pr_number}"
         try:
             with self._skip_lock:
-                data = self._load_data()
-                entry = self._migrate_entry(data.get(key, {}))
-                data[key] = {"skip": entry["skip"], "last_sha": sha}
-                self._skip_file.write_text(json.dumps(data, indent=2, sort_keys=True))
+                self._state.set_pr_last_sha(key, sha)
                 return True
         except Exception as e:
             logger.error("SHA update failed: %s", e)

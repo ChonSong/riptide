@@ -23,6 +23,7 @@ from riptide.deepthink import (
     STALENESS_MINUTES,
     STATE_FILE,
 )
+from riptide.state import StateStore
 
 
 # ── _spawn_deepthink tests ──────────────────────────────────────────────────
@@ -235,46 +236,62 @@ class TestIsCronAvailable:
 
 
 class TestStateSaveLoad:
+    """State helpers now delegate to StateStore (WS-3 Stage 0).
+
+    Tests use a temp DB and patch deepthink.StateStore so the real prod
+    state.db is never touched.
+    """
+
+    def setup_method(self):
+        self._patches = []
+
+    def teardown_method(self):
+        for p in self._patches:
+            p.stop()
+        self._patches.clear()
+
+    def _tmp_store(self, tmp_path):
+        store = StateStore(str(tmp_path / "state.db"))
+        patch_obj = patch("riptide.deepthink.StateStore", return_value=store)
+        patch_obj.start()
+        self._patches.append(patch_obj)
+        return store
+
     def test_save_and_load_state(self, tmp_path):
-        state_file = tmp_path / "deepthink_acted_prs.json"
-        with patch("riptide.deepthink.STATE_FILE", state_file):
-            test_state = {
-                "ChonSong/riptide#42": {"head_sha": "abc123", "reviewed_at": "2026-07-31T00:00:00+00:00"},
-                "ChonSong/hermes-webui#100": {"head_sha": "def456", "reviewed_at": "2026-07-31T01:00:00+00:00"},
-            }
-            _save_state(test_state)
-            loaded = _load_state()
-            assert loaded == test_state
+        self._tmp_store(tmp_path)
+        test_state = {
+            "ChonSong/riptide#42": {"head_sha": "abc123", "reviewed_at": "2026-07-31T00:00:00+00:00"},
+            "ChonSong/hermes-webui#100": {"head_sha": "def456", "reviewed_at": "2026-07-31T01:00:00+00:00"},
+        }
+        _save_state(test_state)
+        loaded = _load_state()
+        assert loaded == test_state
 
     def test_load_state_nonexistent_file(self, tmp_path):
-        state_file = tmp_path / "nonexistent" / "deepthink_acted_prs.json"
-        with patch("riptide.deepthink.STATE_FILE", state_file):
-            result = _load_state()
-            assert result == {}
+        self._tmp_store(tmp_path)
+        result = _load_state()
+        assert result == {}
 
     def test_load_state_corrupted_file(self, tmp_path):
-        state_file = tmp_path / "deepthink_acted_prs.json"
-        state_file.write_text("{invalid json")
-        with patch("riptide.deepthink.STATE_FILE", state_file):
-            result = _load_state()
-            assert result == {}
+        self._tmp_store(tmp_path)
+        result = _load_state()
+        assert result == {}
 
     def test_save_state_creates_parent_dirs(self, tmp_path):
-        state_file = tmp_path / "deep" / "nested" / "deepthink_acted_prs.json"
-        with patch("riptide.deepthink.STATE_FILE", state_file):
-            _save_state({"test": {"key": "value"}})
-            assert state_file.exists()
+        self._tmp_store(tmp_path)
+        _save_state({"test": {"head_sha": "sha"}})
+        assert (tmp_path / "state.db").exists()
 
     def test_state_persistence_across_instances(self, tmp_path):
-        state_file = tmp_path / "deepthink_acted_prs.json"
-        with patch("riptide.deepthink.STATE_FILE", state_file):
-            _save_state({"repo#1": {"head_sha": "sha1"}})
-            state = _load_state()
-            state["repo#2"] = {"head_sha": "sha2"}
-            _save_state(state)
-            final = _load_state()
-            assert "repo#1" in final
-            assert "repo#2" in final
+        self._tmp_store(tmp_path)
+        _save_state({"repo#1": {"head_sha": "sha1"}})
+        state = _load_state()
+        state["repo#2"] = {"head_sha": "sha2"}
+        _save_state(state)
+        assert _load_state() == {
+            "repo#1": {"head_sha": "sha1", "reviewed_at": None},
+            "repo#2": {"head_sha": "sha2", "reviewed_at": None},
+        }
 
 
 # ── LOC filtering tests ─────────────────────────────────────────────────────
