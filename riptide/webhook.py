@@ -119,6 +119,17 @@ def _sync_test_helper(items: list[dict]) -> list[str]:
     return keys
 
 
+def _sync_test_helper_delta(items: list[dict]) -> list[str]:
+    """WS-3 delta fixture: a NEW silently-ignored exception in the delta."""
+    result = []
+    for item in items:
+        try:
+            result.append(str(item))
+        except Exception as e:  # noqa: BLE001 - finding: silently ignored exception
+            pass
+    return result
+
+
 def _should_process_synchronize(owner: str, repo: str, pr_number: int) -> bool:
     """Check if enough time has passed since the last synchronize for this PR."""
     global _SYNCHRONIZE_TIMESTAMPS
