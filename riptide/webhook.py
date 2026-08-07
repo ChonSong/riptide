@@ -20,7 +20,10 @@ import subprocess
 import requests
 import traceback
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from .companion import Companion
 
 from fastapi import FastAPI, Request, Response, HTTPException
 from pydantic import BaseModel
@@ -31,7 +34,7 @@ from .state import StateStore
 from .labeler import Labeler
 
 # Companion is optional — silently unavailable if RIPTIDE_COMPANION_REPOS is unset
-_companion = None
+_companion: "Companion | Literal[False] | None" = None
 
 # Labeler is optional — silently unavailable if RIPTIDE_LABELER_ENABLED != "1"
 _labeler = None
@@ -84,7 +87,10 @@ def get_companion():
         except Exception as e:
             log.warning("Companion not available: %s", e)
             _companion = False  # sentinel — don't retry
-    return _companion if _companion else None
+    result = _companion
+    if result is False or result is None:
+        return None
+    return result
 
 
 logging.basicConfig(
@@ -233,25 +239,14 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
             log.info(f"[{delivery_id}] synchronize rate-limited for {repo_full}#{pr_number}")
             return Response(status_code=200)
 
-    # PR opened/reopened/synchronize → T0 orchestrator review
+    # PR opened/reopened/synchronize → companion deterministic flow (one pipeline)
     if action in ("opened", "reopened", "synchronize"):
         companion = get_companion()
         github = github_client() if GITHUB_PRIVATE_KEY_PATH else None
         if companion and companion.is_active_for(owner, repo_name):
             from threading import Thread
 
-            def _safe_orchestrate(*args, **kwargs):
-                """Run T0 orchestrator with fail-safe."""
-                try:
-                    orch = T0Orchestrator(companion=companion, github_client=github)
-                    orch.review_pr(*args, **kwargs)
-                except Exception as e:
-                    log.error(
-                        f"[{delivery_id}] Orchestrator crashed for "
-                        f"{repo_full}#{pr_number}: {e}\n{traceback.format_exc()}"
-                    )
-
-            # Fetch PR files + head SHA for classifier
+            # Fetch PR files + head SHA (shared by companion flow and T0 fallback)
             files = []
             head_sha = ""
             if github:
@@ -262,27 +257,67 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
                 except Exception as e:
                     log.warning(f"[{delivery_id}] Could not fetch PR files: {e}")
 
-            total_loc = sum(f.get("additions", 0) + f.get("deletions", 0) for f in files)
-            profile = TaskClassifier().classify(
-                pr_number, owner, repo_name,
-                pr.get("title", f"PR #{pr_number}"),
-                pr.get("user", {}).get("login", "unknown"),
-                files, total_loc,
-                installation_id=installation_id,
-                head_sha=head_sha,
-            )
+            title = pr.get("title", f"PR #{pr_number}")
+            author = pr.get("user", {}).get("login", "unknown")
 
-            t = Thread(
-                target=_safe_orchestrate,
-                args=(profile,),
-                kwargs={"mode": "parallel"},
-                daemon=True,
-                name=f"t0-{repo_name}-{pr_number}",
-            )
-            t.start()
-            log.info(
-                f"[{delivery_id}] T0 orchestrator spawned for {repo_full}#{pr_number}"
-            )
+            if os.environ.get("RIPTIDE_T0_FALLBACK", "").lower() in ("1", "true", "yes"):
+                # Legacy T0 dispatcher (opt-in fallback; default is companion flow)
+                total_loc = sum(f.get("additions", 0) + f.get("deletions", 0) for f in files)
+                profile = TaskClassifier().classify(
+                    pr_number, owner, repo_name,
+                    title, author,
+                    files, total_loc,
+                    installation_id=installation_id,
+                    head_sha=head_sha,
+                )
+
+                def _safe_orchestrate(*args, **kwargs):
+                    """Run T0 orchestrator with fail-safe."""
+                    try:
+                        orch = T0Orchestrator(companion=companion, github_client=github)
+                        orch.review_pr(*args, **kwargs)
+                    except Exception as e:
+                        log.error(
+                            f"[{delivery_id}] Orchestrator crashed for "
+                            f"{repo_full}#{pr_number}: {e}\n{traceback.format_exc()}"
+                        )
+
+                t = Thread(
+                    target=_safe_orchestrate,
+                    args=(profile,),
+                    kwargs={"mode": "parallel"},
+                    daemon=True,
+                    name=f"t0-{repo_name}-{pr_number}",
+                )
+                t.start()
+                log.info(
+                    f"[{delivery_id}] T0 orchestrator spawned (fallback) for {repo_full}#{pr_number}"
+                )
+            else:
+                # Deterministic companion flow — the single pipeline entry.
+                # Runs depth decision → context bundle → Tier-1 canonical thread
+                # (Stage 0/1/2) inside Companion.run_for_pr (semaphore-guarded).
+                def _safe_run():
+                    try:
+                        companion.run_for_pr(
+                            installation_id, owner, repo_name, pr_number,
+                            title, author, files,
+                        )
+                    except Exception as e:
+                        log.error(
+                            f"[{delivery_id}] Companion flow crashed for "
+                            f"{repo_full}#{pr_number}: {e}\n{traceback.format_exc()}"
+                        )
+
+                t = Thread(
+                    target=_safe_run,
+                    daemon=True,
+                    name=f"companion-{repo_name}-{pr_number}",
+                )
+                t.start()
+                log.info(
+                    f"[{delivery_id}] Companion deterministic flow spawned for {repo_full}#{pr_number}"
+                )
 
             # Also spawn labeler thread (non-blocking)
             labeler = get_labeler()
