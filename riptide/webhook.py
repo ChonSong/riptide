@@ -130,6 +130,17 @@ def _sync_test_helper_delta(items: list[dict]) -> list[str]:
     return result
 
 
+def _sync_test_helper_delta2(items: list[dict]) -> int:
+    """WS-3 final thread-update fixture: finding in the live delta."""
+    total = 0
+    for item in items:
+        try:
+            total += int(item.get("qty", 0))
+        except Exception as e:  # noqa: BLE001 - finding: silently ignored exception
+            pass
+    return total
+
+
 def _should_process_synchronize(owner: str, repo: str, pr_number: int) -> bool:
     """Check if enough time has passed since the last synchronize for this PR."""
     global _SYNCHRONIZE_TIMESTAMPS
