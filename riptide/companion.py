@@ -591,24 +591,31 @@ class Companion:
             # Preserve the full original pr_details (number, labels, head, ...) so
             # build_context_bundle never loses keys it may read later; normalize
             # only the four it consumes today.
-            self._context_bundle = build_context_bundle(
-                files,
-                graph_context,
-                pr_details={
-                    **(pr_details or {}),
-                    "title": title,
-                    "body": pr_body,
-                    "author": author,
-                    "draft": pr_draft,
-                },
-            )
-            logger.info("Context bundle: %s", concept_summary(self._context_bundle))
+            try:
+                self._context_bundle = self.build_context_bundle(
+                    files,
+                    graph_context,
+                    pr_details={
+                        **(pr_details or {}),
+                        "title": title,
+                        "body": pr_body,
+                        "author": author,
+                        "draft": pr_draft,
+                    },
+                )
+                logger.info("Context bundle: %s", concept_summary(self._context_bundle))
+            except Exception as e:
+                logger.warning("Context bundle failed for %s#%d: %s", full_name, pr_number, e)
+                self._context_bundle = None
 
         # Phase 1: Deterministic analysis (primary path)
         deterministic_report = None
         if self.enable_deterministic:
             try:
-                deterministic_report = self._analyzer.analyze(files)
+                if self._context_bundle is None:
+                    raise RuntimeError("context bundle unavailable")
+                # Reuse the bundle's DiffReport — avoids running analyze() a second time
+                deterministic_report = self._context_bundle["report"]
                 logger.info(
                     "Deterministic analysis for %s#%d: %d findings, verdict=%s",
                     full_name, pr_number, len(deterministic_report.findings),

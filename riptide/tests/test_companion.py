@@ -437,8 +437,9 @@ class TestDeterministicAnalysis:
         companion.client.post_pr_comment = MagicMock()
         companion._get_last_sha = MagicMock(return_value=None)
 
-        # Patch the analyzer to raise an exception
-        with patch.object(companion._analyzer, "analyze", side_effect=re.error("bad regex")):
+        # Patch the context-bundle build to raise an exception (the bundle runs
+        # DiffAnalyzer internally; a failure here must fall back to the LLM path)
+        with patch.object(companion, "build_context_bundle", side_effect=re.error("bad regex")):
             with patch.object(companion, "_generate_tldr_with_retry", return_value="LLM fallback TL;DR") as mock_llm:
                 companion._execute(
                     123, "owner", "repo", 42,

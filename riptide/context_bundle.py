@@ -177,6 +177,7 @@ def build_context_bundle(
         "stats": diff_report.stats,
         "verdict": diff_report.verdict,
         "summary": diff_report.summary,
+        "report": diff_report,  # DiffReport object — companion reuses this instead of re-running analyze()
         "concepts": [
             {
                 "filename": c.filename,
