@@ -584,24 +584,25 @@ class Companion:
         emoji = classify_pr_mood(title, files)
         graph_context = self._get_graph_context(files) if self.enable_graphify else None
 
-        # Vision Pillar 1: Build deterministic context bundle
-        pr_body = pr_details.get("body", "") if pr_details else ""
-        pr_draft = pr_details.get("draft", False) if pr_details else False
-        # Preserve the full original pr_details (number, labels, head, ...) so
-        # build_context_bundle never loses keys it may read later; normalize
-        # only the four it consumes today.
-        self._context_bundle = build_context_bundle(
-            files,
-            graph_context,
-            pr_details={
-                **(pr_details or {}),
-                "title": title,
-                "body": pr_body,
-                "author": author,
-                "draft": pr_draft,
-            },
-        )
-        logger.info("Context bundle: %s", concept_summary(self._context_bundle))
+        # Vision Pillar 1: Build deterministic context bundle (deterministic mode only)
+        if self.enable_deterministic:
+            pr_body = pr_details.get("body", "") if pr_details else ""
+            pr_draft = pr_details.get("draft", False) if pr_details else False
+            # Preserve the full original pr_details (number, labels, head, ...) so
+            # build_context_bundle never loses keys it may read later; normalize
+            # only the four it consumes today.
+            self._context_bundle = build_context_bundle(
+                files,
+                graph_context,
+                pr_details={
+                    **(pr_details or {}),
+                    "title": title,
+                    "body": pr_body,
+                    "author": author,
+                    "draft": pr_draft,
+                },
+            )
+            logger.info("Context bundle: %s", concept_summary(self._context_bundle))
 
         # Phase 1: Deterministic analysis (primary path)
         deterministic_report = None

@@ -25,7 +25,7 @@ from riptide.diff_analyzer import DiffAnalyzer, DiffReport
 CONCEPT_RULES: list[tuple[re.Pattern[str], str]] = [
     # Tests (high priority — test files should be classified as tests even if they contain auth/api keywords)
     # Matches: test_foo.py, foo_test.py, foo.spec.js, tests/foo, spec/bar, specs/baz, __tests__/qux
-    (re.compile(r"(?:^|/|\\)(?:test_|_test\.|_spec\.|spec(?:s)?/|tests?/|__tests__/)", re.I), "tests"),
+    (re.compile(r"(?:^|[\\/])(?:test_|spec(?:s)?[\\/]|tests?[\\/]|__tests__[\\/]|(?:[^\\/]*)_test\.|(?:[^\\/]*)_spec\.|(?:[^\\/]*)\.spec\.)", re.I), "tests"),
     # Auth
     (re.compile(r"(?:^|/|\\)(?:auth|login|logout|signup|register|password|token|session|oauth|jwt|permission|rbac|acl)", re.I), "auth"),
     # Payments

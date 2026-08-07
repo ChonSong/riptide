@@ -90,6 +90,10 @@ class TestClassifyConcept:
             ("test_login.py", "tests"),
             ("specs/auth.spec.js", "tests"),  # specs/ directory
             ("src/__tests__/helper.js", "tests"),
+            ("foo_test.py", "tests"),    # basename _test. suffix
+            ("foo.spec.js", "tests"),    # basename .spec. suffix
+            ("src/foo_test.py", "tests"),
+            ("src/foo.spec.js", "tests"),
         ],
     )
     def test_test_files(self, filename, expected_concept):
@@ -233,6 +237,15 @@ class TestBuildContextBundle:
         files = [
             make_file("src/auth/login.py"),
             make_file("tests/test_api.py"),
+        ]
+        bundle = build_context_bundle(files, graph_context=None)
+        assert bundle["aggregate"]["touches_core"] is False
+
+    def test_touches_core_false_basename_test_files(self):
+        """Basename _test. / .spec. files classify as tests, not core."""
+        files = [
+            make_file("foo_test.py"),
+            make_file("foo.spec.js"),
         ]
         bundle = build_context_bundle(files, graph_context=None)
         assert bundle["aggregate"]["touches_core"] is False
