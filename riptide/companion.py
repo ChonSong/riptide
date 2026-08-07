@@ -355,7 +355,7 @@ def classify_pr_mood(title: str, changed_files: list[dict] | None = None) -> str
 class Companion:
     def __init__(self, github_client):
         self.client = github_client
-        self.ollama_base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:43311")
+        self.ollama_base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
         self.model = os.environ.get("RIPTIDE_COMPANION_MODEL", "qwen2.5-coder:7b")
 
         data_dir = Path(os.environ.get("RIPTIDE_DATA_DIR", "/tmp/riptide"))
