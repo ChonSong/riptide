@@ -429,6 +429,38 @@ class TestGatherReviewData:
             result = _gather_review_data("ChonSong", "riptide", 42, "abc123")
             assert len(result["diff_raw"]) == 50000
 
+    def test_merges_per_file_patches_from_api(self):
+        """WS-3 Stage 1: gh api pulls/N/files patches feed the context bundle."""
+        view_result = MagicMock()
+        view_result.returncode = 0
+        view_result.stdout = (
+            '{"files": [{"path": "test.py", "additions": 10, "deletions": 5}]}'
+        )
+        api_result = MagicMock()
+        api_result.returncode = 0
+        api_result.stdout = (
+            '[{"filename": "test.py", "status": "modified", '
+            '"patch": "+ secret = \'x\'"}]'
+        )
+        empty_result = MagicMock()
+        empty_result.returncode = 0
+        empty_result.stdout = ""
+
+        def _respond(*args, **kwargs):
+            cmd = args[0]
+            if cmd[0] == "gh" and cmd[1] == "api":
+                return api_result
+            if cmd[0] == "gh" and cmd[1] == "pr" and cmd[2] == "diff":
+                return empty_result
+            if cmd[0] == "git" and cmd[1] == "ls-tree":
+                return empty_result
+            return view_result
+
+        with patch("subprocess.run", side_effect=_respond):
+            result = _gather_review_data("ChonSong", "riptide", 42, "abc123")
+        assert result["files_changed"][0]["patch"] == "+ secret = 'x'"
+        assert result["files_changed"][0]["status"] == "modified"
+
 
 # ── _build_orchestrator_prompt tests ─────────────────────────────────────────
 
@@ -534,3 +566,50 @@ class TestBuildOrchestratorPrompt:
         assert "Pre-generated Architecture Diagram" in prompt
         assert "https://excalidraw.com/#json=abc123" in prompt
         assert "Step 4: Architecture Diagram" in prompt
+
+    def test_includes_deterministic_analysis_when_provided(self):
+        """WS-3 Stage 1: the pre-computed DiffReport findings feed the session."""
+        data = {
+            "files_changed": [{"filename": "test.py", "additions": 100, "deletions": 50}],
+            "diff_raw": "+ secret = 'x'\n",
+            "repo_tree": [],
+            "god_nodes": [],
+            "communities": [],
+            "graph_context": {},
+        }
+        deterministic = {
+            "verdict": "review",
+            "findings": [
+                {"category": "security", "severity": "critical",
+                 "message": "Possible hardcoded secret", "file": "test.py"},
+                {"category": "complexity", "severity": "warning",
+                 "message": "Function exceeds 300 lines", "file": "main.py"},
+            ],
+            "stats": {"total_add": 100, "total_del": 50, "file_count": 1},
+            "aggregate": {"concepts": ["tests", "core"]},
+        }
+        prompt = _build_orchestrator_prompt(
+            "ChonSong", "riptide", 42, "feat: test", "author", 150, "abc123", data,
+            deterministic=deterministic
+        )
+        assert "Deterministic Analysis (pre-computed)" in prompt
+        assert "Possible hardcoded secret" in prompt
+        assert "Function exceeds 300 lines" in prompt
+        assert "verdict" in prompt.lower() or "review" in prompt
+        assert "concepts" in prompt.lower() or "tests, core" in prompt
+        assert "do NOT re-derive from scratch" in prompt
+
+    def test_omits_deterministic_analysis_when_not_provided(self):
+        data = {
+            "files_changed": [],
+            "diff_raw": "",
+            "repo_tree": [],
+            "god_nodes": [],
+            "communities": [],
+            "graph_context": {},
+        }
+        prompt = _build_orchestrator_prompt(
+            "ChonSong", "riptide", 42, "feat: test", "author", 300, "abc123", data
+        )
+        assert "Deterministic Analysis (pre-computed)" not in prompt
+

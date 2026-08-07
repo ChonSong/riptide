@@ -202,6 +202,26 @@ def _spawn_deepthink(
         skills = select_skills(depth)
         log.info(f"{owner}/{repo}#{pr_number} classified as {depth.value}, skills={skills}")
 
+        # Deterministic core (WS-3 Stage 1): build the context bundle ONCE from the
+        # gathered data and feed its DiffReport findings into the orchestrator prompt.
+        # The spawned session starts from the deterministic analysis instead of
+        # re-deriving everything from the raw diff. Non-fatal on failure.
+        bundle = None
+        try:
+            from riptide.context_bundle import build_context_bundle
+            bundle = build_context_bundle(
+                data.get("files_changed", []),
+                data.get("graph_context"),
+                pr_details={"title": pr_title, "author": pr_author, "body": ""},
+            )
+            log.info(
+                "%s/%s#%d deterministic bundle: %d findings, verdict=%s",
+                owner, repo, pr_number,
+                len(bundle.get("findings", [])), bundle.get("verdict"),
+            )
+        except Exception as e:
+            log.warning(f"Context bundle failed for {owner}/{repo}#{pr_number}: {e}")
+
         # Pre-generate Excalidraw diagram in Python (deterministic, no LLM needed)
         # Run in background thread with timeout to avoid blocking webhook path
         from concurrent.futures import ThreadPoolExecutor, TimeoutError
@@ -233,6 +253,7 @@ def _spawn_deepthink(
             head_sha=head_sha,
             data=data,
             diagram_url=diagram_url,
+            deterministic=bundle,
         )
     except Exception as e:
         state.mark_failed(job_id)
@@ -343,6 +364,27 @@ def _gather_review_data(
     except Exception as e:
         log.warning(f"Failed to fetch PR files: {e}")
 
+    # 2b. Fetch per-file patches (deterministic input for the context bundle)
+    # gh pr view --json files does NOT include patch content; the pulls API does.
+    # This lets DiffAnalyzer (security/complexity/error_handling) see real added lines.
+    try:
+        result = subprocess.run(
+            ["gh", "api", f"repos/{owner}/{repo}/pulls/{pr_number}/files",
+             "--paginate"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            api_files = json.loads(result.stdout)
+            if isinstance(api_files, list):
+                patch_by_name = {f.get("filename"): f for f in api_files}
+                for entry in data["files_changed"]:
+                    api_entry = patch_by_name.get(entry["filename"])
+                    if api_entry:
+                        entry["patch"] = api_entry.get("patch") or ""
+                        entry["status"] = api_entry.get("status", "modified")
+    except Exception as e:
+        log.warning(f"Failed to fetch per-file patches: {e}")
+
     # 3. Fetch repo tree (from local workspace if available)
     workspace = Path.home() / "workspace" / repo
     if workspace.is_dir():
@@ -438,6 +480,7 @@ def _build_orchestrator_prompt(
     head_sha: str,
     data: dict,
     diagram_url: Optional[str] = None,
+    deterministic: Optional[dict] = None,
 ) -> str:
     """
     Build a small orchestrator prompt that delegates to subagents.
@@ -445,6 +488,9 @@ def _build_orchestrator_prompt(
     The prompt is ~40 lines instead of ~280 lines.
     All data is pre-gathered in Python and passed as structured context.
     If diagram_url is provided, the LLM references it instead of generating.
+    If deterministic is provided (WS-3 Stage 1 context bundle), its DiffReport
+    findings + verdict are embedded so the session starts from the deterministic
+    analysis instead of re-deriving it.
     """
     # Format files changed
     files_str = "\n".join(
@@ -473,6 +519,36 @@ def _build_orchestrator_prompt(
     diagram_section = f"\n## Pre-generated Architecture Diagram\n[View Diagram]({diagram_url})\n" if diagram_url else ""
     diagram_step = "\n### Step 4: Architecture Diagram\nThe architecture diagram is pre-generated and embedded above. Reference it in your Code Analysis section.\n" if diagram_url else ""
 
+    # Deterministic analysis section (WS-3 Stage 1): pre-computed DiffReport findings
+    deterministic_section = ""
+    if deterministic:
+        verdict = deterministic.get("verdict", "pass")
+        findings = deterministic.get("findings", [])
+        stats = deterministic.get("stats", {})
+        concepts = deterministic.get("aggregate", {}).get("concepts", [])
+        lines = ["## Deterministic Analysis (pre-computed)", ""]
+        lines.append(f"Verdict: **{verdict}** — {len(findings)} finding(s), "
+                     f"{stats.get('total_add', 0)}+/"
+                     f"{stats.get('total_del', 0)}- across "
+                     f"{stats.get('file_count', 0)} file(s).")
+        if concepts:
+            lines.append(f"Concepts touched: {', '.join(concepts)}")
+        if findings:
+            lines.append("")
+            lines.append("Findings (verify against the diff, do NOT re-derive from scratch):")
+            for f in findings[:10]:
+                lines.append(
+                    f"- [{f.get('severity', 'info')}] {f.get('category', '?')}: "
+                    f"{f.get('message', '')}"
+                    + (f" — {f.get('file', '')}" if f.get('file') else "")
+                )
+            if len(findings) > 10:
+                lines.append(f"  … and {len(findings) - 10} more")
+        lines.append("")
+        lines.append("Your subagent review must reference these findings — confirm, refute, or extend them. "
+                     "Do not duplicate the analysis; add value on top of it.")
+        deterministic_section = "\n".join(lines) + "\n\n"
+
     return f"""PR #{pr_number} in {owner}/{repo} — {total_loc} LOC changed.
 
 ## Context (pre-gathered)
@@ -496,7 +572,7 @@ def _build_orchestrator_prompt(
 ### Graphify Analysis
 {graph_str}
 {diagram_section}
-## Your Task: Orchestrate Review
+{deterministic_section}## Your Task: Orchestrate Review
 
 You are a senior engineer. Delegate review tasks to subagents, then synthesize.
 
