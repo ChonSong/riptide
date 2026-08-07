@@ -53,7 +53,7 @@
 
 ### WS-1: Deterministic context bundle (Vision 1)
 - **Goal:** A single deterministic pipeline that pre-gathers: diff stats, security findings, complexity findings, graphify blast radius, changed-file taxonomy (UI/core/tests), test status.
-- **Output:** `riptide/context_bundle.py` — `build_context_bundle(files, graphify, tests) -> dict`.
+- **Output:** `riptide/context_bundle.py` — `build_context_bundle(files, graph_context, pr_details=None) -> dict`.
 - **Innovation:** Diff→concept mapping — "this PR touches auth + payments + adds a test helper" using deterministic heuristics + example variables/pseudocode annotations.
 - **Delegation:** One subagent to deepthink implementation.
 
