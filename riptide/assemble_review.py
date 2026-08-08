@@ -34,6 +34,8 @@ def assemble_review_body(
     diagram_url: Optional[str] = None,
     model: Optional[str] = None,
     provider: Optional[str] = None,
+    pr_created_at: Optional[str] = None,
+    webhook_received_at: Optional[float] = None,
 ) -> str:
     """
     Assemble a review comment from structured findings.
@@ -44,6 +46,8 @@ def assemble_review_body(
         repo: Repo name
         pr_number: PR number
         diagram_url: Optional pre-generated diagram URL
+        pr_created_at: ISO 8601 timestamp of PR creation
+        webhook_received_at: Unix timestamp when webhook was received
 
     Returns:
         Markdown review body ready for `gh pr comment`
@@ -109,6 +113,20 @@ def assemble_review_body(
         if provider:
             signoff += f"provider: `{provider}`"
     signoff += "</sub>"
+
+    # Timing metric: PR created → review posted
+    if pr_created_at:
+        from datetime import datetime, timezone
+        try:
+            created_dt = datetime.fromisoformat(pr_created_at.replace("Z", "+00:00"))
+            now = datetime.now(timezone.utc)
+            elapsed_seconds = (now - created_dt).total_seconds()
+            from riptide.test_utils import format_elapsed
+            elapsed_str = format_elapsed(elapsed_seconds)
+            parts.append(f"\n---\n<sub>⏱️ Review posted {elapsed_str} after PR opened</sub>")
+        except (ValueError, TypeError):
+            pass
+
     parts.append(f"\n---\n{signoff}")
 
     body = "\n".join(parts)
@@ -177,6 +195,7 @@ def main():
     parser.add_argument("--diagram-url", default=None, help="Pre-generated diagram URL")
     parser.add_argument("--model", default=None, help="Model used for the review (appended to sign-off)")
     parser.add_argument("--provider", default=None, help="Provider used for the review (appended to sign-off)")
+    parser.add_argument("--pr-created-at", default=None, help="ISO 8601 timestamp the PR was opened")
     parser.add_argument("--dry-run", action="store_true", help="Print review instead of posting")
     args = parser.parse_args()
 
@@ -209,6 +228,7 @@ def main():
         diagram_url=args.diagram_url,
         model=args.model,
         provider=args.provider,
+        pr_created_at=args.pr_created_at,
     )
 
     if args.dry_run:

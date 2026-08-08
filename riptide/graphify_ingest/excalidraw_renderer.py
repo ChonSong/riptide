@@ -9,7 +9,7 @@ Eight connected sections, all linked by arrows, using the Excalidraw skill's
 official color palette.
 
 Usage:
-    from riptide.grafiphy.excalidraw_renderer import render_review, upload_excalidraw
+    from riptide.graphify_ingest.excalidraw_renderer import render_review, upload_excalidraw
     url = upload_excalidraw(render_review(pr_data, findings, ...))
 """
 import json

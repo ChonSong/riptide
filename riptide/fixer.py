@@ -261,6 +261,9 @@ def _spawn_fix(
                 cmd, capture_output=True, text=True, timeout=15
             )
             if result.returncode == 0:
+                # Spawn succeeded — mark complete immediately.
+                # Dedup is handled by pr_heuristics.last_sha + reviewed_at.
+                state.mark_complete(job_id)
                 log.info(f"✓ Spawned fix for {owner}/{repo}#{pr_number}: {result.stdout[:200]}")
                 return True
             else:
