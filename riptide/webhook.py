@@ -13,18 +13,68 @@ Riptide Review (Bot 2) runs via cron polling in deepthink.py — not here.
 """
 import os
 import json
+import time
 import logging
+import threading
+import subprocess
+import requests
 import traceback
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from .companion import Companion
 
 from fastapi import FastAPI, Request, Response, HTTPException
 from pydantic import BaseModel
 
 from .github_app import verify_webhook_signature, GitHubAppClient
+from .orchestrator import T0Orchestrator, TaskClassifier
+from .state import StateStore
+from .labeler import Labeler
 
 # Companion is optional — silently unavailable if RIPTIDE_COMPANION_REPOS is unset
-_companion = None
+_companion: "Companion | Literal[False] | None" = None
+
+# Labeler is optional — silently unavailable if RIPTIDE_LABELER_ENABLED != "1"
+_labeler = None
+
+
+def _reconcile_labels(github, installation_id, owner, repo, pr_number, new_labels, labeler):
+    """Remove stale bot-managed labels, preserve human-applied ones."""
+    try:
+        # Get current labels on the issue
+        issue_url = f"{github.base_url}/repos/{owner}/{repo}/issues/{pr_number}"
+        resp = requests.get(issue_url, headers=github._headers(installation_id), timeout=15)
+        resp.raise_for_status()
+        current_labels = [l["name"] for l in resp.json().get("labels", [])]
+
+        # Determine which labels are bot-managed (in our taxonomy)
+        all_bot_labels = labeler._get_all_labels()
+
+        # Remove bot-managed labels that are NOT in the new classification
+        for label in current_labels:
+            if label in all_bot_labels and label not in new_labels:
+                try:
+                    github.remove_label_from_issue(installation_id, owner, repo, pr_number, label)
+                except Exception:
+                    pass  # Label may have been removed already
+    except Exception as e:
+        log.warning(f"Label reconciliation failed: {e}")
+
+
+def get_labeler():
+    global _labeler
+    if _labeler is None:
+        if os.environ.get("RIPTIDE_LABELER_ENABLED", "1") != "1":
+            _labeler = False  # sentinel — don't retry
+            return None
+        try:
+            _labeler = Labeler()
+        except Exception as e:
+            log.warning("Labeler not available: %s", e)
+            _labeler = False
+    return _labeler if _labeler else None
 
 
 def get_companion():
@@ -37,7 +87,10 @@ def get_companion():
         except Exception as e:
             log.warning("Companion not available: %s", e)
             _companion = False  # sentinel — don't retry
-    return _companion if _companion else None
+    result = _companion
+    if result is False or result is None:
+        return None
+    return result
 
 
 logging.basicConfig(
@@ -46,6 +99,52 @@ logging.basicConfig(
 log = logging.getLogger("riptide.webhook")
 
 app = FastAPI(title="Riptide Webhook Server")
+
+# ── Synchronize rate limiting ───────────────────────────────────────────────
+# Track last synchronize time per PR to avoid flooding on frequent pushes
+_SYNCHRONIZE_TIMESTAMPS: dict[str, float] = {}
+_SYNCHRONIZE_LOCK = threading.Lock()
+_SYNCHRONIZE_MIN_INTERVAL = 60.0  # seconds between synchronize processing
+
+
+def _should_process_synchronize(owner: str, repo: str, pr_number: int) -> bool:
+    """Check if enough time has passed since the last synchronize for this PR."""
+    global _SYNCHRONIZE_TIMESTAMPS
+    key = f"{owner}/{repo}#{pr_number}"
+    now = time.time()
+    with _SYNCHRONIZE_LOCK:
+        last_time = _SYNCHRONIZE_TIMESTAMPS.get(key, 0)
+        if now - last_time < _SYNCHRONIZE_MIN_INTERVAL:
+            return False
+        _SYNCHRONIZE_TIMESTAMPS[key] = now
+        # Clean old entries (simple GC)
+        if len(_SYNCHRONIZE_TIMESTAMPS) > 1000:
+            cutoff = now - 3600  # 1 hour
+            _SYNCHRONIZE_TIMESTAMPS = {
+                k: v for k, v in _SYNCHRONIZE_TIMESTAMPS.items() if v > cutoff
+            }
+        return True
+
+
+_state_store = None
+
+
+def _get_state_store():
+    global _state_store
+    if _state_store is None:
+        _state_store = StateStore(
+            db_path=os.environ.get("RIPTIDE_STATE_DB", "/tmp/riptide_state.db")
+        )
+    return _state_store
+
+
+# ── Health check ────────────────────────────────────────────────────────────────
+
+
+@app.get("/health")
+async def health():
+    """Return server health status for monitoring / tunnel-watchdog."""
+    return {"status": "ok"}
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -82,6 +181,11 @@ async def github_webhook(request: Request) -> Response:
     signature = request.headers.get("x-hub-signature-256", "")
     event = request.headers.get("x-github-event", "")
     delivery_id = request.headers.get("x-github-delivery", "unknown")
+
+    # Idempotency: drop duplicate deliveries before expensive processing
+    if not _get_state_store().reserve_delivery(delivery_id):
+        log.info(f"[{delivery_id}] Duplicate delivery dropped")
+        return Response(status_code=200)
 
     if not verify_webhook_signature(body, signature, WEBHOOK_SECRET):
         log.warning(f"[{delivery_id}] Invalid webhook signature from {request.client}")
@@ -129,30 +233,144 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
         f"[{delivery_id}] PR {action}: {repo_full}#{pr_number}"
     )
 
-    # PR opened/reopened/synchronize → companion TLDR
+    # Rate limit: skip 'synchronize' if one happened recently for this PR
+    if action == "synchronize":
+        if not _should_process_synchronize(owner, repo_name, pr_number):
+            log.info(f"[{delivery_id}] synchronize rate-limited for {repo_full}#{pr_number}")
+            return Response(status_code=200)
+
+    # PR opened/reopened/synchronize → companion deterministic flow (one pipeline)
     if action in ("opened", "reopened", "synchronize"):
         companion = get_companion()
+        github = github_client() if GITHUB_PRIVATE_KEY_PATH else None
         if companion and companion.is_active_for(owner, repo_name):
             from threading import Thread
 
-            t = Thread(
-                target=companion.run_for_pr,
-                args=(
-                    installation_id,
-                    owner,
-                    repo_name,
-                    pr_number,
-                    pr.get("title", f"PR #{pr_number}"),
-                    pr.get("user", {}).get("login", "unknown"),
-                    [],  # changed_files will be fetched inside companion thread
-                ),
-                daemon=True,
-                name=f"companion-{repo_name}-{pr_number}",
-            )
-            t.start()
-            log.info(
-                f"[{delivery_id}] Companion thread spawned for {repo_full}#{pr_number}"
-            )
+            # Fetch PR files + head SHA (shared by companion flow and T0 fallback)
+            files = []
+            head_sha = ""
+            if github:
+                try:
+                    files = github.get_pr_files(installation_id, owner, repo_name, pr_number)
+                    pr_detail = github.get_pr_details(installation_id, owner, repo_name, pr_number)
+                    head_sha = pr_detail.get("head", {}).get("sha", "")
+                except Exception as e:
+                    log.warning(f"[{delivery_id}] Could not fetch PR files: {e}")
+
+            title = pr.get("title", f"PR #{pr_number}")
+            author = pr.get("user", {}).get("login", "unknown")
+
+            if os.environ.get("RIPTIDE_T0_FALLBACK", "").lower() in ("1", "true", "yes"):
+                # Legacy T0 dispatcher (opt-in fallback; default is companion flow)
+                total_loc = sum(f.get("additions", 0) + f.get("deletions", 0) for f in files)
+                profile = TaskClassifier().classify(
+                    pr_number, owner, repo_name,
+                    title, author,
+                    files, total_loc,
+                    installation_id=installation_id,
+                    head_sha=head_sha,
+                )
+
+                def _safe_orchestrate(*args, **kwargs):
+                    """Run T0 orchestrator with fail-safe."""
+                    try:
+                        orch = T0Orchestrator(companion=companion, github_client=github)
+                        orch.review_pr(*args, **kwargs)
+                    except Exception as e:
+                        log.error(
+                            f"[{delivery_id}] Orchestrator crashed for "
+                            f"{repo_full}#{pr_number}: {e}\n{traceback.format_exc()}"
+                        )
+
+                t = Thread(
+                    target=_safe_orchestrate,
+                    args=(profile,),
+                    kwargs={"mode": "parallel"},
+                    daemon=True,
+                    name=f"t0-{repo_name}-{pr_number}",
+                )
+                t.start()
+                log.info(
+                    f"[{delivery_id}] T0 orchestrator spawned (fallback) for {repo_full}#{pr_number}"
+                )
+            else:
+                # Deterministic companion flow — the single pipeline entry.
+                # Runs depth decision → context bundle → Tier-1 canonical thread
+                # (Stage 0/1/2) inside Companion.run_for_pr (semaphore-guarded).
+                _webhook_received_at = time.time()
+
+                def _safe_run():
+                    try:
+                        companion.run_for_pr(
+                            installation_id, owner, repo_name, pr_number,
+                            title, author, files,
+                            webhook_received_at=_webhook_received_at,
+                        )
+                    except Exception as e:
+                        log.error(
+                            f"[{delivery_id}] Companion flow crashed for "
+                            f"{repo_full}#{pr_number}: {e}\n{traceback.format_exc()}"
+                        )
+
+                t = Thread(
+                    target=_safe_run,
+                    daemon=True,
+                    name=f"companion-{repo_name}-{pr_number}",
+                )
+                t.start()
+                log.info(
+                    f"[{delivery_id}] Companion deterministic flow spawned for {repo_full}#{pr_number}"
+                )
+
+            # Also spawn labeler thread (non-blocking)
+            labeler = get_labeler()
+            if labeler and github:
+                def _safe_label():
+                    try:
+                        labels = labeler.classify_pr(pr_detail, files, repo_full)
+                        # Setup labels on repo first (creates missing ones)
+                        labeler.setup_labels_on_repo(installation_id, owner, repo_name, github)
+                        # Reconcile: remove stale bot-managed labels, preserve human labels
+                        _reconcile_labels(github, installation_id, owner, repo_name, pr_number, labels, labeler)
+                        # Add labels to PR
+                        github.add_labels_to_issue(installation_id, owner, repo_name, pr_number, labels)
+                        log.info(f"[{delivery_id}] Labels applied to {repo_full}#{pr_number}: {labels}")
+                    except Exception as e:
+                        log.error(f"[{delivery_id}] Labeler failed: {e}")
+
+                label_thread = threading.Thread(target=_safe_label, daemon=True, name=f"label-{repo_name}-{pr_number}")
+                label_thread.start()
+                log.info(f"[{delivery_id}] Labeler spawned for {repo_full}#{pr_number}")
+
+    # PR merged into default branch → auto-deploy
+    elif action == "closed" and pr.get("merged"):
+        default_branch = os.environ.get("RIPTIDE_DEPLOY_BRANCH", "main")
+        base_ref = pr.get("base", {}).get("ref", "")
+        if base_ref == default_branch:
+            log.info(f"[{delivery_id}] PR #{pr_number} merged into {default_branch} — triggering auto-deploy")
+            deploy_script = os.environ.get("RIPTIDE_DEPLOY_SCRIPT", "/home/sc/workspace/riptide/scripts/deploy.sh")
+            if not Path(deploy_script).exists():
+                log.error(
+                    f"[{delivery_id}] Auto-deploy skipped — script not found: {deploy_script}"
+                )
+            elif not os.access(deploy_script, os.X_OK):
+                log.error(
+                    f"[{delivery_id}] Auto-deploy skipped — script not executable: {deploy_script}"
+                )
+            else:
+                try:
+                    proc = subprocess.Popen(
+                        ["systemd-run", "--user", "--scope", "--property=KillMode=process", deploy_script],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.STDOUT,
+                    )
+                    log.info(f"[{delivery_id}] Auto-deploy triggered (pid={proc.pid})")
+                except FileNotFoundError:
+                    log.error(
+                        f"[{delivery_id}] Auto-deploy skipped — systemd-run not found. Install systemd or trigger deploy manually."
+                    )
+                except Exception as e:
+                    log.error(f"[{delivery_id}] Failed to trigger auto-deploy: {e}")
 
     return Response(status_code=200)
 
@@ -227,6 +445,68 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
                     )
             except Exception as e:
                 log.error(f"[{delivery_id}] Review command failed: {e}")
+
+        # Route 2b: On-demand fix command (@riptide-bot fix [description])
+        from riptide.fixer import FIX_RE, handle_fix_command
+
+        if FIX_RE.search(body):
+            log.info(
+                f"[{delivery_id}] Fix command on {owner}/{repo_name}#{pr_number} by {commenter}"
+            )
+            try:
+                client = github_client()
+                description = FIX_RE.search(body).group(1).strip()
+                result = handle_fix_command(
+                    client, installation_id, owner, repo_name, pr_number, commenter, description
+                )
+                if result:
+                    client.post_pr_comment(
+                        installation_id, owner, repo_name, pr_number, result
+                    )
+            except Exception as e:
+                log.error(f"[{delivery_id}] Fix command failed: {e}")
+
+        # Route 2c: Relabel command (@riptide-bot relabel)
+        if "@riptide-bot relabel" in body.lower():
+            log.info(
+                f"[{delivery_id}] Relabel command on {owner}/{repo_name}#{pr_number} by {commenter}"
+            )
+            try:
+                client = github_client()
+                labeler = get_labeler()
+                if labeler:
+                    pr_detail = client.get_pr_details(installation_id, owner, repo_name, pr_number)
+                    files = client.get_pr_files(installation_id, owner, repo_name, pr_number)
+                    labels = labeler.classify_pr(pr_detail, files, f"{owner}/{repo_name}")
+                    labeler.setup_labels_on_repo(installation_id, owner, repo_name, client)
+                    # Reconcile: remove stale bot-managed labels before applying new ones
+                    _reconcile_labels(client, installation_id, owner, repo_name, pr_number, labels, labeler)
+                    client.add_labels_to_issue(installation_id, owner, repo_name, pr_number, labels)
+                    client.post_pr_comment(
+                        installation_id, owner, repo_name, pr_number,
+                        f"🏷️ Labels re-applied: {', '.join(labels)}"
+                    )
+            except Exception as e:
+                log.error(f"[{delivery_id}] Relabel command failed: {e}")
+
+        # Route 3: Visual regression command (@riptide-bot visual)
+        from riptide.visual import VISUAL_RE, handle_visual_command
+
+        if VISUAL_RE.search(body):
+            log.info(
+                f"[{delivery_id}] Visual command on {owner}/{repo_name}#{pr_number} by {commenter}"
+            )
+            try:
+                client = github_client()
+                result = handle_visual_command(
+                    client, installation_id, owner, repo_name, pr_number, commenter
+                )
+                if result:
+                    client.post_pr_comment(
+                        installation_id, owner, repo_name, pr_number, result
+                    )
+            except Exception as e:
+                log.error(f"[{delivery_id}] Visual command failed: {e}")
 
     return Response(status_code=200)
 

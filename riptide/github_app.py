@@ -127,6 +127,28 @@ class GitHubAppClient:
             h.update(extra)
         return h
 
+    def compare_commits(
+        self, installation_id: int, owner: str, repo: str, base: str, head: str
+    ) -> dict:
+        """Compare two commits and return files changed + commit metadata.
+
+        Uses GitHub's compare API: GET /repos/{owner}/{repo}/compare/{base}...{head}
+        Returns {"files": [...], "commits": [...], "total_commits": int, "ahead_by": int}
+        """
+        resp = requests.get(
+            f"{self.base_url}/repos/{owner}/{repo}/compare/{base}...{head}",
+            headers=self._headers(installation_id),
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return {
+            "files": data.get("files", []),
+            "commits": data.get("commits", []),
+            "total_commits": data.get("total_commits", 0),
+            "ahead_by": data.get("ahead_by", 0),
+        }
+
     def get_pr_files(self, installation_id: int, owner: str, repo: str, pr_number: int) -> list[dict]:
         """Fetch all files changed in a PR."""
         files = []
@@ -162,6 +184,17 @@ class GitHubAppClient:
         """Post a PR-level comment (not inline). Uses issues endpoint for top-level comments."""
         resp = requests.post(
             f"{self.base_url}/repos/{owner}/{repo}/issues/{pr_number}/comments",
+            headers=self._headers(installation_id, {"Content-Type": "application/json"}),
+            json={"body": body},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def update_pr_comment(self, installation_id: int, owner: str, repo: str, comment_id: int, body: str) -> dict:
+        """Update (PATCH) an existing PR comment in place. Used for two-tier response enrichment."""
+        resp = requests.patch(
+            f"{self.base_url}/repos/{owner}/{repo}/issues/comments/{comment_id}",
             headers=self._headers(installation_id, {"Content-Type": "application/json"}),
             json={"body": body},
             timeout=15,
@@ -256,6 +289,60 @@ class GitHubAppClient:
         # 201 = created, 200 = already exists — both fine
         if resp.status_code == 200:
             return resp.json()
+        resp.raise_for_status()
+        return resp.json()
+
+    def ensure_label(self, installation_id: int, owner: str, repo: str,
+                     name: str, description: str, color: str) -> dict:
+        """Create a label if it doesn't exist, update if it does."""
+        from urllib.parse import quote
+        encoded_name = quote(name, safe="")
+        resp = requests.get(
+            f"{self.base_url}/repos/{owner}/{repo}/labels/{encoded_name}",
+            headers=self._headers(installation_id),
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            # Label exists — update description/color
+            resp = requests.patch(
+                f"{self.base_url}/repos/{owner}/{repo}/labels/{encoded_name}",
+                headers=self._headers(installation_id, {"Content-Type": "application/json"}),
+                json={"description": description, "color": color},
+                timeout=15,
+            )
+        elif resp.status_code == 404:
+            # Create label
+            resp = requests.post(
+                f"{self.base_url}/repos/{owner}/{repo}/labels",
+                headers=self._headers(installation_id, {"Content-Type": "application/json"}),
+                json={"name": name, "description": description, "color": color},
+                timeout=15,
+            )
+        resp.raise_for_status()
+        return resp.json()
+
+    def add_labels_to_issue(self, installation_id: int, owner: str, repo: str,
+                            issue_number: int, labels: list[str]) -> dict:
+        """Add labels to an issue/PR."""
+        resp = requests.post(
+            f"{self.base_url}/repos/{owner}/{repo}/issues/{issue_number}/labels",
+            headers=self._headers(installation_id, {"Content-Type": "application/json"}),
+            json={"labels": labels},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def remove_label_from_issue(self, installation_id: int, owner: str, repo: str,
+                                issue_number: int, label: str) -> dict:
+        """Remove a label from an issue/PR."""
+        from urllib.parse import quote
+        encoded_label = quote(label, safe="")
+        resp = requests.delete(
+            f"{self.base_url}/repos/{owner}/{repo}/issues/{issue_number}/labels/{encoded_label}",
+            headers=self._headers(installation_id),
+            timeout=15,
+        )
         resp.raise_for_status()
         return resp.json()
 

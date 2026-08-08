@@ -21,9 +21,14 @@ import os
 import re
 import subprocess
 import sys
+import time
+import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
+
+from riptide.state import StateStore
+from riptide.depth import ReviewDepth, classify_review_depth, select_skills  # noqa: F401 (re-exported for back-compat)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,33 +53,47 @@ OUR_USERNAME = os.environ.get("RIPTIDE_OUR_USERNAME", "ChonSong")
 OUR_ORG = os.environ.get("RIPTIDE_OUR_ORG", "ChonSong")
 STALENESS_MINUTES = int(os.environ.get("RIPTIDE_STALENESS_MINUTES", "30"))
 MIN_LOC_CHANGED = int(os.environ.get("RIPTIDE_MIN_LOC_CHANGED", "100"))
-
+# Pin the inference config on spawned cron jobs — the global config drifts,
+# and unpinned jobs are skipped to prevent unintended spend (Hermes #44585).
+# The riptide profile runs LongCat-2.0 via the custom LongCat provider.
+DEEPTHINK_MODEL = os.environ.get("RIPTIDE_DEEPTHINK_MODEL", "LongCat-2.0")
+DEEPTHINK_PROVIDER = os.environ.get("RIPTIDE_DEEPTHINK_PROVIDER", "longcat")
 STATE_FILE = Path(
     os.environ.get("RIPTIDE_DATA_DIR", "/tmp/riptide-data")
 ) / "deepthink_acted_prs.json"
 
 
 def _load_state() -> dict[str, dict]:
-    """Load processed PR state: {owner/repo#number: {head_sha, reviewed_at}}"""
-    if STATE_FILE.exists():
-        try:
-            return json.loads(STATE_FILE.read_text())
-        except (json.JSONDecodeError, OSError):
-            return {}
-    return {}
+    """Back-compat: return all PR heuristics as {pr_key: {head_sha, reviewed_at}}.
+
+    WS-3 Stage 0: the authority is StateStore.pr_heuristics; this wrapper
+    preserves the old dict shape for callers/tests.
+    """
+    store = StateStore()
+    conn = store._get_conn()
+    rows = conn.execute(
+        "SELECT pr_key, last_sha, reviewed_at FROM pr_heuristics"
+    ).fetchall()
+    return {
+        pr_key: {"head_sha": last_sha, "reviewed_at": reviewed_at}
+        for pr_key, last_sha, reviewed_at in rows
+    }
 
 
 def _save_state(state: dict[str, dict]):
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(state, indent=2))
+    """Back-compat: persist PR heuristics into StateStore.pr_heuristics."""
+    store = StateStore()
+    for pr_key, entry in state.items():
+        if entry.get("head_sha"):
+            store.set_pr_last_sha(pr_key, entry["head_sha"])
+        if entry.get("reviewed_at"):
+            store.set_pr_reviewed_at(pr_key, entry["reviewed_at"])
 
 
 def _was_reviewed_today(owner: str, repo: str, pr_number: int) -> bool:
-    """Check if this PR was reviewed in the last 24 hours."""
+    """Check if this PR was reviewed in the last 24 hours (StateStore-backed)."""
     pr_key = f"{owner}/{repo}#{pr_number}"
-    state = _load_state()
-    entry = state.get(pr_key, {})
-    reviewed_at = entry.get("reviewed_at", "")
+    reviewed_at = StateStore().get_pr_heuristics(pr_key)["reviewed_at"]
     if not reviewed_at:
         return False
     try:
@@ -149,168 +168,474 @@ def _spawn_deepthink(
     pr_author: str,
     total_loc: int,
     head_sha: str,
-):
-    """Spawn a Hermes cron session for deep-think review on this PR."""
+) -> bool:
+    """Spawn a Hermes cron session for deep-think review on this PR.
+
+    Uses pre-gathered data and a small orchestrator prompt that delegates
+    to subagents for inline review and Excalidraw diagram generation.
+
+    Retries up to 3 times with exponential backoff (5s/15s/30s).
+    Reserves a pending job before spawning the review; marks the job as
+    complete on success or failed if all attempts fail.
+    Returns True if spawned successfully, False otherwise.
+    """
+    max_retries = 3
+    base_delay = 5  # seconds
     name = f"riptide-review-{owner}-{repo}-{pr_number}"
     run_at = (datetime.now() + timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%S")
 
-    prompt = (
-        f"PR #{pr_number} in {owner}/{repo} has >100 LOC changed ({total_loc} LOC total) "
-        f"and has been stable for 30+ minutes. You are performing a **Riptide Review** — "
-        f"an autonomous deep-think code review.\n\n"
-        f"## PR Details\n"
-        f"- Title: {pr_title}\n"
-        f"- Author: {pr_author}\n"
-        f"- Changes: {total_loc} LOC\n"
-        f"- HEAD SHA: {head_sha[:12]}\n\n"
-        f"## Your Task\n"
-        f"You are a senior engineer. Use **graphify** to understand the current implementation "
-        f"and **deep-think** to advise next steps.\n\n"
-        f"### Step 1: Understand the Implementation (Graphify)\n"
-        f"1. Fetch the PR diff: `gh pr diff {pr_number} --repo {owner}/{repo}`\n"
-        f"2. If this repo has graphify-out/ (check ~/workspace/{repo}/graphify-out/), run:\n"
-        f"   `cd ~/workspace/{repo} && graphify update . && graphify query 'what does this PR affect?'`\n"
-        f"3. Read the GRAPH_REPORT.md or graphify analysis for cross-file relationships.\n\n"
-        f"### Step 2: Deep-Think Analysis (Mandatory)\n"
-        f"Load the deep-think skill with `skill_view('deep-think')` and run the full loop:\n"
-        f"1. SURFACE — Restate what this PR changes and why.\n"
-        f"2. EXPLORE — What code paths are affected? Edge cases? Blast radius from graphify?\n"
-        f"3. CHALLENGE — Could this change have side effects? Simpler approach? Missing tests?\n"
-        f"4. SYNTHESIZE — Advise next steps (approve, request changes, suggest follow-ups).\n"
-        f"5. VALIDATE — If claims are testable, run the test suite.\n\n"
-        f"### Step 3: Post Inline Review Comments with Suggestions\n"
-        f"For each substantive issue, post an **inline review comment** with a **GitHub suggestion block** "
-        f"so the author can apply your change with one click.\n\n"
-        f"**Suggestion format** (wrap proposed code in triple backticks with `suggestion` language tag):\n"
-        f"```suggestion\n"
-        f"proposed new code here\n"
-        f"```\n\n"
-        f"**To post an inline comment:**\n"
-        f"```\n"
-        f"gh api repos/{owner}/{repo}/pulls/{pr_number}/comments \\\n"
-        f"  --method POST \\\n"
-        f"  -f body='**severity:** explanation here\\n\\n```suggestion\\nproposed code here\\n```' \\\n"
-        f"  -f commit_id='{head_sha}' \\\n"
-        f"  -f path='<file_path>' \\\n"
-        f"  -F line=<line_number> \\\n"
-        f"  -f side='RIGHT'\n"
-        f"```\n\n"
-        f"**How to calculate line numbers:**\n"
-        f"Parse the `@@` hunk headers from `gh pr diff`. Each hunk looks like "
-        f"`@@ -old_start,old_count +new_start,new_count @@`. The `new_start` is the first "
-        f"line number in the modified file. Count forward from there for added/modified lines.\n\n"
-        f"**Comment format:**\n"
-        f"```suggestion\n"
-        f"proposed replacement code\n"
-        f"```\n"
-        f"Prepend a severity marker before the suggestion:\n"
-        f"- `**CRITICAL:**` — definite bug, security issue, data loss risk\n"
-        f"- `**WARNING:**` — potential issue, performance concern, code smell\n"
-        f"- `**SUGGESTION:**` — style improvement, minor refactor, nitpick\n\n"
-        f"Post inline comments for substantive findings only (1-3 per PR maximum). "
-        f"Focus on real issues — do not comment on every line or nitpick style.\n\n"
-        f"### Step 4: Generate Excalidraw Diagram\n"
-        f"After all inline review comments are posted, generate an Excalidraw diagram "
-        f"visualizing your findings using the **excalidraw_renderer** module.\n\n"
-        f"The diagram is a flowing narrative: Codebase Landscape (all modules with PR files "
-        f"highlighted) -> PR Scope -> Graphify Analysis (god nodes + communities) -> "
-        f"Code Chunks with WHY -> Human-Readable Narrative -> Findings with Severity -> "
-        f"Suggested Changes -> Legend. All sections connected by arrows.\n\n"
-        f"```python\n"
-        f"import sys\n"
-        f"sys.path.insert(0, '/home/sc/workspace')\n"
-        f"from riptide.grafiphy.excalidraw_renderer import render_review, upload_excalidraw\n"
-        f"\n"
-        f"findings = [\n"
-        f"    dict(severity='critical', title='...', detail='...', file='...', line=...),\n"
-        f"    dict(severity='warning', title='...', detail='...', file='...'),\n"
-        f"]\n"
-        f"\n"
-        f"graph_data = dict(\n"
-        f"    god_nodes=[dict(name=..., edges=..., why=...)],\n"
-        f"    communities=[dict(name=..., members=[...], why=...)],\n"
-        f")\n"
-        f"\n"
-        f"# NEW: Collect full repo graph for codebase landscape\n"
-        f"repo_graph = [\n"
-        f"    dict(name='routes.py', type='module', file='api/routes.py', why='HTTP routing'),\n"
-        f"    dict(name='models.py', type='module', file='api/models.py', why='Core data models'),\n"
-        f"]\n"
-        f"\n"
-        f"# NEW: Suggestions from inline review comments (Bot 2)\n"
-        f"suggestions = [\n"
-        f"    dict(file='api/draft.py', line=42, old_code='old', new_code='new',\n"
-        f"         severity='critical', reasoning='Avoids null pointer'),\n"
-        f"]\n"
-        f"\n"
-        f"# NEW: Distance map for network-radius layout\n"
-        f"distance_map = {{\n"
-        f"    'companion.py': dict(hops=0, relation='epicenter', community='github_webhook', degree=0),\n"
-        f"    'webhook.py': dict(hops=1, relation='affected by companion.py', community='github_webhook', degree=8),\n"
-        f"}}\n"
-        f"\n"
-        f"url = upload_excalidraw(\n"
-        f"    render_review(\n"
-        f"        pr_data=dict(number={pr_number}, title=\"{pr_title[:50]}\",\n"
-        f"                    repo=\"{owner}/{repo}\", loc={total_loc}),\n"
-        f"        findings=findings,\n"
-        f"        graph_data=graph_data,\n"
-        f"        repo_graph=repo_graph,     # NEW: landscape view\n"
-        f"        suggestions=suggestions,   # NEW: suggestion blocks\n"
-        f"        distance_map=distance_map, # NEW: distance-radius layout\n"
-        f"        output_path='/tmp/review.excalidraw',\n"
-        f"    )\n"
-        f")\n"
-        f"print(f'Excalidraw: {url}')\n"
-        f"```\n\n"
-        f"The renderer creates 9 connected sections: distance-radius network map (nodes arranged "
-        f"by network distance from PR changes), codebase landscape (all modules with "
-        f"PR files highlighted), PR scope, graphify analysis (god nodes + communities with WHY), "
-        f"code chunks with detailed WHY, human-readable narrative, findings with severity colors, "
-        f"suggested changes (code diffs), and legend.\n"
-        f"Include the returned URL in your summary.\n\n"
-        f"### Step 5: Post Summary Review\n"
-        f"After posting all inline comments and generating the Excalidraw, post a **summary review**:\n"
-        f"`gh pr comment {pr_number} --repo {owner}/{repo} --body '<review>'`\n\n"
-        f"Structure your review as:\n"
-        f"- **Summary**: What this PR does (1-2 sentences, no filler)\n"
-        f"- **Findings**: Only real issues (not style nits or hypotheticals)\n"
-        f"- **Inline Comments**: N findings posted (see specific lines)\n"
-        f"- **Excalidraw**: Link to visual evidence diagram\n"
-        f"- **Next Steps**: Specific actionable advice (max 3 items)\n\n"
-        f"**Quality gate**: If you have no critical/warning findings, say so briefly — "
-        f"do not invent problems or pad the review.\n\n"
-        f"**Sign-off**: End your summary with:\n"
-        f"```\n"
-        f"---\n"
-        f"<sub>Riptide Review via Hermes</sub>\n"
-        f"```\n\n"
-        f"REPO PATH: ~/workspace/{repo}/\n"
-    )
+    # Cross-session awareness: clean up stale jobs, then atomically reserve
+    from riptide.state import StateStore
+    state = StateStore()
+    state.cleanup_stale_pending()
+    job_id = f"{name}-{head_sha[:12]}-{uuid.uuid4().hex[:12]}"
+    if not state.reserve_job(job_id, pr_number, "t1", name):
+        log.info(f"Skipping {owner}/{repo}#{pr_number} — review already pending")
+        return False
+
+    try:
+        # Pre-gather data in Python (cheaper than having the agent do it)
+        data = _gather_review_data(owner, repo, pr_number, head_sha)
+
+        # Classify PR depth to determine skill loading
+        depth = classify_review_depth(data)
+        skills = select_skills(depth)
+        log.info(f"{owner}/{repo}#{pr_number} classified as {depth.value}, skills={skills}")
+
+        # Deterministic core (WS-3 Stage 1): build the context bundle ONCE from the
+        # gathered data and feed its DiffReport findings into the orchestrator prompt.
+        # The spawned session starts from the deterministic analysis instead of
+        # re-deriving everything from the raw diff. Non-fatal on failure.
+        bundle = None
+        try:
+            from riptide.context_bundle import build_context_bundle
+            bundle = build_context_bundle(
+                data.get("files_changed", []),
+                data.get("graph_context"),
+                pr_details={"title": pr_title, "author": pr_author, "body": ""},
+            )
+            log.info(
+                "%s/%s#%d deterministic bundle: %d findings, verdict=%s",
+                owner, repo, pr_number,
+                len(bundle.get("findings", [])), bundle.get("verdict"),
+            )
+        except Exception as e:
+            log.warning(f"Context bundle failed for {owner}/{repo}#{pr_number}: {e}")
+
+        # Pre-generate Excalidraw diagram in Python (deterministic, no LLM needed)
+        # Run in background thread with timeout to avoid blocking webhook path
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError
+        diagram_url = None
+        def _gen_diagram():
+            from riptide.graphify_ingest.orchestrator import pre_generate_diagram
+            return pre_generate_diagram(data, dict(
+                owner=owner, repo=repo, number=pr_number,
+                title=pr_title, author=pr_author, total_loc=total_loc,
+            ))
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_gen_diagram)
+            try:
+                diagram_url = future.result(timeout=30)
+                if diagram_url:
+                    log.info(f"Pre-generated diagram for {owner}/{repo}#{pr_number}: {diagram_url}")
+            except TimeoutError:
+                log.warning(f"Pre-generate diagram timed out after 30s for {owner}/{repo}#{pr_number}")
+            except Exception as e:
+                log.warning(f"Pre-generate diagram failed (non-fatal): {e}")
+
+        prompt = _build_orchestrator_prompt(
+            owner=owner,
+            repo=repo,
+            pr_number=pr_number,
+            pr_title=pr_title,
+            pr_author=pr_author,
+            total_loc=total_loc,
+            head_sha=head_sha,
+            data=data,
+            diagram_url=diagram_url,
+            deterministic=bundle,
+            pr_created_at=data.get("pr_created_at"),
+        )
+    except Exception as e:
+        state.mark_failed(job_id)
+        log.error(f"Failed to gather data or build prompt for {owner}/{repo}#{pr_number}: {e}")
+        return False
 
     cmd = [
         "hermes", "cron", "create", run_at,
         prompt,
         "--name", name,
-        "--skill", "github-pr-lifecycle",
-        "--skill", "deep-think",
-        "--skill", "excalidraw",
-        "--deliver", "origin",
     ]
+    for skill in skills:
+        cmd.extend(["--skill", skill])
+    cmd.extend([
+        "--model", DEEPTHINK_MODEL,
+        "--provider", DEEPTHINK_PROVIDER,
+        "--deliver", "origin",
+    ])
 
-    log.info(f"Spawning: hermes cron create {run_at} --name {name} ...")
+    for attempt in range(max_retries):
+        if attempt > 0:
+            delay = base_delay * (2 ** attempt)  # 5s, 10s, 20s
+            log.info(f"Retry {attempt+1}/{max_retries} for {owner}/{repo}#{pr_number} in {delay}s...")
+            time.sleep(delay)
+
+        # Check hermes availability before each attempt
+        if not _is_cron_available():
+            log.warning(f"hermes not available on attempt {attempt+1} for {owner}/{repo}#{pr_number}")
+            continue
+
+        log.info(f"Spawning: hermes cron create {run_at} --name {name} (attempt {attempt+1})")
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=15
+            )
+            if result.returncode == 0:
+                # Spawn succeeded — mark complete immediately.
+                # Dedup is handled by pr_heuristics.last_sha + reviewed_at.
+                # The pending state is only a lock during spawn (milliseconds),
+                # not a long-lived progress tracker that can stall.
+                state.mark_complete(job_id)
+                log.info(f"✓ Spawned deep-think for {owner}/{repo}#{pr_number}: {result.stdout[:200]}")
+                return True
+            else:
+                log.error(f"✗ Spawn failed (attempt {attempt+1}): {result.stderr[:300]}")
+        except subprocess.TimeoutExpired:
+            log.warning(f"Timeout spawning deep-think (attempt {attempt+1})")
+        except Exception as e:
+            log.error(f"Error spawning deep-think (attempt {attempt+1}): {e}")
+
+    # All attempts failed — mark the reserved job as failed
+    state.mark_failed(job_id)
+    log.error(f"All {max_retries} attempts failed for {owner}/{repo}#{pr_number}")
+    return False
+
+
+def _gather_review_data(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    head_sha: str,
+) -> dict:
+    """Pre-gather review data in Python before spawning the Hermes session.
+
+    Returns a dict with:
+    - files_changed: list of {filename, additions, deletions}
+    - diff_raw: raw diff text (capped at 50k chars)
+    - repo_tree: list of file paths
+    - god_nodes: list of {name, edges}
+    - communities: list of {name, members}
+    - graph_context: raw graphify output
+    - pr_created_at: ISO 8601 timestamp when the PR was opened
+    """
+    data = {
+        "files_changed": [],
+        "diff_raw": "",
+        "repo_tree": [],
+        "god_nodes": [],
+        "communities": [],
+        "graph_context": {},
+        "pr_created_at": None,
+    }
+
+    # 1. Fetch PR diff
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=15
+            ["gh", "pr", "diff", str(pr_number), "--repo", f"{owner}/{repo}"],
+            capture_output=True, text=True, timeout=30,
         )
         if result.returncode == 0:
-            log.info(f"✓ Spawned deep-think for {owner}/{repo}#{pr_number}: {result.stdout[:200]}")
-        else:
-            log.error(f"✗ Spawn failed for {owner}/{repo}#{pr_number}: {result.stderr[:300]}")
-    except subprocess.TimeoutExpired:
-        log.warning(f"Timeout spawning deep-think for {owner}/{repo}#{pr_number}")
+            data["diff_raw"] = result.stdout[:50000]
     except Exception as e:
-        log.error(f"Error spawning deep-think: {e}")
+        log.warning(f"Failed to fetch diff: {e}")
+
+    # 2. Fetch PR files + created_at (for timing metric)
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", str(pr_number), "--repo", f"{owner}/{repo}",
+             "--json", "files,createdAt"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            files_data = json.loads(result.stdout)
+            # Normalize: gh returns {path, additions, deletions}; we use "filename"
+            raw_files = files_data.get("files", [])
+            data["files_changed"] = [
+                {
+                    "filename": f.get("path", "?"),
+                    "additions": f.get("additions", 0),
+                    "deletions": f.get("deletions", 0),
+                }
+                for f in raw_files
+            ]
+            # Capture PR created_at for the timing metric
+            if files_data.get("createdAt"):
+                data["pr_created_at"] = files_data["createdAt"]
+    except Exception as e:
+        log.warning(f"Failed to fetch PR files: {e}")
+
+    # 2b. Fetch per-file patches (deterministic input for the context bundle)
+    # gh pr view --json files does NOT include patch content; the pulls API does.
+    # This lets DiffAnalyzer (security/complexity/error_handling) see real added lines.
+    try:
+        result = subprocess.run(
+            ["gh", "api", f"repos/{owner}/{repo}/pulls/{pr_number}/files",
+             "--paginate"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            api_files = json.loads(result.stdout)
+            if isinstance(api_files, list):
+                patch_by_name = {f.get("filename"): f for f in api_files}
+                for entry in data["files_changed"]:
+                    api_entry = patch_by_name.get(entry["filename"])
+                    if api_entry:
+                        entry["patch"] = api_entry.get("patch") or ""
+                        entry["status"] = api_entry.get("status", "modified")
+    except Exception as e:
+        log.warning(f"Failed to fetch per-file patches: {e}")
+
+    # 3. Fetch repo tree (from local workspace if available)
+    workspace = Path.home() / "workspace" / repo
+    if workspace.is_dir():
+        try:
+            result = subprocess.run(
+                ["git", "ls-tree", "-r", "--name-only", head_sha],
+                capture_output=True, text=True, timeout=30,
+                cwd=str(workspace),
+            )
+            if result.returncode == 0:
+                data["repo_tree"] = result.stdout.strip().split("\n")
+        except Exception as e:
+            log.warning(f"Failed to fetch repo tree: {e}")
+
+        # 4. Run graphify if available (skip if fresh to avoid dirtying workspace)
+        graphify_dir = workspace / "graphify-out"
+        if graphify_dir.is_dir():
+            graph_json = graphify_dir / "graph.json"
+            if graph_json.exists():
+                age_minutes = (time.time() - graph_json.stat().st_mtime) / 60
+                if age_minutes < 15:
+                    log.info("Skipping graphify update — graph is fresh (<15 min)")
+                else:
+                    try:
+                        subprocess.run(
+                            ["graphify", "update", "."],
+                            capture_output=True, text=True, timeout=60,
+                            cwd=str(workspace),
+                        )
+                    except Exception as e:
+                        log.warning(f"Graphify update failed: {e}")
+            else:
+                # No graph yet — run update
+                try:
+                    subprocess.run(
+                        ["graphify", "update", "."],
+                        capture_output=True, text=True, timeout=60,
+                        cwd=str(workspace),
+                    )
+                except Exception as e:
+                    log.warning(f"Graphify update failed: {e}")
+
+            # Query for PR impact (runs regardless of update path)
+            try:
+                result = subprocess.run(
+                    ["graphify", "query", f"what does PR #{pr_number} affect?"],
+                    capture_output=True, text=True, timeout=30,
+                    cwd=str(workspace),
+                )
+                if result.returncode == 0:
+                    data["graph_context"] = {"raw": result.stdout.strip()}
+
+                # Get god nodes
+                result = subprocess.run(
+                    ["graphify", "god-nodes", "--top", "10"],
+                    capture_output=True, text=True, timeout=30,
+                    cwd=str(workspace),
+                )
+                if result.returncode == 0:
+                    for line in result.stdout.strip().split("\n"):
+                        match = re.match(r"\s*\d+\.\s+(.+?)\s+-\s+(\d+)\s+edges", line)
+                        if match:
+                            data["god_nodes"].append({
+                                "name": match.group(1),
+                                "edges": int(match.group(2)),
+                            })
+
+                # Get communities
+                result = subprocess.run(
+                    ["graphify", "query", "list communities"],
+                    capture_output=True, text=True, timeout=30,
+                    cwd=str(workspace),
+                )
+                if result.returncode == 0:
+                    for line in result.stdout.strip().split("\n"):
+                        if line.strip().startswith("- "):
+                            comm_name = line.strip()[2:].strip()
+                            data["communities"].append({"name": comm_name, "members": []})
+
+            except Exception as e:
+                log.warning(f"Graphify failed: {e}")
+
+    return data
+
+
+def _build_orchestrator_prompt(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    pr_title: str,
+    pr_author: str,
+    total_loc: int,
+    head_sha: str,
+    data: dict,
+    diagram_url: Optional[str] = None,
+    deterministic: Optional[dict] = None,
+    pr_created_at: Optional[str] = None,
+) -> str:
+    """
+    Build a small orchestrator prompt that delegates to subagents.
+
+    The prompt is ~40 lines instead of ~280 lines.
+    All data is pre-gathered in Python and passed as structured context.
+    If diagram_url is provided, the LLM references it instead of generating.
+    If deterministic is provided (WS-3 Stage 1 context bundle), its DiffReport
+    findings + verdict are embedded so the session starts from the deterministic
+    analysis instead of re-deriving it.
+    If pr_created_at is provided, the review includes a timing metric.
+    """
+    # Format files changed
+    files_str = "\n".join(
+        f"  - {f.get('filename', '?')} (+{f.get('additions', 0)}/-{f.get('deletions', 0)})"
+        for f in data["files_changed"][:20]
+    )
+
+    # Format diff summary (first 12k chars)
+    diff_summary = data["diff_raw"][:12000]
+    if len(data["diff_raw"]) > 12000:
+        diff_summary += f"\n  ... ({len(data['diff_raw'])} chars total)"
+
+    # Format graphify context
+    graph_str = ""
+    if data["god_nodes"]:
+        graph_str += "God Nodes:\n"
+        for node in data["god_nodes"][:5]:
+            graph_str += f"  - {node['name']} ({node['edges']} edges)\n"
+    if data["communities"]:
+        graph_str += "Communities:\n"
+        for comm in data["communities"][:5]:
+            graph_str += f"  - {comm['name']}\n"
+    if not graph_str:
+        graph_str = "(No graphify analysis available)"
+
+    diagram_section = f"\n## Pre-generated Architecture Diagram\n[View Diagram]({diagram_url})\n" if diagram_url else ""
+    diagram_step = "\n### Step 4: Architecture Diagram\nThe architecture diagram is pre-generated and embedded above. Reference it in your Code Analysis section.\n" if diagram_url else ""
+
+    # Deterministic analysis section (WS-3 Stage 1): pre-computed DiffReport findings
+    deterministic_section = ""
+    if deterministic:
+        verdict = deterministic.get("verdict", "pass")
+        findings = deterministic.get("findings", [])
+        stats = deterministic.get("stats", {})
+        concepts = deterministic.get("aggregate", {}).get("concepts", [])
+        lines = ["## Deterministic Analysis (pre-computed)", ""]
+        lines.append(f"Verdict: **{verdict}** — {len(findings)} finding(s), "
+                     f"{stats.get('total_add', 0)}+/"
+                     f"{stats.get('total_del', 0)}- across "
+                     f"{stats.get('file_count', 0)} file(s).")
+        if concepts:
+            lines.append(f"Concepts touched: {', '.join(concepts)}")
+        if findings:
+            lines.append("")
+            lines.append("Findings (verify against the diff, do NOT re-derive from scratch):")
+            for f in findings[:10]:
+                lines.append(
+                    f"- [{f.get('severity', 'info')}] {f.get('category', '?')}: "
+                    f"{f.get('message', '')}"
+                    + (f" — {f.get('file', '')}" if f.get('file') else "")
+                )
+            if len(findings) > 10:
+                lines.append(f"  … and {len(findings) - 10} more")
+        lines.append("")
+        lines.append("Your subagent review must reference these findings — confirm, refute, or extend them. "
+                     "Do not duplicate the analysis; add value on top of it.")
+        deterministic_section = "\n".join(lines) + "\n\n"
+
+    return f"""PR #{pr_number} in {owner}/{repo} — {total_loc} LOC changed.
+
+## Context (pre-gathered)
+- Title: {pr_title}
+- Author: {pr_author}
+- HEAD SHA: {head_sha[:12]}
+
+### Files Changed
+{files_str}
+
+### Repository Tree
+```
+{format_repo_tree(data.get("repo_tree", []))}
+```
+
+### Diff Summary
+````
+{diff_summary}
+````
+
+### Graphify Analysis
+{graph_str}
+{diagram_section}
+{deterministic_section}## Your Task: Orchestrate Review
+
+You are a senior engineer. Delegate review tasks to subagents, then synthesize.
+
+### Step 1: Delegate Inline Review
+Spawn a subagent with:
+- Role: Code reviewer
+- Task: Call `skill_view('deep-think')` first, then analyze the PR diff, post 1-3 inline review comments with GitHub suggestion blocks
+- Output: JSON list of findings [{{file, line, severity, title, detail}}]
+Severity must be one of: critical, warning, suggestion, info, approved.
+
+### Step 2: Write Findings JSON
+After the inline review subagent finishes, write its findings to /tmp/findings.json as JSON:
+[{{severity, title, detail, file, line}}]
+
+### Step 3: Assemble + Post Review (deterministic)
+Run the assembly script — it validates, formats, and posts. Do NOT hand-format the review.
+
+```
+python -m riptide.assemble_review \
+  --findings /tmp/findings.json \
+  --owner {owner} --repo {repo} --pr {pr_number} \
+  --model "{DEEPTHINK_MODEL}" --provider "{DEEPTHINK_PROVIDER}" \
+  --pr-created-at "{pr_created_at or ''}"
+```
+
+The script appends the model/provider to the sign-off deterministically.
+If pr_created_at is set, a "⏱️ Review posted Xm after PR opened" metric is included.
+
+### Rules
+- Max 3 inline comments, real issues only
+- Do not invent problems or pad the review
+- Reference inline comments in the summary
+- The Code Analysis and Explanation sections are REQUIRED — never omit them
+- If a section has nothing to report, say so explicitly ("No significant findings") rather than omitting it
+{diagram_step}
+REPO PATH: ~/workspace/{repo}/
+"""
+
+
+def format_repo_tree(repo_tree: list) -> str:
+    """Format a repo file list as an indented directory tree (capped at 500 entries)."""
+    if not repo_tree:
+        return "(No repo tree available)"
+    lines = []
+    for f in repo_tree[:500]:
+        # Show directory structure with 2-space indent per path depth
+        depth = f.count("/") if isinstance(f, str) else 0
+        lines.append("  " * depth + f.rsplit("/", 1)[-1])
+    if len(repo_tree) > 500:
+        lines.append(f"  ... ({len(repo_tree) - 500} more files)")
+    return "\n".join(lines)
 
 
 def run():
@@ -319,7 +644,7 @@ def run():
         log.error("hermes binary not found — can't spawn sessions")
         sys.exit(1)
 
-    state = _load_state()
+    state_store = StateStore()
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(minutes=STALENESS_MINUTES)
     triggered = 0
@@ -384,7 +709,8 @@ def run():
 
             # Dedup: same head SHA already processed OR reviewed in last 24h
             pr_key = f"{repo_full}#{pr_number}"
-            if state.get(pr_key, {}).get("head_sha") == head_sha:
+            h = state_store.get_pr_heuristics(pr_key)
+            if h["last_sha"] == head_sha:
                 log.info(f"  #{pr_number} skip — already processed (SHA {head_sha[:12]})")
                 skipped_dedup += 1
                 continue
@@ -399,12 +725,13 @@ def run():
                 f"  #{pr_number} TRIGGER — {total_loc} LOC changed, "
                 f"stale since {updated_at_str}, SHA={head_sha[:12]}"
             )
-            _spawn_deepthink(owner, repo_name, pr_number, pr_title, pr_author, total_loc, head_sha)
-
-            # Record dedup immediately to prevent double-spawn
-            state[pr_key] = {"head_sha": head_sha, "reviewed_at": datetime.now(timezone.utc).isoformat()}
-            _save_state(state)
-            triggered += 1
+            if _spawn_deepthink(owner, repo_name, pr_number, pr_title, pr_author, total_loc, head_sha):
+                # Record dedup only on successful spawn
+                state_store.set_pr_last_sha(pr_key, head_sha)
+                state_store.set_pr_reviewed_at(pr_key, datetime.now(timezone.utc).isoformat())
+                triggered += 1
+            else:
+                log.warning(f"  #{pr_number} spawn failed after retries — not recording state")
 
     # Summary
     log.info(

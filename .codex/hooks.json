@@ -1,0 +1,67 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "_agentlint": "v2",
+            "command": "/home/sc/.hermes/hermes-agent/venv/bin/agentlint check --event PreToolUse --adapter codex",
+            "timeout": 30,
+            "statusMessage": "Checking Bash command"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "_agentlint": "v2",
+            "command": "/home/sc/.hermes/hermes-agent/venv/bin/agentlint check --event PostToolUse --adapter codex",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "_agentlint": "v2",
+            "command": "/home/sc/.hermes/hermes-agent/venv/bin/agentlint check --event UserPromptSubmit --adapter codex",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "_agentlint": "v2",
+            "command": "/home/sc/.hermes/hermes-agent/venv/bin/agentlint check --event SessionStart --adapter codex",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "_agentlint": "v2",
+            "command": "/home/sc/.hermes/hermes-agent/venv/bin/agentlint report --adapter codex",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

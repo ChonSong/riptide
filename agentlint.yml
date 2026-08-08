@@ -1,0 +1,31 @@
+# AgentLint Configuration
+# Docs: https://github.com/mauhpr/agentlint
+
+stack: auto
+
+severity: standard  # strict | standard | relaxed
+
+packs:
+  - universal
+  - quality
+  - frontend
+  - python
+  - security
+  - autopilot  # opt-in: production guard, cloud/infra safety, CI/CD pipeline, docker, firewall
+  # - mypack     # custom packs: add name here + set custom_rules_dir below
+
+rules: {}
+  # Override individual rules:
+  # no-secrets:
+  #   severity: error
+  # max-file-size:
+  #   limit: 300
+
+# recording:
+#   enabled: false  # opt-in session recording for product insights
+
+agentchute:
+  enabled: false  # opt-in cloud dashboard and hybrid security feeds
+
+# custom_rules_dir: .agentlint/rules/
+# Custom rules with pack = "mypack" activate when "mypack" is listed in packs above
