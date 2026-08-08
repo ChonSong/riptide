@@ -32,7 +32,7 @@ Your branch is up to date with 'origin/main'.
 | `riptide/state.py` | ~300 | StateStore (SHA dedup, migrations) |
 | `riptide/labeler.py` | 381 | Label engine |
 | `riptide/assemble_review.py` | 228 | Structured findings assembly |
-| `riptide/orchestrator.py` | ~180 | Orchestrator (polling, deep-think spawn, diagram pre-generation) |
+| `riptide/graphify_ingest/orchestrator.py` | ~360 | Excalidraw pre-generation (renamed from grafiphy/) |
 
 ---
 
