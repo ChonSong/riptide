@@ -89,7 +89,7 @@ class TestSpawnDeepthink:
         with patch("subprocess.run", return_value=self._success_result()) as mock_run, \
              patch("riptide.deepthink._is_cron_available", return_value=True), \
              patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
-             patch("riptide.grafiphy.orchestrator.pre_generate_diagram", return_value=None), \
+             patch("riptide.graphify_ingest.orchestrator.pre_generate_diagram", return_value=None), \
              patch("riptide.state.StateStore") as mock_state:
             mock_state.return_value.reserve_job.return_value = True
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
@@ -101,7 +101,7 @@ class TestSpawnDeepthink:
              patch("time.sleep") as mock_sleep, \
              patch("riptide.deepthink._is_cron_available", return_value=True), \
              patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
-             patch("riptide.grafiphy.orchestrator.pre_generate_diagram", return_value=None), \
+             patch("riptide.graphify_ingest.orchestrator.pre_generate_diagram", return_value=None), \
              patch("riptide.state.StateStore") as mock_state:
             mock_state.return_value.reserve_job.return_value = True
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
@@ -113,7 +113,7 @@ class TestSpawnDeepthink:
              patch("time.sleep") as mock_sleep, \
              patch("riptide.deepthink._is_cron_available", return_value=True), \
              patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
-             patch("riptide.grafiphy.orchestrator.pre_generate_diagram", return_value=None), \
+             patch("riptide.graphify_ingest.orchestrator.pre_generate_diagram", return_value=None), \
              patch("riptide.state.StateStore") as mock_state:
             mock_state.return_value.reserve_job.return_value = True
             result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
