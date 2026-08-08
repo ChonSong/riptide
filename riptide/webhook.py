@@ -489,6 +489,25 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
             except Exception as e:
                 log.error(f"[{delivery_id}] Relabel command failed: {e}")
 
+        # Route 3: Visual regression command (@riptide-bot visual)
+        from riptide.visual import VISUAL_RE, handle_visual_command
+
+        if VISUAL_RE.search(body):
+            log.info(
+                f"[{delivery_id}] Visual command on {owner}/{repo_name}#{pr_number} by {commenter}"
+            )
+            try:
+                client = github_client()
+                result = handle_visual_command(
+                    client, installation_id, owner, repo_name, pr_number, commenter
+                )
+                if result:
+                    client.post_pr_comment(
+                        installation_id, owner, repo_name, pr_number, result
+                    )
+            except Exception as e:
+                log.error(f"[{delivery_id}] Visual command failed: {e}")
+
     return Response(status_code=200)
 
 
