@@ -227,7 +227,7 @@ def _spawn_deepthink(
         from concurrent.futures import ThreadPoolExecutor, TimeoutError
         diagram_url = None
         def _gen_diagram():
-            from riptide.grafiphy.orchestrator import pre_generate_diagram
+            from riptide.graphify_ingest.orchestrator import pre_generate_diagram
             return pre_generate_diagram(data, dict(
                 owner=owner, repo=repo, number=pr_number,
                 title=pr_title, author=pr_author, total_loc=total_loc,
@@ -291,7 +291,11 @@ def _spawn_deepthink(
                 cmd, capture_output=True, text=True, timeout=15
             )
             if result.returncode == 0:
-                # Reservation stays pending — the scheduled worker marks it complete when done
+                # Spawn succeeded — mark complete immediately.
+                # Dedup is handled by pr_heuristics.last_sha + reviewed_at.
+                # The pending state is only a lock during spawn (milliseconds),
+                # not a long-lived progress tracker that can stall.
+                state.mark_complete(job_id)
                 log.info(f"✓ Spawned deep-think for {owner}/{repo}#{pr_number}: {result.stdout[:200]}")
                 return True
             else:

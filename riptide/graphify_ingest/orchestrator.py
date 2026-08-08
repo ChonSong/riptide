@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-grafiphy/orchestrator.py — Entry point for companion diagram generation.
+graphify_ingest/orchestrator.py — Entry point for companion diagram generation.
 
 Uses graphify data and delegates output to excalidraw_renderer for polished,
 graphify-informed Excalidraw diagrams with connected narrative flow.
@@ -18,9 +18,9 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from riptide.grafiphy.excalidraw_renderer import render_review, upload_excalidraw
+from riptide.graphify_ingest.excalidraw_renderer import render_review, upload_excalidraw
 
-log = logging.getLogger("riptide.grafiphy.orchestrator")
+log = logging.getLogger("riptide.graphify_ingest.orchestrator")
 
 # ── Constants ──────────────────────────────────────────────────────
 GRAFIPHY_DIR = Path(__file__).parent
@@ -357,7 +357,7 @@ def orchestrate(pr_metadata: dict, diff: list[dict],
     repo_path = os.environ.get("GRAPHIFY_CWD",
                                f"/home/sc/workspace/{repo or 'hermes-webui-extensions'}")
 
-    output_dir = Path(tempfile.mkdtemp(prefix=f"grafiphy-pr{pr_number}-"))
+    output_dir = Path(tempfile.mkdtemp(prefix=f"graphify_ingest-pr{pr_number}-"))
 
     # Get graphify graph (use pre-computed context if available)
     try:
