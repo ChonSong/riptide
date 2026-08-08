@@ -397,6 +397,16 @@ def _gather_review_data(
 
     # 3. Fetch repo tree (from local workspace if available)
     workspace = Path.home() / "workspace" / repo
+    if not workspace.is_dir():
+        # Clone the repo if it doesn't exist
+        try:
+            subprocess.run(
+                ["git", "clone", f"git@github.com:{owner}/{repo}.git", str(workspace)],
+                capture_output=True, text=True, timeout=60,
+            )
+        except Exception as e:
+            log.warning(f"Failed to clone {owner}/{repo}: {e}")
+    
     if workspace.is_dir():
         try:
             result = subprocess.run(

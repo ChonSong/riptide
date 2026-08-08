@@ -49,6 +49,8 @@ def pre_generate_diagram(data: dict, pr_metadata: dict) -> Optional[str]:
     communities = data.get("communities", [])
 
     if not god_nodes and not communities:
+        # No graphify data available — skip diagram generation
+        # The review will still be posted without a diagram
         return None
 
     graph_data = {
@@ -76,6 +78,7 @@ def pre_generate_diagram(data: dict, pr_metadata: dict) -> Optional[str]:
                     "loc": pr_metadata.get("total_loc", 0),
                 },
                 graph_data=graph_data,
+                file_tree=_build_file_tree(data.get("files_changed", [])),
                 output_path=str(excalidraw_path),
             )
             url = upload_excalidraw(str(excalidraw_path))
@@ -86,6 +89,23 @@ def pre_generate_diagram(data: dict, pr_metadata: dict) -> Optional[str]:
             elapsed = time.monotonic() - start
             log.warning(f"Pre-generate diagram failed after {elapsed:.2f}s: {e}")
             return None
+
+
+def _build_file_tree(files_changed: list[dict]) -> str:
+    """Build a file tree string from changed files."""
+    lines = []
+    for f in files_changed:
+        fn = f.get("filename", "?")
+        add = f.get("additions", 0)
+        del_ = f.get("deletions", 0)
+        status = f.get("status", "modified")
+        if status == "added":
+            lines.append(f"  + {fn} ({add} LOC)")
+        elif status == "removed":
+            lines.append(f"  - {fn} ({del_} LOC)")
+        else:
+            lines.append(f"  M {fn} (+{add}/-{del_})")
+    return "\n".join(lines) if lines else ""
 
 
 def _run_graphify(args: list[str], cwd: str = None, timeout: int = 30) -> tuple[str, str]:
