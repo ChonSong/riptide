@@ -32,7 +32,7 @@ Your branch is up to date with 'origin/main'.
 | `riptide/state.py` | ~300 | StateStore (SHA dedup, migrations) |
 | `riptide/labeler.py` | 381 | Label engine |
 | `riptide/assemble_review.py` | 228 | Structured findings assembly |
-| `riptide/grafiphy/orchestrator.py` | ~100 | Excalidraw pre-generation |
+| `riptide/orchestrator.py` | ~180 | Orchestrator (polling, deep-think spawn, diagram pre-generation) |
 
 ---
 
@@ -168,8 +168,8 @@ gh run list --branch <branch> --status failure
 1. **Companion SHA degradation duplicate bug:** If TL;DR generation fails, `_handle_degradation()` spawns self-heal but doesn't record SHA → potential duplicate comments
 2. **Excalidraw not attached to PR comments reliably** — generated but not delivered
 3. **Cron job prompts are 22k tokens** vs 12k target — need to discuss cost/latency tradeoff
-4. **grafiphy/ directory was restored** from commit b7732cd — do NOT delete again (deterministic renderer is superior to LLM layout)
-5. **grafiphy/labeler.py was deleted** — 142-line duplicate of riptide/labeler.py (381 lines)
+4. **grafiphy/ directory was deleted** — functionality merged into `riptide/orchestrator.py` (deterministic renderer is superior to LLM layout)
+5. **grafiphy/labeler.py was deleted** — 142-line duplicate of `riptide/labeler.py` (381 lines)
 
 ---
 
