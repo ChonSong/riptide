@@ -149,210 +149,38 @@ def select_gif(emoji: str, pr_title: str = "", changed_files: list[dict] = None)
     """
     Select a GIF URL based on PR mood and content relevance.
     
-    Hybrid LLM + Python approach:
-    1. Python: Generate candidate tags from PR title
-    2. Python: Fetch candidate GIFs from Kilpy/Giphy/Tenor
-    3. LLM: qwen2.5:7b scores each GIF's relevance to the PR
-    4. Python: Pick highest-scoring GIF
-    
-    Fallback chain (if LLM down or no API keys):
-    - Kilpy → Giphy → Tenor → static map
+    Priority:
+    1. Giphy API (if GIPHY_API_KEY set) with keyword-relevant tag
+    2. Tenor API (if TENOR_API_KEY set) with keyword-relevant tag  
+    3. Static fallback (uses tag from _pick_best_tag for relevance)
     """
     if not pr_title:
         return GIFI_MAP.get(emoji, GIFI_MAP["✨"])
     
     best_tag = _pick_best_tag(emoji, pr_title, changed_files)
     
-    # Collect candidate GIFs from all available sources
-    candidates = _fetch_gif_candidates(best_tag)
-    
-    if not candidates:
-        return _static_gif_for_tag(emoji, best_tag)
-    
-    # Try LLM scoring for best relevance
-    best_url = _score_gifs_with_llm(pr_title, candidates)
-    if best_url:
-        return best_url
-    
-    # Fallback: deterministic pick from candidates
-    idx = zlib.crc32(best_tag.encode()) % len(candidates)
-    return candidates[idx]["url"]
-
-
-def _fetch_gif_candidates(tag: str, limit_per_source: int = 3) -> list[dict]:
-    """Fetch candidate GIFs from all configured API sources."""
-    candidates = []
-    
-    kilpy_key = os.environ.get("KLIPY_APP_KEY", "")
-    if kilpy_key:
-        try:
-            for gif in _search_kilpy_candidates(tag, kilpy_key, limit_per_source):
-                candidates.append({
-                    "url": gif["url"],
-                    "title": gif.get("title", ""),
-                    "source": "kilpy",
-                })
-        except Exception:
-            pass
-    
+    # Try Giphy API
     giphy_key = os.environ.get("GIPHY_API_KEY", "")
     if giphy_key:
         try:
-            for gif in _search_giphy_candidates(tag, giphy_key, limit_per_source):
-                candidates.append({
-                    "url": gif["url"],
-                    "title": gif.get("title", ""),
-                    "source": "giphy",
-                })
+            url = _search_giphy(best_tag, giphy_key)
+            if url:
+                return url
         except Exception:
             pass
     
+    # Try Tenor API (better relevance than Giphy for technical content)
     tenor_key = os.environ.get("TENOR_API_KEY", "")
     if tenor_key:
         try:
-            for gif in _search_tenor_candidates(tag, tenor_key, limit_per_source):
-                candidates.append({
-                    "url": gif["url"],
-                    "title": gif.get("title", ""),
-                    "source": "tenor",
-                })
+            url = _search_tenor(best_tag, tenor_key)
+            if url:
+                return url
         except Exception:
             pass
     
-    return candidates
-
-
-def _score_gifs_with_llm(pr_title: str, candidates: list[dict]) -> str | None:
-    """Use qwen2.5:7b via Ollama to pick the most relevant GIF.
-    
-    Returns the URL of the best-matching GIF, or None if LLM unavailable.
-    """
-    if not candidates:
-        return None
-    
-    # Build prompt for LLM scoring
-    prompt = f"""Pick the best GIF for this PR: "{pr_title}"
-
-Candidates:
-"""
-    for i, c in enumerate(candidates[:10], 1):
-        prompt += f"{i}. [{c['source']}] {c['title']}\n"
-    
-    prompt += """
-Reply with ONLY the number of the best match (1-10). Nothing else.
-Criteria: semantic relevance to the PR title, not just keyword match."""
-    
-    try:
-        import urllib.request
-        
-        model = os.environ.get("RIPTIDE_COMPANION_MODEL", "qwen2.5-coder:7b")
-        base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-        
-        url = f"{base_url}/api/generate"
-        payload = json.dumps({
-            "model": model,
-            "prompt": prompt,
-            "stream": False,
-            "options": {
-                "temperature": 0.1,
-                "num_predict": 5,
-            },
-        }).encode()
-        
-        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-        
-        response = data.get("response", "").strip()
-        
-        # Parse the number from response
-        for char in response:
-            if char.isdigit():
-                idx = int(char) - 1
-                if 0 <= idx < len(candidates):
-                    return candidates[idx]["url"]
-        
-        return None
-    except Exception:
-        return None
-
-
-def _search_kilpy_candidates(tag: str, app_key: str, limit: int = 3) -> list[dict]:
-    """Search Kilpy for GIFs matching the tag. Returns list of {url, title}."""
-    import urllib.request
-    import urllib.parse
-    
-    encoded_tag = urllib.parse.quote(tag)
-    url = f"https://api.klipy.com/api/v1/{app_key}/gifs/search?page=1&per_page={limit}&q={encoded_tag}"
-    
-    req = urllib.request.Request(url, headers={
-        "Accept": "application/json",
-        "User-Agent": "Mozilla/5.0 (compatible; Riptide/1.0; +https://github.com/ChonSong/riptide)",
-    })
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        data = json.loads(resp.read())
-    
-    if not data.get("result"):
-        return []
-    
-    results = data.get("data", {}).get("data", [])
-    gifs = []
-    for gif in results:
-        files = gif.get("file", {})
-        # Prefer sm.gif for faster loading
-        for size in ["sm", "md", "hd"]:
-            gif_url = files.get(size, {}).get("gif", {}).get("url")
-            if gif_url:
-                gifs.append({"url": gif_url, "title": gif.get("title", "")})
-                break
-    
-    return gifs
-
-
-def _search_giphy_candidates(tag: str, api_key: str, limit: int = 3) -> list[dict]:
-    """Search Giphy for GIFs matching the tag. Returns list of {url, title}."""
-    import urllib.request
-    import urllib.parse
-    
-    encoded_tag = urllib.parse.quote(tag)
-    url = f"https://api.giphy.com/v1/gifs/search?api_key={api_key}&q={encoded_tag}&limit={limit}&rating=g"
-    
-    req = urllib.request.Request(url, headers={"Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        data = json.loads(resp.read())
-    
-    results = data.get("data", [])
-    gifs = []
-    for gif in results:
-        images = gif.get("images", {})
-        gif_url = images.get("fixed_height", images.get("original", {})).get("url")
-        if gif_url:
-            gifs.append({"url": gif_url, "title": gif.get("title", "")})
-    
-    return gifs
-
-
-def _search_tenor_candidates(tag: str, api_key: str, limit: int = 3) -> list[dict]:
-    """Search Tenor for GIFs matching the tag. Returns list of {url, title}."""
-    import urllib.request
-    import urllib.parse
-    
-    encoded_tag = urllib.parse.quote(tag)
-    url = f"https://tenor.googleapis.com/v2/search?q={encoded_tag}&key={api_key}&limit={limit}&contentfilter=medium"
-    
-    req = urllib.request.Request(url, headers={"Accept": "application/json"})
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        data = json.loads(resp.read())
-    
-    results = data.get("results", [])
-    gifs = []
-    for gif in results:
-        media = gif.get("media_formats", {})
-        gif_url = media.get("gif", media.get("tinygif", media.get("mp4", {}))).get("url")
-        if gif_url:
-            gifs.append({"url": gif_url, "title": gif.get("title", "")})
-    
-    return gifs
+    # Static fallback: use the specific tag to pick a relevant GIF
+    return _static_gif_for_tag(emoji, best_tag)
 
 
 def _static_gif_for_tag(emoji: str, tag: str) -> str:
@@ -468,45 +296,6 @@ def _search_tenor(tag: str, api_key: str, limit: int = 5) -> str | None:
     # Prefer gif (smaller) over tinygif/mp4
     gif = media.get("gif", media.get("tinygif", media.get("mp4", {})))
     return gif.get("url")
-
-
-def _search_kilpy(tag: str, app_key: str, limit: int = 5) -> str | None:
-    """Search Kilpy for a GIF matching the tag. Returns GIF URL.
-    
-    Kilpy API: https://api.klipy.com/api/v1/{app_key}/gifs/search
-    Returns structured response with hd/md/sm/xs sizes.
-    """
-    import urllib.request
-    import urllib.parse
-    
-    encoded_tag = urllib.parse.quote(tag)
-    url = f"https://api.klipy.com/api/v1/{app_key}/gifs/search?page=1&per_page={limit}&q={encoded_tag}"
-    
-    req = urllib.request.Request(url, headers={
-        "Accept": "application/json",
-        "User-Agent": "Mozilla/5.0 (compatible; Riptide/1.0; +https://github.com/ChonSong/riptide)",
-    })
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        data = json.loads(resp.read())
-    
-    if not data.get("result"):
-        return None
-    
-    results = data.get("data", {}).get("data", [])
-    if not results:
-        return None
-    
-    idx = zlib.crc32(tag.encode()) % len(results)
-    gif_data = results[idx]
-    files = gif_data.get("file", {})
-    
-    # Prefer hd.gif, fall back to md.gif, sm.gif
-    for size in ["hd", "md", "sm"]:
-        gif_url = files.get(size, {}).get("gif", {}).get("url")
-        if gif_url:
-            return gif_url
-    
-    return None
 
 
 def classify_pr_mood(title: str, changed_files: list[dict] | None = None) -> str:
