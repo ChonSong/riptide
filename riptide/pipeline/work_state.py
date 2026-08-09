@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -13,6 +14,9 @@ WORK_STATE_PATH = os.environ.get(
     "RIPTIDE_WORK_STATE",
     str(Path.home() / ".hermes/state/riptide-work-state.json"),
 )
+
+# Thread-safe lock for read-modify-write operations
+_STATE_LOCK = threading.Lock()
 
 # ── Schema ──────────────────────────────────────────────────────────────────
 
@@ -46,15 +50,25 @@ WORK_STATE_SCHEMA = {
 
 
 def read_state() -> dict:
-    """Read work-state.json, creating if missing."""
+    """Read work-state.json, creating if missing (thread-safe)."""
+    with _STATE_LOCK:
+        return _read_state_unsafe()
+
+
+def write_state(state: dict) -> None:
+    """Write work-state.json atomically (thread-safe)."""
+    with _STATE_LOCK:
+        _write_state_unsafe(state)
+
+
+def _read_state_unsafe() -> dict:
     if not Path(WORK_STATE_PATH).exists():
         return {"version": 1, "tracks": {}}
     with open(WORK_STATE_PATH, "r") as f:
         return json.load(f)
 
 
-def write_state(state: dict) -> None:
-    """Write work-state.json atomically."""
+def _write_state_unsafe(state: dict) -> None:
     Path(WORK_STATE_PATH).parent.mkdir(parents=True, exist_ok=True)
     tmp = f"{WORK_STATE_PATH}.tmp"
     with open(tmp, "w") as f:
@@ -122,11 +136,15 @@ def create_workstream(
     inputs: Optional[dict] = None,
     acceptance: Optional[dict] = None,
     recovery: Optional[dict] = None,
+    role: Optional[str] = None,
+    pipeline: Optional[list[str]] = None,
 ) -> dict:
     state = read_state()
     ws = {
         "id": ws_id,
         "status": "pending",
+        "role": role or "engine",
+        "pipeline": pipeline or [],
         "inputs": inputs or {},
         "outputs": {},
         "acceptance": acceptance or {},

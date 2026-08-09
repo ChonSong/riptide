@@ -18,7 +18,7 @@ from .work_state import (
     get_track, get_workstream, create_track, create_workstream,
     update_track, update_workstream, next_pending_workstream, update_key_facts,
 )
-from .roles import WorkerBrief, ROLES, FINDING_SCHEMA
+from .roles import WorkerBrief, ROLES
 from .recovery import detect_stall, recover, assess_partial_output, StallSignal, FailureType
 
 # Will be imported by dispatch
@@ -36,7 +36,7 @@ class Conductor:
     def __init__(self, track_id: str):
         self.track_id = track_id
         self.track = get_track(track_id)
-        if not track:
+        if not self.track:
             raise ValueError(f"Track {track_id} not found")
     
     def run(self) -> dict:
@@ -250,29 +250,37 @@ def create_pr_review_pipeline(
         "ws-1-probe",
         inputs={"pr_number": pr_number, "owner": owner, "repo": repo},
         acceptance={"output_exists": True},
+        role="probe",
+        pipeline=["fetch_diff", "graphify", "context_bundle"],
     )
-    
+
     create_workstream(
         track_id,
         "ws-2-judge",
         inputs={"context_path": f"/tmp/pr-{pr_number}-context.json"},
         acceptance={"findings_valid": True},
+        role="judge",
+        pipeline=["diff_analyzer", "dedup", "score"],
     )
-    
+
     create_workstream(
         track_id,
         "ws-3-artisan",
         inputs={"findings_path": "/tmp/findings.json"},
         acceptance={"diagram_created": True},
+        role="artisan",
+        pipeline=["excalidraw", "upload"],
     )
-    
+
     create_workstream(
         track_id,
         "ws-4-engine",
         inputs={"command": "upload_excalidraw /tmp/review.excalidraw"},
         acceptance={"uploaded": True},
+        role="engine",
+        pipeline=["upload"],
     )
-    
+
     create_workstream(
         track_id,
         "ws-5-scribe",
@@ -283,6 +291,8 @@ def create_pr_review_pipeline(
             "action": "post_review",
         },
         acceptance={"posted": True},
+        role="scribe",
+        pipeline=["assemble_review", "post_comment"],
     )
     
     return track

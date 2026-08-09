@@ -190,7 +190,7 @@ class TestTemporaryDirectoryCleanup:
 
     def test_temp_dir_cleanup_on_success(self):
         """Verify temp directory is cleaned up after successful diagram generation."""
-        from riptide.graphify_ingest.orchestrator import pre_generate_diagram
+        from riptide.grafiphy.orchestrator import pre_generate_diagram
         
         data = {
             "god_nodes": [{"name": "test", "file": "test.py"}],
@@ -206,8 +206,8 @@ class TestTemporaryDirectoryCleanup:
         }
         
         # Mock render_review and upload_excalidraw
-        with patch("riptide.graphify_ingest.orchestrator.render_review") as mock_render, \
-             patch("riptide.graphify_ingest.orchestrator.upload_excalidraw", return_value="https://excalidraw.com/#test") as mock_upload:
+        with patch("riptide.grafiphy.orchestrator.render_review") as mock_render, \
+             patch("riptide.grafiphy.orchestrator.upload_excalidraw", return_value="https://excalidraw.com/#test") as mock_upload:
             
             # Capture the output_path passed to render_review
             captured_paths = []
@@ -229,7 +229,7 @@ class TestTemporaryDirectoryCleanup:
 
     def test_temp_dir_cleanup_on_failure(self):
         """Verify temp directory is cleaned up even when render fails."""
-        from riptide.graphify_ingest.orchestrator import pre_generate_diagram
+        from riptide.grafiphy.orchestrator import pre_generate_diagram
         
         data = {
             "god_nodes": [{"name": "test", "file": "test.py"}],
@@ -245,7 +245,7 @@ class TestTemporaryDirectoryCleanup:
         }
         
         # Mock render_review to raise an exception
-        with patch("riptide.graphify_ingest.orchestrator.render_review", side_effect=Exception("Render failed")):
+        with patch("riptide.grafiphy.orchestrator.render_review", side_effect=Exception("Render failed")):
             result = pre_generate_diagram(data, pr_metadata)
             
             # Should return None on failure

@@ -297,14 +297,11 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
                 # Deterministic companion flow — the single pipeline entry.
                 # Runs depth decision → context bundle → Tier-1 canonical thread
                 # (Stage 0/1/2) inside Companion.run_for_pr (semaphore-guarded).
-                _webhook_received_at = time.time()
-
                 def _safe_run():
                     try:
                         companion.run_for_pr(
                             installation_id, owner, repo_name, pr_number,
                             title, author, files,
-                            webhook_received_at=_webhook_received_at,
                         )
                     except Exception as e:
                         log.error(
@@ -488,25 +485,6 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
                     )
             except Exception as e:
                 log.error(f"[{delivery_id}] Relabel command failed: {e}")
-
-        # Route 3: Visual regression command (@riptide-bot visual)
-        from riptide.visual import VISUAL_RE, handle_visual_command
-
-        if VISUAL_RE.search(body):
-            log.info(
-                f"[{delivery_id}] Visual command on {owner}/{repo_name}#{pr_number} by {commenter}"
-            )
-            try:
-                client = github_client()
-                result = handle_visual_command(
-                    client, installation_id, owner, repo_name, pr_number, commenter
-                )
-                if result:
-                    client.post_pr_comment(
-                        installation_id, owner, repo_name, pr_number, result
-                    )
-            except Exception as e:
-                log.error(f"[{delivery_id}] Visual command failed: {e}")
 
     return Response(status_code=200)
 

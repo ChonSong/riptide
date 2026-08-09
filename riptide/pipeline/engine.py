@@ -9,7 +9,11 @@ from typing import Optional
 
 class Engine:
     """Executes exact shell commands. No exploration, no interpretation.
-    
+
+    SECURITY NOTE: This class uses shell=True for command execution.
+    Only trusted callers (the Conductor) should instantiate it.
+    Do not pass unsanitized user input to run().
+
     Returns structured result: exit_code, stdout, stderr, success.
     """
     

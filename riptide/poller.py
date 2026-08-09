@@ -38,14 +38,8 @@ log = logging.getLogger("riptide.poller")
 DATA_DIR = Path(os.environ.get("RIPTIDE_DATA_DIR", "/home/sc/.local/share/riptide"))
 DB_PATH = DATA_DIR / "metadata.db"
 PROCESSED_TABLE = "poller_processed_comments"
-REVIEW_TABLE = "poller_reviewed_prs"
 FIX_RE = re.compile(r"@riptide-bot\s+fix\b(.*)", re.IGNORECASE | re.DOTALL)
 LOOKBACK_DAYS = int(os.environ.get("RIPTIDE_POLLER_LOOKBACK", "3"))
-POLLER_REPOS = [
-    r.strip()
-    for r in os.environ.get("RIPTIDE_POLLER_REPOS", "").split(",")
-    if r.strip()
-]
 
 
 
@@ -335,159 +329,10 @@ def _handle_fix(client, match: dict, conn: sqlite3.Connection):
         _mark_processed(conn, comment_id, "no-result")
 
 
-def _init_review_db(conn: sqlite3.Connection):
-    """Create the poller-reviewed PR table if it doesn't exist."""
-    conn.execute(f"""
-        CREATE TABLE IF NOT EXISTS {REVIEW_TABLE} (
-            pr_key TEXT PRIMARY KEY,
-            last_sha TEXT NOT NULL,
-            reviewed_at TEXT NOT NULL,
-            comment_id INTEGER,
-            verdict TEXT
-        )
-    """)
-    conn.commit()
-
-
-def _is_reviewed(conn: sqlite3.Connection, pr_key: str, current_sha: str) -> bool:
-    """Check if this PR at this SHA has already been reviewed."""
-    row = conn.execute(
-        f"SELECT last_sha FROM {REVIEW_TABLE} WHERE pr_key = ?",
-        (pr_key,),
-    ).fetchone()
-    return row is not None and row[0] == current_sha
-
-
-def _mark_reviewed(conn: sqlite3.Connection, pr_key: str, sha: str, comment_id: int | None = None, verdict: str = ""):
-    """Record that a PR was reviewed at this SHA."""
-    conn.execute(
-        f"INSERT OR REPLACE INTO {REVIEW_TABLE} (pr_key, last_sha, reviewed_at, comment_id, verdict) "
-        f"VALUES (?, ?, ?, ?, ?)",
-        (pr_key, sha, datetime.now(timezone.utc).isoformat(), comment_id, verdict[:200] if verdict else ""),
-    )
-    conn.commit()
-
-
-def _discover_prs() -> list[dict]:
-    """Discover open PRs in configured repos via gh CLI.
-
-    Returns a list of PR dicts with keys:
-    owner, repo, pr_number, title, author, head_sha, created_at, updated_at
-    """
-    if not POLLER_REPOS:
-        return []
-
-    discovered = []
-    cutoff_str = (datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)).strftime("%Y-%m-%d")
-
-    for repo_full in POLLER_REPOS:
-        if "/" not in repo_full:
-            log.warning("Invalid repo format '%s' (expected owner/repo), skipping", repo_full)
-            continue
-
-        owner, repo_name = repo_full.split("/", 1)
-        cmd = [
-            "gh", "pr", "list",
-            "--repo", repo_full,
-            "--state", "open",
-            "--json", "number,title,author,headRefName,headRefOid,createdAt,updatedAt",
-        ]
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-            if result.returncode != 0:
-                log.warning("gh pr list failed for %s: %s", repo_full, result.stderr[:200])
-                continue
-            items = json.loads(result.stdout) if result.stdout.strip() else []
-            for item in items:
-                created = item.get("createdAt", "")
-                if created and created[:10] < cutoff_str:
-                    continue
-                discovered.append({
-                    "owner": owner,
-                    "repo": repo_name,
-                    "pr_number": item.get("number", 0),
-                    "title": item.get("title", ""),
-                    "author": item.get("author", {}).get("login", "unknown"),
-                    "head_sha": item.get("headRefOid", ""),
-                    "head_ref": item.get("headRefName", ""),
-                    "created_at": created,
-                    "updated_at": item.get("updatedAt", ""),
-                    "pr_key": f"{owner}/{repo_name}#{item.get('number', 0)}",
-                })
-        except Exception as e:
-            log.error("Error discovering PRs for %s: %s", repo_full, e)
-
-    return discovered
-
-
-def _handle_review(client, pr: dict, conn: sqlite3.Connection):
-    """Run the companion review flow for a discovered PR."""
-    pr_key = pr["pr_key"]
-    owner = pr["owner"]
-    repo = pr["repo"]
-    pr_number = pr["pr_number"]
-    title = pr["title"]
-    author = pr["author"]
-    head_sha = pr["head_sha"]
-
-    if not head_sha:
-        log.warning("No head SHA for %s — skipping", pr_key)
-        return
-
-    if _is_reviewed(conn, pr_key, head_sha):
-        log.info("Already reviewed %s at %s — skipping", pr_key, head_sha[:12])
-        return
-
-    log.info("Running companion review for %s (%s) by %s", pr_key, title, author)
-
-    try:
-        from riptide.companion import Companion
-        companion = Companion(github_client=None)
-        companion.enable_deterministic = True
-        companion.enable_graphify = False  # external repos: no graphify data
-
-        # Fetch files for this PR
-        files = []
-        for endpoint in [
-            f"repos/{owner}/{repo}/pulls/{pr_number}/files",
-        ]:
-            try:
-                cmd = ["gh", f"--repo", f"{owner}/{repo}", "api", f"{endpoint}?per_page=100"]
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-                if result.returncode == 0:
-                    files = json.loads(result.stdout) or []
-                    break
-            except Exception as e:
-                log.warning("Failed to fetch files for %s: %s", pr_key, e)
-
-        if not files:
-            log.warning("No files fetched for %s — skipping", pr_key)
-            return
-
-        companion.run_for_pr(
-            installation_id=None,
-            owner=owner,
-            repo=repo,
-            pr_number=pr_number,
-            title=title,
-            author=author,
-            changed_files=files,
-            client=client,
-        )
-        _mark_reviewed(conn, pr_key, head_sha)
-        log.info("Companion review triggered for %s", pr_key)
-
-    except Exception as e:
-        log.error("Error running companion review for %s: %s", pr_key, e)
-        import traceback
-        traceback.print_exc()
-
-
 def poll():
     """Main poll entry point."""
     conn = sqlite3.connect(str(DB_PATH))
     _init_db(conn)
-    _init_review_db(conn)
 
     from riptide.gh_cli_client import make_gh_cli_client
     client = make_gh_cli_client()
@@ -496,7 +341,6 @@ def poll():
         conn.close()
         return
 
-    # Phase 1: Handle @riptide-bot fix comments (existing behavior)
     matches = _search_fix_comments()
     log.info(f"Found {len(matches)} @riptide-bot fix comments in last {LOOKBACK_DAYS} days")
 
@@ -507,22 +351,6 @@ def poll():
             log.error(f"Error handling fix comment {match.get('comment_id')}: {e}")
             import traceback
             traceback.print_exc()
-
-    # Phase 2: Discover and review open PRs in configured repos
-    if POLLER_REPOS:
-        log.info(f"Polling reviews for: {', '.join(POLLER_REPOS)}")
-        prs = _discover_prs()
-        log.info(f"Discovered {len(prs)} open PRs in configured repos")
-
-        for pr in prs:
-            try:
-                _handle_review(client, pr, conn)
-            except Exception as e:
-                log.error(f"Error handling review for {pr.get('pr_key')}: {e}")
-                import traceback
-                traceback.print_exc()
-    else:
-        log.info("RIPTIDE_POLLER_REPOS not set — skipping PR review discovery")
 
     conn.close()
 

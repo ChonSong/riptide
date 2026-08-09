@@ -420,19 +420,12 @@ class Companion:
     def is_active_for(self, owner: str, repo: str) -> bool:
         return f"{owner}/{repo}" in self.allowed_repos if self.allowed_repos else False
 
-    def run_for_pr(self, installation_id, owner, repo, pr_number, title, author, changed_files, webhook_received_at=None, client=None):
-        """Run the companion review flow for a PR.
-
-        client: optional override GitHub client. When provided, uses this
-                client instead of self.client (used by the poller path for
-                external repos where the App is not installed — GhCliClient
-                via PAT, installation_id=None).
-        """
+    def run_for_pr(self, installation_id, owner, repo, pr_number, title, author, changed_files):
         if not self._semaphore.acquire(blocking=False):
             logger.warning("Busy, skipping %s/%s#%d", owner, repo, pr_number)
             return
         try:
-            self._execute(installation_id, owner, repo, pr_number, title, author, changed_files, webhook_received_at=webhook_received_at, client=client)
+            self._execute(installation_id, owner, repo, pr_number, title, author, changed_files)
         finally:
             self._semaphore.release()
 
@@ -527,15 +520,7 @@ class Companion:
             logger.error("SHA update failed: %s", e)
             return False
 
-    def _execute(self, installation_id, owner, repo, pr_number, title, author, changed_files, webhook_received_at=None, client=None):
-        """Execute the companion review flow.
-
-        client: optional GitHub client override. When provided, this client
-                is used instead of self.client for all API calls. This enables
-                the poller path to use a GhCliClient (PAT-based) for external
-                repos where the App is not installed.
-        """
-        active_client = client or self.client
+    def _execute(self, installation_id, owner, repo, pr_number, title, author, changed_files):
         full_name = f"{owner}/{repo}"
 
         if self._is_skipped(owner, repo, pr_number):
@@ -569,7 +554,7 @@ class Companion:
         pr_details = None
         current_sha = None
         try:
-            pr_details = active_client.get_pr_details(installation_id, owner, repo, pr_number)
+            pr_details = self.client.get_pr_details(installation_id, owner, repo, pr_number)
             current_sha = pr_details.get("head", {}).get("sha")
         except Exception as e:
             logger.warning("Failed to fetch PR details: %s", e)
@@ -588,7 +573,7 @@ class Companion:
         if is_delta:
             # Get only the diff between last SHA and current HEAD
             try:
-                compare = active_client.compare_commits(installation_id, owner, repo, last_sha, current_sha)
+                compare = self.client.compare_commits(installation_id, owner, repo, last_sha, current_sha)
                 files = compare.get("files", files)
                 delta_commits = compare.get("total_commits", 0)
                 logger.info(
@@ -599,13 +584,13 @@ class Companion:
                 logger.warning("Failed to compare commits: %s, falling back to full PR diff", e)
                 is_delta = False
                 try:
-                    files = active_client.get_pr_files(installation_id, owner, repo, pr_number)
+                    files = self.client.get_pr_files(installation_id, owner, repo, pr_number)
                 except Exception as e2:
                     logger.warning("Failed to fetch files: %s", e2)
 
         if not files:
             try:
-                files = active_client.get_pr_files(installation_id, owner, repo, pr_number)
+                files = self.client.get_pr_files(installation_id, owner, repo, pr_number)
             except Exception as e:
                 logger.warning("Failed to fetch files: %s", e)
 
@@ -619,7 +604,7 @@ class Companion:
         review_depth = classify_review_depth({"files_changed": files})
         self._depth = review_depth.value
         logger.info(
-            "Depth for %s##%d: %s (%d file(s), %d LOC)",
+            "Depth for %s#%d: %s (%d file(s), %d LOC)",
             full_name, pr_number, review_depth.value,
             len(files),
             sum(f.get("additions", 0) + f.get("deletions", 0) for f in files),
@@ -668,7 +653,7 @@ class Companion:
                 tldr = self._generate_tldr_with_retry(title, author, files, graph_context, is_delta=is_delta)
                 if not tldr:
                     logger.warning("TLDR failed %s#%d — initiating self-heal", full_name, pr_number)
-                    self._handle_degradation(installation_id, owner, repo, pr_number, full_name, client=active_client)
+                    self._handle_degradation(installation_id, owner, repo, pr_number, full_name)
                     return
 
                 # Detect UI files for ProofShot section
@@ -678,10 +663,9 @@ class Companion:
 
                 body = self._format_comment(emoji, author, tldr, graph_context, eli5, ui_files,
                                             owner=owner, repo=repo, pr_number=pr_number,
-                                            webhook_received_at=webhook_received_at,
                                             title=title, files=files, is_delta=is_delta)
                 try:
-                    active_client.post_pr_comment(installation_id, owner, repo, pr_number, body)
+                    self.client.post_pr_comment(installation_id, owner, repo, pr_number, body)
                     logger.info("Posted TLDR (LLM fallback) for %s#%d", full_name, pr_number)
                     if current_sha:
                         self._set_last_sha(owner, repo, pr_number, current_sha)
@@ -699,7 +683,7 @@ class Companion:
             tldr = self._generate_tldr_with_retry(title, author, files, graph_context, is_delta=is_delta)
             if not tldr:
                 logger.warning("TLDR failed %s#%d — initiating self-heal", full_name, pr_number)
-                self._handle_degradation(installation_id, owner, repo, pr_number, full_name, client=active_client)
+                self._handle_degradation(installation_id, owner, repo, pr_number, full_name)
                 return
         else:
             # Deterministic ran but no findings — skip posting (handled below)
@@ -730,13 +714,13 @@ class Companion:
             try:
                 if existing_id is not None:
                     comment_id = existing_id
-                    active_client.update_pr_comment(installation_id, owner, repo, comment_id, tier1_body)
+                    self.client.update_pr_comment(installation_id, owner, repo, comment_id, tier1_body)
                     logger.info(
                         "Patched existing Tier 1 for %s#%d comment_id=%s (re-sync)",
                         full_name, pr_number, comment_id,
                     )
                 else:
-                    posted = active_client.post_pr_comment(installation_id, owner, repo, pr_number, tier1_body)
+                    posted = self.client.post_pr_comment(installation_id, owner, repo, pr_number, tier1_body)
                     comment_id = posted.get("id")
                     if comment_id is not None:
                         self._state.set_pr_tier1_comment_id(pr_key, comment_id)
@@ -763,10 +747,9 @@ class Companion:
             enriched_body = self._format_comment(emoji, author, tldr, graph_context, eli5, ui_files,
                                                  owner=owner, repo=repo, pr_number=pr_number,
                                                  title=title, files=files, is_delta=is_delta,
-                                            webhook_received_at=webhook_received_at,
                                                  deterministic_report=deterministic_report, enriched=True)
             try:
-                active_client.update_pr_comment(installation_id, owner, repo, comment_id, enriched_body)
+                self.client.update_pr_comment(installation_id, owner, repo, comment_id, enriched_body)
                 logger.info("Enriched Tier 2 for %s#%d comment_id=%s", full_name, pr_number, comment_id)
             except Exception as e:
                 # Tier 1 comment remains — do NOT delete, do NOT post duplicate
@@ -777,10 +760,9 @@ class Companion:
             body = self._format_comment(emoji, author, tldr, graph_context, eli5, ui_files,
                                         owner=owner, repo=repo, pr_number=pr_number,
                                         title=title, files=files, is_delta=is_delta,
-                                            webhook_received_at=webhook_received_at,
                                         deterministic_report=deterministic_report)
             try:
-                active_client.post_pr_comment(installation_id, owner, repo, pr_number, body)
+                self.client.post_pr_comment(installation_id, owner, repo, pr_number, body)
                 logger.info("Posted TLDR for %s#%d", full_name, pr_number)
                 if current_sha:
                     self._set_last_sha(owner, repo, pr_number, current_sha)
@@ -975,17 +957,13 @@ ELI5:"""
                 time.sleep(delays[attempt])
         return None
 
-    def _handle_degradation(self, installation_id, owner, repo, pr_number, full_name, client=None):
-        """Self-heal: post degradation alert based on repo ownership, with cooldowns.
-
-        client: optional GitHub client override (poller path).
-        """
+    def _handle_degradation(self, installation_id, owner, repo, pr_number, full_name):
+        """Self-heal: post degradation alert based on repo ownership, with cooldowns."""
         if not self._should_alert(full_name):
             logger.info("Degradation alert suppressed (cooldown) for %s#%d", full_name, pr_number)
             return
 
-        active_client = client or self.client
-        is_owned = owner == getattr(self, "_owned_org", None)
+        is_owned = owner == self._owned_org
         if is_owned:
             # Owned repo — post a comment on the PR
             body = (
@@ -994,7 +972,7 @@ ELI5:"""
                 f"---\n<sub>🤖 Generated by Riptide · degradation alert</sub>"
             )
             try:
-                active_client.post_pr_comment(installation_id, owner, repo, pr_number, body)
+                self.client.post_pr_comment(installation_id, owner, repo, pr_number, body)
                 logger.info("Degradation comment posted for %s#%d", full_name, pr_number)
             except Exception as e:
                 logger.warning("Failed to post degradation comment: %s", e)
@@ -1140,12 +1118,10 @@ ELI5:"""
 
     def _format_comment(self, emoji, author, tldr, graph_context, eli5=None, ui_files=None,
                         owner=None, repo=None, pr_number=None, title=None, files=None, is_delta=False,
-                        deterministic_report: DiffReport | None = None, enriched: bool = False,
-                        webhook_received_at=None):
+                        deterministic_report: DiffReport | None = None, enriched: bool = False):
         """
         Build the Markdown comment body.
         Uses deterministic findings if available, otherwise falls back to legacy format.
-        webhook_received_at: Unix timestamp when webhook was received (for timing metric).
         """
         prefix = "🔄 " if is_delta else ""
 
@@ -1192,12 +1168,5 @@ ELI5:"""
             parts.append(f" · `@riptide-bot companion skip` to opt out · `@riptide-bot review` for deep-think</sub>")
         else:
             parts.append("</sub>")
-
-        # Timing metric: webhook received → comment posted
-        if webhook_received_at:
-            import time as _time
-            elapsed = _time.time() - webhook_received_at
-            from riptide.test_utils import format_elapsed
-            parts.append(f"\n\n---\n<sub>⏱️ Review posted in {format_elapsed(elapsed)}</sub>")
 
         return "".join(parts)
