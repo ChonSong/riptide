@@ -169,114 +169,140 @@ def _spawn_deepthink(
     total_loc: int,
     head_sha: str,
 ) -> bool:
-    """Run a PR review via the Riptide Pipeline.
-    
-    The pipeline orchestrates:
-    1. Probe — deterministic context gathering
-    2. Judge — LLM deep-think analysis (spawns Hermes session)
-    3. Artisan — deterministic file creation
-    4. Engine — deterministic shell execution
-    5. Scribe — LLM review summary (spawns Hermes session)
-    
-    Uses work_state.json for durable state and recovery.py for self-healing.
+    """Spawn a Hermes cron session for deep-think review on this PR.
+
+    Uses pre-gathered data and a small orchestrator prompt that delegates
+    to subagents for inline review and Excalidraw diagram generation.
+
+    Retries up to 3 times with exponential backoff (5s/15s/30s).
+    Reserves a pending job before spawning the review; marks the job as
+    complete on success or failed if all attempts fail.
+    Returns True if spawned successfully, False otherwise.
     """
-    from riptide.pipeline.conductor import create_pr_review_pipeline, Conductor
-    
+    max_retries = 3
+    base_delay = 5  # seconds
     name = f"riptide-review-{owner}-{repo}-{pr_number}"
-    track_id = f"{owner}-{repo}-{pr_number}"
-    
+    run_at = (datetime.now() + timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%S")
+
     # Cross-session awareness: clean up stale jobs, then atomically reserve
     from riptide.state import StateStore
     state = StateStore()
     state.cleanup_stale_pending()
     job_id = f"{name}-{head_sha[:12]}-{uuid.uuid4().hex[:12]}"
-    if not state.reserve_job(job_id, pr_number, "pipeline", name):
+    if not state.reserve_job(job_id, pr_number, "t1", name):
         log.info(f"Skipping {owner}/{repo}#{pr_number} — review already pending")
         return False
-    
+
     try:
-        # Create the pipeline (idempotent — safe to call multiple times)
-        create_pr_review_pipeline(track_id, pr_number, owner, repo)
-        
-        # Build the LLM spawn callback
-        def spawn_llm(prompt: str, name: str, skills: list[str]) -> bool:
-            """Spawn a Hermes cron session for LLM reasoning."""
-            return _spawn_hermes_session(prompt, name, skills)
-        
-        # Run the conductor (orchestrates deterministic + LLM workers)
-        conductor = Conductor(track_id, spawn_llm=spawn_llm)
-        
-        # Run in background thread (non-blocking for webhook/poller)
-        import threading
-        def _run_pipeline():
+        # Pre-gather data in Python (cheaper than having the agent do it)
+        data = _gather_review_data(owner, repo, pr_number, head_sha)
+
+        # Classify PR depth to determine skill loading
+        depth = classify_review_depth(data)
+        skills = select_skills(depth)
+        log.info(f"{owner}/{repo}#{pr_number} classified as {depth.value}, skills={skills}")
+
+        # Deterministic core (WS-3 Stage 1): build the context bundle ONCE from the
+        # gathered data and feed its DiffReport findings into the orchestrator prompt.
+        # The spawned session starts from the deterministic analysis instead of
+        # re-deriving everything from the raw diff. Non-fatal on failure.
+        bundle = None
+        try:
+            from riptide.context_bundle import build_context_bundle
+            bundle = build_context_bundle(
+                data.get("files_changed", []),
+                data.get("graph_context"),
+                pr_details={"title": pr_title, "author": pr_author, "body": ""},
+            )
+            log.info(
+                "%s/%s#%d deterministic bundle: %d findings, verdict=%s",
+                owner, repo, pr_number,
+                len(bundle.get("findings", [])), bundle.get("verdict"),
+            )
+        except Exception as e:
+            log.warning(f"Context bundle failed for {owner}/{repo}#{pr_number}: {e}")
+
+        # Pre-generate Excalidraw diagram in Python (deterministic, no LLM needed)
+        # Run in background thread with timeout to avoid blocking webhook path
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError
+        diagram_url = None
+        def _gen_diagram():
+            from riptide.grafiphy.orchestrator import pre_generate_diagram
+            return pre_generate_diagram(data, dict(
+                owner=owner, repo=repo, number=pr_number,
+                title=pr_title, author=pr_author, total_loc=total_loc,
+            ))
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_gen_diagram)
             try:
-                result = conductor.run()
-                if all(r.get("status") == "done" for r in result.get("results", [])):
-                    state.mark_complete(job_id)
-                else:
-                    state.mark_failed(job_id)
+                diagram_url = future.result(timeout=30)
+                if diagram_url:
+                    log.info(f"Pre-generated diagram for {owner}/{repo}#{pr_number}: {diagram_url}")
+            except TimeoutError:
+                log.warning(f"Pre-generate diagram timed out after 30s for {owner}/{repo}#{pr_number}")
             except Exception as e:
-                log.error(f"Pipeline failed for {owner}/{repo}#{pr_number}: {e}")
-                state.mark_failed(job_id)
-        
-        thread = threading.Thread(target=_run_pipeline, daemon=True, name=f"pipeline-{name}")
-        thread.start()
-        
-        log.info(f"✓ Pipeline started for {owner}/{repo}#{pr_number} (track: {track_id})")
-        return True
-        
+                log.warning(f"Pre-generate diagram failed (non-fatal): {e}")
+
+        prompt = _build_orchestrator_prompt(
+            owner=owner,
+            repo=repo,
+            pr_number=pr_number,
+            pr_title=pr_title,
+            pr_author=pr_author,
+            total_loc=total_loc,
+            head_sha=head_sha,
+            data=data,
+            diagram_url=diagram_url,
+            deterministic=bundle,
+        )
     except Exception as e:
         state.mark_failed(job_id)
-        log.error(f"Failed to start pipeline for {owner}/{repo}#{pr_number}: {e}")
+        log.error(f"Failed to gather data or build prompt for {owner}/{repo}#{pr_number}: {e}")
         return False
 
+    cmd = [
+        "hermes", "cron", "create", run_at,
+        prompt,
+        "--name", name,
+    ]
+    for skill in skills:
+        cmd.extend(["--skill", skill])
+    cmd.extend([
+        "--model", DEEPTHINK_MODEL,
+        "--provider", DEEPTHINK_PROVIDER,
+        "--deliver", "origin",
+    ])
 
-def _spawn_hermes_session(prompt: str, name: str, skills: list[str]) -> bool:
-    """Spawn a Hermes cron session for LLM reasoning.
-    
-    Retries up to 3 times with exponential backoff (5s/15s/30s).
-    Returns True if spawned successfully, False otherwise.
-    """
-    max_retries = 3
-    base_delay = 5
-    run_at = (datetime.now() + timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%S")
-    
     for attempt in range(max_retries):
         if attempt > 0:
-            delay = base_delay * (2 ** attempt)
-            log.info(f"Retry {attempt+1}/{max_retries} for {name} in {delay}s...")
+            delay = base_delay * (2 ** attempt)  # 5s, 10s, 20s
+            log.info(f"Retry {attempt+1}/{max_retries} for {owner}/{repo}#{pr_number} in {delay}s...")
             time.sleep(delay)
-        
+
+        # Check hermes availability before each attempt
         if not _is_cron_available():
-            log.warning(f"hermes not available on attempt {attempt+1} for {name}")
+            log.warning(f"hermes not available on attempt {attempt+1} for {owner}/{repo}#{pr_number}")
             continue
-        
-        cmd = [
-            "hermes", "cron", "create", run_at,
-            prompt,
-            "--name", name,
-        ]
-        for skill in skills:
-            cmd.extend(["--skill", skill])
-        cmd.extend([
-            "--model", DEEPTHINK_MODEL,
-            "--provider", DEEPTHINK_PROVIDER,
-            "--deliver", "origin",
-        ])
-        
+
+        log.info(f"Spawning: hermes cron create {run_at} --name {name} (attempt {attempt+1})")
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=15
+            )
             if result.returncode == 0:
-                log.info(f"✓ Spawned Hermes session for {name}: {result.stdout[:200]}")
+                # Reservation stays pending — the scheduled worker marks it complete when done
+                log.info(f"✓ Spawned deep-think for {owner}/{repo}#{pr_number}: {result.stdout[:200]}")
                 return True
             else:
                 log.error(f"✗ Spawn failed (attempt {attempt+1}): {result.stderr[:300]}")
         except subprocess.TimeoutExpired:
-            log.warning(f"Timeout spawning Hermes (attempt {attempt+1})")
+            log.warning(f"Timeout spawning deep-think (attempt {attempt+1})")
         except Exception as e:
-            log.error(f"Error spawning Hermes (attempt {attempt+1}): {e}")
-    
-    log.error(f"All {max_retries} attempts failed for {name}")
+            log.error(f"Error spawning deep-think (attempt {attempt+1}): {e}")
+
+    # All attempts failed — mark the reserved job as failed
+    state.mark_failed(job_id)
+    log.error(f"All {max_retries} attempts failed for {owner}/{repo}#{pr_number}")
     return False
 
 
