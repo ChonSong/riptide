@@ -150,14 +150,25 @@ def select_gif(emoji: str, pr_title: str = "", changed_files: list[dict] = None)
     Select a GIF URL based on PR mood and content relevance.
     
     Priority:
-    1. Giphy API (if GIPHY_API_KEY set) with keyword-relevant tag
-    2. Tenor API (if TENOR_API_KEY set) with keyword-relevant tag  
-    3. Static fallback (uses tag from _pick_best_tag for relevance)
+    1. Kilpy API (if KLIPY_APP_KEY set) with keyword-relevant tag
+    2. Giphy API (if GIPHY_API_KEY set) with keyword-relevant tag
+    3. Tenor API (if TENOR_API_KEY set) with keyword-relevant tag  
+    4. Static fallback (uses tag from _pick_best_tag for relevance)
     """
     if not pr_title:
         return GIFI_MAP.get(emoji, GIFI_MAP["✨"])
     
     best_tag = _pick_best_tag(emoji, pr_title, changed_files)
+    
+    # Try Kilpy API (best relevance, dedicated GIF service)
+    kilpy_key = os.environ.get("KLIPY_APP_KEY", "")
+    if kilpy_key:
+        try:
+            url = _search_kilpy(best_tag, kilpy_key)
+            if url:
+                return url
+        except Exception:
+            pass
     
     # Try Giphy API
     giphy_key = os.environ.get("GIPHY_API_KEY", "")
@@ -296,6 +307,45 @@ def _search_tenor(tag: str, api_key: str, limit: int = 5) -> str | None:
     # Prefer gif (smaller) over tinygif/mp4
     gif = media.get("gif", media.get("tinygif", media.get("mp4", {})))
     return gif.get("url")
+
+
+def _search_kilpy(tag: str, app_key: str, limit: int = 5) -> str | None:
+    """Search Kilpy for a GIF matching the tag. Returns GIF URL.
+    
+    Kilpy API: https://api.klipy.com/api/v1/{app_key}/gifs/search
+    Returns structured response with hd/md/sm/xs sizes.
+    """
+    import urllib.request
+    import urllib.parse
+    
+    encoded_tag = urllib.parse.quote(tag)
+    url = f"https://api.klipy.com/api/v1/{app_key}/gifs/search?page=1&per_page={limit}&q={encoded_tag}"
+    
+    req = urllib.request.Request(url, headers={
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (compatible; Riptide/1.0; +https://github.com/ChonSong/riptide)",
+    })
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read())
+    
+    if not data.get("result"):
+        return None
+    
+    results = data.get("data", {}).get("data", [])
+    if not results:
+        return None
+    
+    idx = zlib.crc32(tag.encode()) % len(results)
+    gif_data = results[idx]
+    files = gif_data.get("file", {})
+    
+    # Prefer hd.gif, fall back to md.gif, sm.gif
+    for size in ["hd", "md", "sm"]:
+        gif_url = files.get(size, {}).get("gif", {}).get("url")
+        if gif_url:
+            return gif_url
+    
+    return None
 
 
 def classify_pr_mood(title: str, changed_files: list[dict] | None = None) -> str:
