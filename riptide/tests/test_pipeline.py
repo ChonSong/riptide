@@ -56,51 +56,6 @@ class TestConductorInit:
         with pytest.raises(ValueError, match="not found"):
             Conductor("non-existent-track")
 
-    def test_conductor_init_with_spawn_llm(self):
-        """Conductor should accept spawn_llm callback."""
-        track = create_track("test-track", name="Test", phase="Review", repos={})
-        called = []
-        def mock_spawn(prompt, name, skills):
-            called.append((prompt, name, skills))
-            return True
-        conductor = Conductor("test-track", spawn_llm=mock_spawn)
-        assert conductor.spawn_llm is mock_spawn
-
-
-class TestConductorPipeline:
-    """Test that Conductor orchestrates pipeline with LLM spawn."""
-
-    def test_create_pr_review_pipeline(self):
-        """create_pr_review_pipeline should create 5 workstreams."""
-        from riptide.pipeline.conductor import create_pr_review_pipeline
-        create_pr_review_pipeline("test-pipeline", 42, "ChonSong", "riptide")
-        # Re-read track to get updated state
-        from riptide.pipeline.work_state import get_track
-        track = get_track("test-pipeline")
-        assert track is not None
-        ws = track.get("workstreams", {})
-        assert len(ws) == 5
-        assert "ws-1-probe" in ws
-        assert "ws-2-judge" in ws
-        assert "ws-3-artisan" in ws
-        assert "ws-4-engine" in ws
-        assert "ws-5-scribe" in ws
-
-    def test_conductor_dispatches_probe(self):
-        """Conductor should dispatch Probe for probe workstreams."""
-        from riptide.pipeline.conductor import create_pr_review_pipeline
-        create_pr_review_pipeline("test-dispatch", 1, "ChonSong", "riptide")
-        
-        call_log = []
-        def mock_spawn(prompt, name, skills):
-            call_log.append(("spawn", name))
-            return True
-        
-        conductor = Conductor("test-dispatch", spawn_llm=mock_spawn)
-        # Probe is deterministic, should not call spawn_llm
-        # (We can't easily test full run without mocking subprocess)
-        assert conductor.track is not None
-
 
 class TestEngine:
     """Test Engine.run() with shell commands."""
@@ -132,11 +87,7 @@ class TestWorkStateThreadSafety:
     def test_concurrent_writes(self):
         """Concurrent writes should not corrupt state."""
         import threading
-        
-        # Create tracks first
-        for i in range(5):
-            create_track(f"track-{i}", f"Track {i}", "Review", {})
-        
+
         errors = []
 
         def write_state_thread(thread_id):

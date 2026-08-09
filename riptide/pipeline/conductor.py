@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
 """conductor.py — Orchestrator for the Riptide Pipeline.
 
-Reads work-state.json, dispatches workers (deterministic + LLM-spawned),
-monitors for stalls, verifies outputs, and updates state.
-
-The Conductor orchestrates WHEN to spawn Hermes sessions and WHAT context
-to give them. Deterministic workers (Probe, Artisan, Engine, Warden) run
-in-process. LLM-dependent workers (Judge, Scribe) spawn Hermes sessions
-via the provided `spawn_llm` callback.
+Reads work-state.json, dispatches workers, monitors for stalls,
+verifies outputs, and updates state.
 """
 
 from __future__ import annotations
@@ -16,7 +11,7 @@ import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Optional
 
 from .work_state import (
     read_state, write_state, now,
@@ -26,29 +21,23 @@ from .work_state import (
 from .roles import WorkerBrief, ROLES
 from .recovery import detect_stall, recover, assess_partial_output, StallSignal, FailureType
 
-# Deterministic workers (run in-process)
+# Will be imported by dispatch
 from .probe import Probe
+from .judge import Judge
 from .artisan import Artisan
 from .engine import Engine
 from .warden import Warden
+from .scribe import Scribe
 
 
 class Conductor:
-    """Orchestrates workers to complete a track's workstreams.
+    """Orchestrates workers to complete a track's workstreams."""
     
-    Args:
-        track_id: Unique identifier for this review track.
-        spawn_llm: Callback to spawn an LLM session. Signature:
-                   spawn_llm(prompt: str, name: str, skills: list[str]) -> bool
-                   Returns True if session was spawned successfully.
-    """
-    
-    def __init__(self, track_id: str, spawn_llm: Optional[Callable] = None):
+    def __init__(self, track_id: str):
         self.track_id = track_id
         self.track = get_track(track_id)
         if not self.track:
             raise ValueError(f"Track {track_id} not found")
-        self.spawn_llm = spawn_llm or self._default_spawn_llm
     
     def run(self) -> dict:
         """Run until all workstreams are done or blocked."""
@@ -135,10 +124,8 @@ class Conductor:
         else:
             raise ValueError(f"Unknown role: {role}")
     
-    # ── Deterministic Workers (in-process) ──────────────────────────────────
-    
     def _run_probe(self, brief: WorkerBrief) -> dict:
-        """Run Probe worker — deterministic context gathering."""
+        """Run Probe worker."""
         pr = brief.inputs.get("pr_number", 1)
         owner = brief.inputs.get("owner", "ChonSong")
         repo = brief.inputs.get("repo", "riptide")
@@ -153,10 +140,26 @@ class Conductor:
         
         return {"context_path": output_path, "gathered": True}
     
+    def _run_judge(self, brief: WorkerBrief) -> dict:
+        """Run Judge worker."""
+        context_path = brief.inputs.get("context_path", "")
+        with open(context_path) as f:
+            context = json.load(f)
+        
+        judge = Judge(context)
+        result = judge.evaluate()
+        
+        output_path = brief.output_protocol.get("path", "/tmp/findings.json")
+        with open(output_path, 'w') as f:
+            json.dump(result, f, indent=2)
+        
+        return {"findings_path": output_path, "findings_count": len(result.get("findings", []))}
+    
     def _run_artisan(self, brief: WorkerBrief) -> dict:
-        """Run Artisan worker — deterministic file creation."""
+        """Run Artisan worker."""
         artisan = Artisan()
         
+        # Create files from inputs
         files = brief.inputs.get("files", [])
         created = []
         for file_spec in files:
@@ -166,7 +169,7 @@ class Conductor:
         return {"created": created}
     
     def _run_engine(self, brief: WorkerBrief) -> dict:
-        """Run Engine worker — deterministic shell execution."""
+        """Run Engine worker."""
         engine = Engine()
         
         command = brief.inputs.get("command", "")
@@ -175,7 +178,7 @@ class Conductor:
         return result
     
     def _run_warden(self, brief: WorkerBrief) -> dict:
-        """Run Warden worker — deterministic verification."""
+        """Run Warden worker."""
         warden = Warden()
         
         checks = brief.inputs.get("checks", [])
@@ -187,164 +190,36 @@ class Conductor:
         
         return {"verification_path": output_path, "pass": result["pass"]}
     
-    # ── LLM-Dependent Workers (spawn Hermes sessions) ───────────────────────
-    
-    def _run_judge(self, brief: WorkerBrief) -> dict:
-        """Run Judge worker — LLM deep-think on probe output.
-        
-        Spawns a Hermes session to analyze the probe context and produce
-        findings. Falls back to deterministic Judge if no LLM available.
-        """
-        context_path = brief.inputs.get("context_path", "")
-        with open(context_path) as f:
-            context = json.load(f)
-        
-        # Build LLM prompt with pre-gathered context
-        prompt = self._build_judge_prompt(context, brief)
-        
-        # Spawn Hermes session for deep-think analysis
-        output_path = brief.output_protocol.get("path", "/tmp/findings.json")
-        spawned = self.spawn_llm(
-            prompt=prompt,
-            name=f"judge-{self.track_id}-{brief.workstream}",
-            skills=["deep-think", "riptide-review"],
-        )
-        
-        if spawned:
-            # Wait for LLM session to write findings
-            # (In practice, the LLM session writes directly to output_path)
-            return {"findings_path": output_path, "spawned": True}
-        else:
-            # Fallback to deterministic Judge
-            from .judge import Judge
-            judge = Judge(context)
-            result = judge.evaluate()
-            with open(output_path, 'w') as f:
-                json.dump(result, f, indent=2)
-            return {"findings_path": output_path, "findings_count": len(result.get("findings", [])), "spawned": False}
-    
     def _run_scribe(self, brief: WorkerBrief) -> dict:
-        """Run Scribe worker — assembles and posts review.
+        """Run Scribe worker."""
+        scribe = Scribe()
         
-        Spawns a Hermes session to generate the review summary, then
-        posts the assembled review.
-        """
         action = brief.inputs.get("action", "update_workstream")
         
         if action == "update_workstream":
-            return self._update_workstream(brief)
+            return scribe.update_workstream(
+                self.track_id,
+                brief.workstream,
+                brief.inputs.get("status", "done"),
+                brief.inputs.get("outputs"),
+            )
         elif action == "post_review":
-            return self._post_review(brief)
+            return scribe.post_review_with_assembler(
+                brief.inputs.get("owner", "ChonSong"),
+                brief.inputs.get("repo", "riptide"),
+                brief.inputs.get("pr_number", 0),
+                brief.inputs.get("findings", []),
+                brief.inputs.get("diagram_url"),
+            )
+        elif action == "record_review":
+            return scribe.record_review_complete(
+                self.track_id,
+                brief.inputs.get("pr_number", 0),
+                brief.inputs.get("findings", []),
+                brief.inputs.get("diagram_url"),
+            )
         
         return {"error": f"Unknown scribe action: {action}"}
-    
-    def _update_workstream(self, brief: WorkerBrief) -> dict:
-        """Update workstream status (deterministic)."""
-        from .work_state import update_workstream as _update
-        return _update(
-            self.track_id,
-            brief.workstream,
-            status=brief.inputs.get("status", "done"),
-            outputs=brief.inputs.get("outputs"),
-        )
-    
-    def _post_review(self, brief: WorkerBrief) -> dict:
-        """Post review — LLM generates summary, Scribe assembles."""
-        findings_path = brief.inputs.get("findings_path", "/tmp/findings.json")
-        owner = brief.inputs.get("owner", "ChonSong")
-        repo = brief.inputs.get("repo", "riptide")
-        pr_number = brief.inputs.get("pr_number", 0)
-        diagram_url = brief.inputs.get("diagram_url")
-        
-        # Build prompt for LLM to generate review summary
-        prompt = self._build_scribe_prompt(findings_path, owner, repo, pr_number, diagram_url)
-        
-        # Spawn Hermes session for summary generation
-        spawned = self.spawn_llm(
-            prompt=prompt,
-            name=f"scribe-{self.track_id}-{brief.workstream}",
-            skills=["riptide-review"],
-        )
-        
-        if spawned:
-            return {"posted": True, "spawned": True}
-        else:
-            # Fallback: use assembler directly
-            from .scribe import Scribe
-            scribe = Scribe()
-            with open(findings_path) as f:
-                findings = json.load(f)
-            result = scribe.post_review_with_assembler(
-                owner, repo, pr_number, findings, diagram_url
-            )
-            return result
-    
-    # ── LLM Prompt Builders ─────────────────────────────────────────────────
-    
-    def _build_judge_prompt(self, context: dict, brief: WorkerBrief) -> str:
-        """Build prompt for LLM deep-think analysis."""
-        files_str = "\n".join(
-            f"  - {f.get('filename', '?')} (+{f.get('additions', 0)}/-{f.get('deletions', 0)})"
-            for f in context.get("files_changed", [])[:20]
-        )
-        
-        diff_summary = context.get("diff_raw", "")[:12000]
-        
-        findings = context.get("diff_report", {}).get("findings", [])
-        findings_str = "\n".join(
-            f"- [{f.get('severity', 'info')}] {f.get('category', '?')}: {f.get('message', '')}"
-            for f in findings[:10]
-        )
-        
-        return f"""PR #{brief.inputs.get('pr_number', '?')} in {brief.inputs.get('owner', '?')}/{brief.inputs.get('repo', '?')}
-
-## Context (pre-gathered)
-### Files Changed
-{files_str}
-
-### Diff Summary
-```
-{diff_summary}
-```
-
-### Deterministic Findings
-{findings_str}
-
-## Your Task: Deep Analysis
-Call `skill_view('deep-think')` first, then analyze the diff.
-
-1. Verify each deterministic finding against the actual diff
-2. Find NEW issues the deterministic analysis missed (logic bugs, race conditions, edge cases)
-3. Post 1-3 inline review comments via `gh api repos/O/R/pulls/N/comments`
-4. Write findings to {brief.output_protocol.get("path", "/tmp/findings.json")} as JSON:
-   [{{severity, title, detail, file, line}}]
-
-Rules: Max 3 inline comments. Real issues only. No padding.
-"""
-    
-    def _build_scribe_prompt(self, findings_path: str, owner: str, repo: str, pr_number: int, diagram_url: Optional[str]) -> str:
-        """Build prompt for LLM review summary generation."""
-        diagram_section = f"\n## Architecture Diagram\n[View Diagram]({diagram_url})\n" if diagram_url else ""
-        
-        return f"""## Review Summary Generation
-
-Read findings from {findings_path}, then:
-
-1. Write a concise review summary (max 300 words)
-2. Include: overall verdict, key findings, recommended actions
-3. Post as PR comment via `gh pr comment {pr_number} --repo {owner}/{repo} --body "..."`
-4. Sign off with: `---\n<sub>🤖 Riptide Review via Hermes</sub>`
-{diagram_section}
-"""
-    
-    # ── Default LLM Spawn (fallback) ────────────────────────────────────────
-    
-    def _default_spawn_llm(self, prompt: str, name: str, skills: list[str]) -> bool:
-        """Default LLM spawn — logs that no LLM is available."""
-        import logging
-        log = logging.getLogger("riptide.conductor")
-        log.warning(f"No LLM spawn callback configured for {name}. Using deterministic fallback.")
-        return False
 
 
 # ── Pipeline builder ─────────────────────────────────────────────────────────
@@ -358,11 +233,11 @@ def create_pr_review_pipeline(
     """Create a PR review pipeline for a given PR.
     
     Returns the track with workstreams:
-    1. probe → gather context (deterministic)
-    2. judge → deep-think analysis (LLM-spawned)
-    3. artisan → generate excalidraw diagram (deterministic)
-    4. engine → upload diagram (deterministic)
-    5. scribe → post review (LLM-spawned summary)
+    1. probe → gather context
+    2. judge → evaluate diff, produce findings
+    3. artisan → generate excalidraw diagram
+    4. engine → upload diagram
+    5. scribe → post review + update state
     """
     track = get_track(track_id)
     if not track:
@@ -388,7 +263,7 @@ def create_pr_review_pipeline(
         inputs={"context_path": f"/tmp/pr-{pr_number}-context.json"},
         acceptance={"findings_valid": True},
         role="judge",
-        pipeline=["deep_think", "dedup", "score"],
+        pipeline=["diff_analyzer", "dedup", "score"],
     )
 
     create_workstream(
