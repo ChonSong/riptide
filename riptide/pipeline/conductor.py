@@ -68,7 +68,10 @@ class Conductor:
         """Run a single workstream."""
         # Mark in_progress
         update_workstream(self.track_id, ws_id, status="in_progress")
-        
+
+        # Refresh track state to avoid stale key_facts across workstreams
+        self.track = self._get_track()
+
         # Determine which worker to dispatch
         pipeline = ws.get("pipeline", [])
         role = ws.get("role", "engine")
