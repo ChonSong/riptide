@@ -1,7 +1,7 @@
 # Riptide — Vision-Aligned Long-Horizon Roadmap
 
-**Date:** 2026-08-07
-**Status:** Pillars 1–2 shipped to production (WS-1, WS-2 merged)
+**Date:** 2026-08-08
+**Status:** Pillars 1–2 shipped to production (WS-1, WS-2 merged); WS-3 unified pipeline next; Phase 5 visual verification adopted (WS-6 pre-flight next)
 **Repo:** `github.com/ChonSong/riptide`
 **Related:** GitHub Projects v2 → "Riptide Development" (PVT_kwHOBRbF9s4Bfg5M)
 
@@ -87,6 +87,51 @@
 
 ---
 
+## Visual Verification Pipeline (Phase 5 — ADOPTED 2026-08-08)
+
+**Context:** Research complete → `visual-verification-research.md` at workspace root (landscape matrix, empirical determinism spike, architecture). Goal: prove ONE integrated visual-verification pipeline on **hermes-webui-tests first** (stable single target), then roll to riptide, hermes-webui-extensions, gto-wizard-clone-v2. Deterministic pixel diffing in CI — robust, not flaky.
+
+**Stack (compose, don't reinvent):**
+
+| Layer | Tool | Role |
+|-------|------|------|
+| 1. Deterministic diff | **Playwright `toHaveScreenshot`** (built-in pixelmatch) | Baselines, platform-tagged on `ubuntu-latest` |
+| 2. Self-healing | **refqa** (Python, restored 2026-08-08) | YAML smoke + selector self-healing; NOT pixel assertions |
+| 3. Evidence | **proofshot** | Screenshots/GIF → PR comment |
+| 4. Triage (DEFERRED) | **VRT** + local Ollama VLM | Commit-baseline review server — only if review volume demands |
+
+**Key decisions (from research):**
+- CI runner: **GitHub-hosted `ubuntu-latest`** — standardized fonts/OS kill visual flake; baselines platform-tagged (`chromium-linux`), matching Playwright's per-platform snapshot behavior.
+- hermes-webui is Python + vanilla JS (no build step); **reuse `browser-smoke.yml` agent-free boot pattern** (`server.py` on ephemeral port) — no new serving invention.
+- **`HERMES_WEBUI_SKIP_ONBOARDING=1`** in CI — fresh state lands on the chat shell (empirically verified: without it, all pages render the onboarding screen).
+- **Flake strategy is data-backed:** the only nondeterminism found (spike, 1440×900) is the "Filter conversations…" search input placeholder AA — 1,804px / 0.14%, localized at (93,96). Absorb with `maxDiffPixels: 2000` or mask that region (masking = principled fix).
+- agent-qa (npm) **dropped** — FSL-1.1 constraint; refqa covers the same role (smoke-only mode, reference comparison dormant). Autonoma (BUSL), Lost Pixel (sunsetting), Argos (heavy self-host) eliminated.
+- riptide's proofshotter stays the evidence layer; its `localhost:8788` default already matches the hermes-webui dev target.
+
+### WS-6: Pre-flight (hermes-webui-tests) — NEXT in visual track
+- **Goal:** make the test repo CI-ready. It is **not a git repo yet**; `lib/auth-fixture.ts` hardcodes a session cookie + `:8788`; extensions need `HERMES_WEBUI_EXTENSION_MANIFEST` wiring.
+- **Scope:** `git init` + push as `ChonSong/hermes-webui-tests`; replace hardcoded cookie with CI-safe auth (env-provided or in-process boot); add `.github/workflows/visual.yml` skeleton reusing the browser-smoke boot pattern.
+- **Delegation:** one subagent, branch-based, one PR.
+
+### WS-7: Deterministic visual baselines (CI)
+- **Goal:** first committed baseline suite — Playwright `toHaveScreenshot` on key pages (chat shell, settings, sessions) under `HERMES_WEBUI_SKIP_ONBOARDING=1`.
+- **CI:** checkout → boot `server.py` agent-free → `npx playwright test` with snapshots on `ubuntu-latest`; baselines committed and platform-tagged.
+- **Controls:** `animations: 'disabled'` (default), `caret: 'hide'` (default), `maxDiffPixels: 2000` (or mask) on the search input; `--update-snapshots` on a manual trigger for intentional changes.
+- **Delegation:** one subagent, one PR.
+
+### WS-8: refqa smoke layer + proofshot evidence
+- **Goal:** LLM self-healing smoke tests + visual evidence in the same pipeline.
+- **Scope:** refqa YAML smoke tests for hermes-webui (new — existing shipped YAMLs target archived gto/polytopia apps); proofshot captures wired to the PR comment flow (existing `cli.py`).
+- **Note:** refqa runs at ~30s/step on the free model — gate it to PR-triggered jobs or nightly, not every commit.
+- **Delegation:** one subagent, one PR.
+
+### WS-9: VRT self-hosted review server (DEFERRED / OPTIONAL)
+- **Trigger:** only if commit-baseline review becomes insufficient (large teams, many baselines).
+- **Scope:** VRT docker-compose + local Ollama VLM hybrid compare; reuses existing local AI infra (no GPU needed).
+- **Status:** not scheduled — revisit after WS-7/8 prove out on hermes-webui-tests.
+
+---
+
 ## Execution Rules (per user)
 
 - **One subagent at a time** (no parallel fan-out for implementation).
@@ -113,9 +158,16 @@ WS-3 (NEXT)            → UNIFIED pipeline (Vision 3+4+5):
                          Stage 0 heuristics → Stage 1 bundle →
                          Stage 2 Tier 1 → Stage 3 enrich → Stage 4 commands
                          (needs WS-1, WS-2; absorbs former WS-4/WS-5)
+   ↓
+WS-6 → WS-7 → WS-8     → VISUAL VERIFICATION (Phase 5, adopted 2026-08-08):
+                         pre-flight → Playwright baselines →
+                         refqa smoke + proofshot evidence
+                         (target: hermes-webui-tests first)
+WS-9                    → deferred: VRT review server (only if needed)
 ```
 
 WS-1 → WS-2 → WS-3 have hard dependencies. WS-4/WS-5 are absorbed into WS-3 (no separate PRs).
+Visual track (WS-6→9) is independent of WS-3; WS-6 → WS-7 → WS-8 are sequential, WS-9 gated on demand.
 
 ---
 
