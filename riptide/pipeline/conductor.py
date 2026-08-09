@@ -32,15 +32,6 @@ from .artisan import Artisan
 from .engine import Engine
 from .warden import Warden
 
-# ── Per-stage skill assignments ──────────────────────────────────────────────
-# Loaded via --skill for each Hermes session spawned by the pipeline.
-
-JUDGE_SKILLS = ["deep-think", "brooks-lint", "github-pr-lifecycle"]
-"""Judge stage: deep reasoning + design smell detection + inline comment posting."""
-
-SCRIBE_SKILLS = ["github-pr-lifecycle", "excalidraw"]
-"""Scribe stage: review summary generation + diagram link handling + posting."""
-
 
 class Conductor:
     """Orchestrates workers to complete a track's workstreams.
@@ -216,7 +207,7 @@ class Conductor:
         spawned = self.spawn_llm(
             prompt=prompt,
             name=f"judge-{self.track_id}-{brief.workstream}",
-            skills=JUDGE_SKILLS,
+            skills=["deep-think", "riptide-review"],
         )
         
         if spawned:
@@ -272,7 +263,7 @@ class Conductor:
         spawned = self.spawn_llm(
             prompt=prompt,
             name=f"scribe-{self.track_id}-{brief.workstream}",
-            skills=SCRIBE_SKILLS,
+            skills=["riptide-review"],
         )
         
         if spawned:
