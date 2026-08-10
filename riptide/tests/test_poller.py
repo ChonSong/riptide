@@ -28,6 +28,88 @@ def poller_mod(tmp_db):
     return poller
 
 
+# ── _search_fix_comments ────────────────────────────────────────────────────
+
+
+def _fake_search_result(number, owner="ChonSong", repo="riptide", title="PR"):
+    """Build one gh search prs JSON item."""
+    return {
+        "number": number,
+        "title": title,
+        "repository": {"owner": {"login": owner}, "name": repo},
+        "createdAt": "2026-08-01T00:00:00Z",
+        "body": "",
+        "author": {"login": owner},
+        "commentsCount": 1,
+    }
+
+
+def _search_subprocess_return(items):
+    """Wrap items as subprocess.run return value with JSON stdout."""
+    result = MagicMock()
+    result.returncode = 0
+    result.stdout = __import__("json").dumps(items)
+    result.stderr = ""
+    return result
+
+
+class TestSearchFixComments:
+    def test_search_restricts_to_comments_field(self, poller_mod):
+        """The gh search must pass --match comments so PRs whose *body*
+        contains the phrase (but no comment does) are not matched."""
+        with patch("riptide.poller.subprocess.run") as mock_run, \
+             patch("riptide.poller._get_pr_comments", return_value=[]):
+            mock_run.return_value = _search_subprocess_return([])
+            poller_mod._search_fix_comments()
+        cmd = mock_run.call_args.args[0]
+        assert "--match" in cmd
+        assert cmd[cmd.index("--match") + 1] == "comments"
+
+    def test_search_uses_raised_limit(self, poller_mod):
+        """SEARCH_LIMIT must be passed to gh so results are not capped at
+        the old hard-coded 20 (gh auto-paginates internally up to --limit)."""
+        assert poller_mod.SEARCH_LIMIT > 20
+        with patch("riptide.poller.subprocess.run") as mock_run, \
+             patch("riptide.poller._get_pr_comments", return_value=[]):
+            mock_run.return_value = _search_subprocess_return([])
+            poller_mod._search_fix_comments()
+        cmd = mock_run.call_args.args[0]
+        assert "--limit" in cmd
+        assert cmd[cmd.index("--limit") + 1] == str(poller_mod.SEARCH_LIMIT)
+
+    def test_returns_matching_comment_details(self, poller_mod):
+        """Only comments whose body matches FIX_RE are returned, with the
+        comment ID and PR metadata used downstream by _handle_fix."""
+        item = _fake_search_result(42)
+        comments = [
+            {"id": 9001, "user": {"login": "alice"}, "body": "@riptide-bot fix the poller", "created_at": "2026-08-02T00:00:00Z"},
+            {"id": 9002, "user": {"login": "bob"}, "body": "unrelated comment", "created_at": "2026-08-02T00:00:00Z"},
+        ]
+        with patch("riptide.poller.subprocess.run") as mock_run, \
+             patch("riptide.poller._get_pr_comments", return_value=comments) as mock_comments:
+            mock_run.return_value = _search_subprocess_return([item])
+            matches = poller_mod._search_fix_comments()
+
+        mock_comments.assert_called_once_with("ChonSong", "riptide", 42)
+        assert len(matches) == 1
+        assert matches[0]["comment_id"] == 9001
+        assert matches[0]["commenter"] == "alice"
+        assert matches[0]["pr_key"] == "ChonSong/riptide#42"
+        assert matches[0]["pr_title"] == "PR"
+
+    def test_search_failure_returns_empty(self, poller_mod):
+        """A failing gh search must not raise; the poll cycle just skips."""
+        result = MagicMock()
+        result.returncode = 1
+        result.stdout = ""
+        result.stderr = "rate limit exceeded"
+        with patch("riptide.poller.subprocess.run", return_value=result), \
+             patch("riptide.poller._get_pr_comments") as mock_comments:
+            matches = poller_mod._search_fix_comments()
+        assert matches == []
+        mock_comments.assert_not_called()
+
+
 # ── _is_processed / _mark_processed ─────────────────────────────────────────
 
 

@@ -40,6 +40,11 @@ DB_PATH = DATA_DIR / "metadata.db"
 PROCESSED_TABLE = "poller_processed_comments"
 FIX_RE = re.compile(r"@riptide-bot\s+fix\b(.*)", re.IGNORECASE | re.DOTALL)
 LOOKBACK_DAYS = int(os.environ.get("RIPTIDE_POLLER_LOOKBACK", "3"))
+# How many open PRs to scan per poll. GitHub's search API caps a single
+# response at 100 items; `gh` auto-paginates internally to honor --limit,
+# so a limit above 20 keeps older fix requests from being pushed off the
+# page when many PRs were updated recently.
+SEARCH_LIMIT = int(os.environ.get("RIPTIDE_POLLER_SEARCH_LIMIT", "100"))
 
 
 
@@ -111,7 +116,14 @@ def _has_pending_fix(conn: sqlite3.Connection, pr_key: str) -> bool:
 
 
 def _search_fix_comments(lookback_days: int = LOOKBACK_DAYS) -> list[dict]:
-    """Search open PRs mentioning @riptide-bot fix via gh CLI."""
+    """Search open PRs mentioning @riptide-bot fix via gh CLI.
+
+    --match comments restricts the GitHub search to comments only, so PRs
+    whose body/title merely contains the phrase are not matched (we would
+    otherwise waste API calls fetching their comments and find no FIX_RE
+    match). gh auto-paginates up to --limit, so SEARCH_LIMIT > 20 keeps
+    older fix requests visible even when many PRs were updated recently.
+    """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days))
     cutoff_str = cutoff.strftime("%Y-%m-%d")
 
@@ -121,7 +133,8 @@ def _search_fix_comments(lookback_days: int = LOOKBACK_DAYS) -> list[dict]:
         "--updated", f">={cutoff_str}",
         "--sort", "updated",
         "--order", "desc",
-        "--limit", "20",
+        "--limit", str(SEARCH_LIMIT),
+        "--match", "comments",
         "--json", "number,title,repository,createdAt,body,author,commentsCount",
         f'"@riptide-bot fix"',
     ]
