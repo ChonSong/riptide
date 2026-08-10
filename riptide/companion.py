@@ -32,6 +32,60 @@ from riptide.context_bundle import build_context_bundle, concept_summary
 
 logger = logging.getLogger("riptide.companion")
 
+# Module-level constant for GIF fallback (moved from _static_gif_for_tag for performance)
+TAG_GIF_MAP = {
+    # 🐛 bug
+    "bug fix": "l0HlBO7eyXzSZkJri",
+    "debugging": "3o7TKMt12RVebpyZ0c",
+    "squash bug": "xT0xeJpnrWC4XWblEk",
+    "error crash": "26tn33aiTi1jkl6H6",
+    # ✨ feature
+    "feature launch": "26tOZ42Mg6pbTUPHW",
+    "new feature": "l46Cbqvg6gxGvh2PS",
+    "sparkle celebration": "3o7TKSjRrfIPjeiYxW",
+    "shiny": "l0HlNQ03J5JxX2rGU",
+    # ♻️ refactor
+    "refactor": "3o7qDEq2bMbcbPRQ2c",
+    "code cleanup": "l0HlNQ03J5JxX2rGU",
+    "restructure": "26tOZ42Mg6pbTUPHW",
+    "recycle": "26tn33aiTi1jkl6H6",
+    # 🧹 cleanup
+    "cleaning": "3DnDRfZe2ubQc",
+    "tidying up": "l0HlBO7eyXzSZkJri",
+    "declutter": "3o7TKMt12RVebpyZ0c",
+    "sweep": "l0HlNQ03J5JxX2rGU",
+    # 🔧 config
+    "tools fix": "Y3kQOYHyVZcErGeMYF",
+    "wrench": "3o7qDEq2bMbcbPRQ2c",
+    "mechanic": "l46Cbqvg6gxGvh2PS",
+    "configuration": "l0HlBO7eyXzSZkJri",
+    # 📝 docs
+    "writing notes": "13HgwGsXF0aiGY",
+    "documentation": "3o7TKSjRrfIPjeiYxW",
+    "typing": "l0HlNQ03J5JxX2rGU",
+    "journal": "l46Cbqvg6gxGvh2PS",
+    # 📦 deps
+    "package delivery": "3o6Zt6KHwTY5sxJZE",
+    "shipping box": "l46Cbqvg6gxGvh2PS",
+    "unboxing": "3o7qDEq2bMbcbPRQ2c",
+    "delivery": "26tOZ42Mg6pbTUPHW",
+    # 🧪 test
+    "science experiment": "3o7TKSjRrfIPjeiYxW",
+    "lab test": "l0HlNQ03J5JxX2rGU",
+    "chemistry": "26tOZ42Mg6pbTUPHW",
+    "testing": "l46Cbqvg6gxGvh2PS",
+    # ⏪ revert
+    "rewind": "26tOZ42Mg6pbTUPHW",
+    "go back": "3o7TKMt12RVebpyZ0c",
+    "undo": "l46Cbqvg6gxGvh2PS",
+    "reverse": "l0HlBO7eyXzSZkJri",
+    # ⚡ perf
+    "lightning fast": "26tOZ42Mg6pbTUPHW",
+    "speed": "3o7qDEq2bMbcbPRQ2c",
+    "fast": "l0HlBO7eyXzSZkJri",
+    "turbo": "l46Cbqvg6gxGvh2PS",
+}
+
 # ── Emoji classification ─────────────────────────────────────────────────────
 
 EMOJI_MAP = {
@@ -150,33 +204,106 @@ def select_gif(emoji: str, pr_title: str = "", changed_files: list[dict] = None)
     Select a GIF URL based on PR mood and content relevance.
     
     Hybrid LLM + Python approach:
-    1. Python: Generate candidate tags from PR title
+    1. LLM: Generate search term from PR title (semantic understanding)
     2. Python: Fetch candidate GIFs from Kilpy/Giphy/Tenor
-    3. LLM: qwen2.5:7b scores each GIF's relevance to the PR
-    4. Python: Pick highest-scoring GIF
+    3. LLM: Pick best GIF by semantic relevance
+    4. Python: Return URL
     
     Fallback chain (if LLM down or no API keys):
-    - Kilpy → Giphy → Tenor → static map
+    - Python rigid tag → Kilpy → Giphy → Tenor → static map
     """
     if not pr_title:
         return GIFI_MAP.get(emoji, GIFI_MAP["✨"])
     
-    best_tag = _pick_best_tag(emoji, pr_title, changed_files)
+    # Step 1: LLM generates search term (or fallback to rigid tag)
+    search_term = _generate_search_term_with_llm(pr_title, emoji, changed_files)
     
-    # Collect candidate GIFs from all available sources
-    candidates = _fetch_gif_candidates(best_tag)
+    # Step 2: Fetch candidates from all APIs
+    candidates = _fetch_gif_candidates(search_term)
     
     if not candidates:
-        return _static_gif_for_tag(emoji, best_tag)
+        return _static_gif_for_tag(emoji, search_term)
     
-    # Try LLM scoring for best relevance
+    # Step 3: LLM picks best GIF from candidates
     best_url = _score_gifs_with_llm(pr_title, candidates)
     if best_url:
         return best_url
     
-    # Fallback: deterministic pick from candidates
-    idx = zlib.crc32(best_tag.encode()) % len(candidates)
+    # Step 4: Fallback deterministic pick
+    idx = zlib.crc32(search_term.encode()) % len(candidates)
     return candidates[idx]["url"]
+
+
+def _generate_search_term_with_llm(pr_title: str, emoji: str, changed_files: list[dict] | None = None) -> str:
+    """Use qwen2.5:7b to generate the best search term for this PR.
+    
+    Returns a search term like 'login flow bug fix animation' or 'refactoring code cleanup'.
+    Falls back to rigid tag if LLM unavailable.
+    """
+    try:
+        import urllib.request
+        
+        model = os.environ.get("RIPTIDE_COMPANION_MODEL", "qwen2.5-coder:7b")
+        base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+        
+        # Build context for LLM
+        file_types = []
+        if changed_files:
+            for f in changed_files:
+                fname = f.get("filename", "")
+                if fname.endswith(".py"):
+                    file_types.append("python")
+                elif fname.endswith(".js") or fname.endswith(".ts"):
+                    file_types.append("javascript")
+                elif fname.endswith(".md"):
+                    file_types.append("docs")
+                elif fname.endswith(".yml") or fname.endswith(".yaml"):
+                    file_types.append("config")
+        
+        context = ""
+        if file_types:
+            context = f"\nFile types changed: {', '.join(set(file_types))}"
+        
+        prompt = f"""PR title: "{pr_title}"{context}
+
+Generate ONE search term (2-5 words) to find a GIF that represents this PR.
+Think about: what visual metaphor matches this change? What emotion/mood does it convey?
+Examples:
+- "fix: auth bug" → "login security fix"
+- "feat: dashboard" → "data visualization chart"
+- "refactor: service layer" → "code restructuring cleanup"
+- "docs: README" → "writing documentation"
+- "perf: optimize queries" → "database speed fast"
+
+Reply with ONLY the search term, nothing else."""
+        
+        url = f"{base_url}/api/generate"
+        payload = json.dumps({
+            "model": model,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": 0.3,
+                "num_predict": 15,
+            },
+        }).encode()
+        
+        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        
+        response = data.get("response", "").strip().split("\n")[0]
+        
+        # Validate: should be 2-5 words, allow alphanumeric + spaces + hyphens + colons
+        words = response.split()
+        if 2 <= len(words) <= 5 and re.match(r'^[\w\s\-:]+$', response):
+            return response
+        
+        # Fallback to rigid tag
+        return _pick_best_tag(emoji, pr_title, changed_files or [])
+    except Exception as e:
+        logger.debug("LLM search term generation failed: %s", e)
+        return _pick_best_tag(emoji, pr_title, changed_files or [])
 
 
 def _fetch_gif_candidates(tag: str, limit_per_source: int = 3) -> list[dict]:
@@ -192,8 +319,8 @@ def _fetch_gif_candidates(tag: str, limit_per_source: int = 3) -> list[dict]:
                     "title": gif.get("title", ""),
                     "source": "kilpy",
                 })
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Kilpy GIF search failed: %s", e)
     
     giphy_key = os.environ.get("GIPHY_API_KEY", "")
     if giphy_key:
@@ -204,8 +331,8 @@ def _fetch_gif_candidates(tag: str, limit_per_source: int = 3) -> list[dict]:
                     "title": gif.get("title", ""),
                     "source": "giphy",
                 })
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Giphy GIF search failed: %s", e)
     
     tenor_key = os.environ.get("TENOR_API_KEY", "")
     if tenor_key:
@@ -216,8 +343,8 @@ def _fetch_gif_candidates(tag: str, limit_per_source: int = 3) -> list[dict]:
                     "title": gif.get("title", ""),
                     "source": "tenor",
                 })
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Tenor GIF search failed: %s", e)
     
     return candidates
 
@@ -265,15 +392,16 @@ Criteria: semantic relevance to the PR title, not just keyword match."""
         
         response = data.get("response", "").strip()
         
-        # Parse the number from response
-        for char in response:
-            if char.isdigit():
-                idx = int(char) - 1
-                if 0 <= idx < len(candidates):
-                    return candidates[idx]["url"]
+        # Parse the number from response (multi-digit safe)
+        match = re.search(r'\d+', response)
+        if match:
+            idx = int(match.group()) - 1
+            if 0 <= idx < len(candidates):
+                return candidates[idx]["url"]
         
         return None
-    except Exception:
+    except Exception as e:
+        logger.debug("LLM GIF scoring failed: %s", e)
         return None
 
 
@@ -283,7 +411,8 @@ def _search_kilpy_candidates(tag: str, app_key: str, limit: int = 3) -> list[dic
     import urllib.parse
     
     encoded_tag = urllib.parse.quote(tag)
-    url = f"https://api.klipy.com/api/v1/{app_key}/gifs/search?page=1&per_page={limit}&q={encoded_tag}"
+    encoded_key = urllib.parse.quote(app_key, safe='')
+    url = f"https://api.klipy.com/api/v1/{encoded_key}/gifs/search?page=1&per_page={limit}&q={encoded_tag}"
     
     req = urllib.request.Request(url, headers={
         "Accept": "application/json",
@@ -315,7 +444,8 @@ def _search_giphy_candidates(tag: str, api_key: str, limit: int = 3) -> list[dic
     import urllib.parse
     
     encoded_tag = urllib.parse.quote(tag)
-    url = f"https://api.giphy.com/v1/gifs/search?api_key={api_key}&q={encoded_tag}&limit={limit}&rating=g"
+    encoded_key = urllib.parse.quote(api_key, safe='')
+    url = f"https://api.giphy.com/v1/gifs/search?api_key={encoded_key}&q={encoded_tag}&limit={limit}&rating=g"
     
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=10) as resp:
@@ -338,7 +468,8 @@ def _search_tenor_candidates(tag: str, api_key: str, limit: int = 3) -> list[dic
     import urllib.parse
     
     encoded_tag = urllib.parse.quote(tag)
-    url = f"https://tenor.googleapis.com/v2/search?q={encoded_tag}&key={api_key}&limit={limit}&contentfilter=medium"
+    encoded_key = urllib.parse.quote(api_key, safe='')
+    url = f"https://tenor.googleapis.com/v2/search?q={encoded_tag}&key={encoded_key}&limit={limit}&contentfilter=medium"
     
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=10) as resp:
@@ -361,60 +492,7 @@ def _static_gif_for_tag(emoji: str, tag: str) -> str:
     Each unique tag gets its own GIF — so "bug fix" and "debugging"
     produce different results even within the same emoji.
     """
-    # Canonical tag → Giphy ID mapping
-    TAG_GIF_MAP = {
-        # 🐛 bug
-        "bug fix": "l0HlBO7eyXzSZkJri",
-        "debugging": "3o7TKMt12RVebpyZ0c",
-        "squash bug": "xT0xeJpnrWC4XWblEk",
-        "error crash": "26tn33aiTi1jkl6H6",
-        # ✨ feature
-        "feature launch": "26tOZ42Mg6pbTUPHW",
-        "new feature": "l46Cbqvg6gxGvh2PS",
-        "sparkle celebration": "3o7TKSjRrfIPjeiYxW",
-        "shiny": "l0HlNQ03J5JxX2rGU",
-        # ♻️ refactor
-        "refactor": "3o7qDEq2bMbcbPRQ2c",
-        "code cleanup": "l0HlNQ03J5JxX2rGU",
-        "restructure": "26tOZ42Mg6pbTUPHW",
-        "recycle": "26tn33aiTi1jkl6H6",
-        # 🧹 cleanup
-        "cleaning": "3DnDRfZe2ubQc",
-        "tidying up": "l0HlBO7eyXzSZkJri",
-        "declutter": "3o7TKMt12RVebpyZ0c",
-        "sweep": "l0HlNQ03J5JxX2rGU",
-        # 🔧 config
-        "tools fix": "Y3kQOYHyVZcErGeMYF",
-        "wrench": "3o7qDEq2bMbcbPRQ2c",
-        "mechanic": "l46Cbqvg6gxGvh2PS",
-        "configuration": "l0HlBO7eyXzSZkJri",
-        # 📝 docs
-        "writing notes": "13HgwGsXF0aiGY",
-        "documentation": "3o7TKSjRrfIPjeiYxW",
-        "typing": "l0HlNQ03J5JxX2rGU",
-        "journal": "l46Cbqvg6gxGvh2PS",
-        # 📦 deps
-        "package delivery": "3o6Zt6KHwTY5sxJZE",
-        "shipping box": "l46Cbqvg6gxGvh2PS",
-        "unboxing": "3o7qDEq2bMbcbPRQ2c",
-        "delivery": "26tOZ42Mg6pbTUPHW",
-        # 🧪 test
-        "science experiment": "3o7TKSjRrfIPjeiYxW",
-        "lab test": "l0HlNQ03J5JxX2rGU",
-        "chemistry": "26tOZ42Mg6pbTUPHW",
-        "testing": "l46Cbqvg6gxGvh2PS",
-        # ⏪ revert
-        "rewind": "26tOZ42Mg6pbTUPHW",
-        "go back": "3o7TKMt12RVebpyZ0c",
-        "undo": "l46Cbqvg6gxGvh2PS",
-        "reverse": "l0HlBO7eyXzSZkJri",
-        # ⚡ perf
-        "lightning fast": "26tOZ42Mg6pbTUPHW",
-        "speed": "3o7qDEq2bMbcbPRQ2c",
-        "fast": "l0HlBO7eyXzSZkJri",
-        "turbo": "l46Cbqvg6gxGvh2PS",
-    }
-    
+    # Use module-level constant (moved for performance)
     gif_id = TAG_GIF_MAP.get(tag)
     if gif_id:
         return f"https://media.giphy.com/media/{gif_id}/giphy.gif"
