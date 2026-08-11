@@ -115,15 +115,50 @@ class Labeler:
         return False
 
     def _evaluate_condition(self, condition: str, context: dict) -> bool:
-        """Evaluate a simple condition expression."""
+        """Evaluate a simple condition expression safely without eval().
+
+        Supports:
+          - `loc <op> <number>` (e.g., `loc >= 100`)
+          - `<number> <op> loc <op> <number>` (e.g., `10 <= loc < 100`)
+          - Boolean conditions: no_repro_steps, touches_core_path,
+            confidence < 0.7, pr.draft == true, inactive_days >= 30.
+        """
         if not condition:
             return True
         loc = context.get("loc", 0)
+
+        # Safe parsing for `loc <op> <number>` and `<number> <op> loc <op> <number>`
         if "loc" in condition:
-            try:
-                return eval(condition, {"loc": loc, "__builtins__": {}})
-            except:
-                return False
+            import re
+            # Try compound: `10 <= loc < 100`
+            m = re.match(r"^\s*(\d+)\s*(<=|>=|!=|<|>|==)\s*loc\s*(<=|>=|!=|<|>|==)\s*(\d+)\s*$", condition)
+            if m:
+                left_val, left_op, right_op, right_val = int(m.group(1)), m.group(2), m.group(3), int(m.group(4))
+                ops = {
+                    "<": lambda a, b: a < b,
+                    "<=": lambda a, b: a <= b,
+                    ">": lambda a, b: a > b,
+                    ">=": lambda a, b: a >= b,
+                    "==": lambda a, b: a == b,
+                    "!=": lambda a, b: a != b,
+                }
+                return ops[left_op](left_val, loc) and ops[right_op](loc, right_val)
+            # Try simple: `loc <op> <number>`
+            m = re.match(r"^\s*loc\s*(<=|>=|!=|<|>|==)\s*(\d+)\s*$", condition)
+            if m:
+                op, value = m.group(1), int(m.group(2))
+                ops = {
+                    "<": lambda a, b: a < b,
+                    "<=": lambda a, b: a <= b,
+                    ">": lambda a, b: a > b,
+                    ">=": lambda a, b: a >= b,
+                    "==": lambda a, b: a == b,
+                    "!=": lambda a, b: a != b,
+                }
+                return ops[op](loc, value)
+            # If pattern doesn't match, fall through to safe defaults
+            return False
+
         if condition == "no_repro_steps":
             return not context.get("has_repro_steps", False)
         if condition == "touches_core_path":
