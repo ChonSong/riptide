@@ -18,6 +18,7 @@ import logging
 import threading
 import traceback
 import subprocess
+import requests
 from pathlib import Path
 from typing import Optional
 
@@ -249,8 +250,31 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
     ):
         repo_default_branch = repo.get("default_branch", "main")
         if pr.get("base", {}).get("ref") == repo_default_branch:
+            # CI gating: check that CI passed before auto-deploying
+            head_sha = pr.get("head", {}).get("sha", "")
+            ci_passed = False
+            try:
+                github = github_client() if GITHUB_PRIVATE_KEY_PATH else None
+                if github and head_sha:
+                    # Check combined status for the commit
+                    status_url = f"{github.base_url}/repos/{repo_full}/commits/{head_sha}/status"
+                    resp = requests.get(status_url, headers=github._headers(installation_id), timeout=15)
+                    resp.raise_for_status()
+                    status_data = resp.json()
+                    state = status_data.get("state", "")
+                    ci_passed = state == "success"
+                    log.info(f"[{delivery_id}] CI status for {head_sha[:12]}: {state}")
+            except Exception as e:
+                log.warning(f"[{delivery_id}] Could not check CI status: {e}")
+
+            if not ci_passed:
+                log.warning(
+                    f"[{delivery_id}] Auto-deploy skipped — CI not green (or status unknown) for {head_sha[:12]}"
+                )
+                return Response(status_code=200)
+
             log.info(
-                f"[{delivery_id}] PR #{pr_number} merged into {repo_full}@{repo_default_branch} — triggering auto-deploy"
+                f"[{delivery_id}] PR #{pr_number} merged into {repo_full}@{repo_default_branch} — CI green, triggering auto-deploy"
             )
             deploy_script = os.environ.get(
                 "RIPTIDE_DEPLOY_SCRIPT", "/home/sc/workspace/riptide/scripts/deploy.sh"
