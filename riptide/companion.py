@@ -520,50 +520,6 @@ class Companion:
             logger.error("SHA update failed: %s", e)
             return False
 
-    # Per-repo locks to prevent concurrent graphify updates and race conditions with _get_graph_context
-    _graphify_locks: dict[str, threading.Lock] = {}
-    _graphify_locks_lock = threading.Lock()
-    # Concurrency cap: prevent unbounded thread spawning under burst load
-    _graphify_semaphore = threading.Semaphore(4)  # Max 4 concurrent graphify updates
-
-    def _refresh_graphify(self, owner: str, repo: str) -> None:
-        """Refresh graphify data in a background thread to avoid blocking the webhook handler."""
-        repo_workspace = Path(os.environ.get("RIPTIDE_REPO_DIR", str(Path.home() / "workspace"))) / repo
-        repo_key = f"{owner}/{repo}"
-
-        # Per-repo lock: prevents concurrent updates and race with _get_graph_context
-        with self._graphify_locks_lock:
-            if repo_key not in self._graphify_locks:
-                self._graphify_locks[repo_key] = threading.Lock()
-        lock = self._graphify_locks[repo_key]
-
-        def _run():
-            # Acquire semaphore to cap concurrency
-            with self._graphify_semaphore:
-                try:
-                    if repo_workspace.is_dir() and (repo_workspace / "graphify-out").is_dir():
-                        # Acquire lock to prevent concurrent updates and race with reads
-                        with lock:
-                            result = subprocess.run(
-                                ["graphify", "update", "."],
-                                capture_output=True, text=True, timeout=30,
-                                cwd=str(repo_workspace),
-                            )
-                            if result.returncode == 0:
-                                logger.info("Graphify updated for %s/%s", owner, repo)
-                            else:
-                                logger.warning("Graphify update stderr for %s/%s: %s", owner, repo, result.stderr[:200])
-                    else:
-                        logger.debug("No graphify-out dir at %s — skipping update", repo_workspace)
-                except FileNotFoundError:
-                    logger.debug("graphify binary not found — skipping update")
-                except Exception as e:
-                    logger.warning("Graphify update failed for %s/%s: %s", owner, repo, e)
-
-        if self.enable_graphify:
-            t = threading.Thread(target=_run, daemon=True, name=f"graphify-refresh-{owner}-{repo}")
-            t.start()
-
     def _execute(self, installation_id, owner, repo, pr_number, title, author, changed_files):
         full_name = f"{owner}/{repo}"
 
@@ -571,8 +527,26 @@ class Companion:
             logger.info("Skipped (user) %s#%d", full_name, pr_number)
             return
 
-        # Refresh graphify data in background thread to avoid blocking webhook handler
-        self._refresh_graphify(owner, repo)
+        # Refresh graphify data before analyzing — cheap AST-only update
+        if self.enable_graphify:
+            try:
+                repo_workspace = Path(os.environ.get("RIPTIDE_REPO_DIR", str(Path.home() / "workspace"))) / repo
+                if repo_workspace.is_dir() and (repo_workspace / "graphify-out").is_dir():
+                    result = subprocess.run(
+                        ["graphify", "update", "."],
+                        capture_output=True, text=True, timeout=30,
+                        cwd=str(repo_workspace),
+                    )
+                    if result.returncode == 0:
+                        logger.info("Graphify updated for %s/%s", owner, repo)
+                    else:
+                        logger.warning("Graphify update stderr for %s/%s: %s", owner, repo, result.stderr[:200])
+                else:
+                    logger.debug("No graphify-out dir at %s — skipping update", repo_workspace)
+            except FileNotFoundError:
+                logger.debug("graphify binary not found — skipping update")
+            except Exception as e:
+                logger.warning("Graphify update failed for %s/%s: %s", owner, repo, e)
 
         # Get PR head SHA for change tracking
         pr_details = None
