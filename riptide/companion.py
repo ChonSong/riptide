@@ -520,19 +520,12 @@ class Companion:
             logger.error("SHA update failed: %s", e)
             return False
 
-    def _execute(self, installation_id, owner, repo, pr_number, title, author, changed_files):
-        full_name = f"{owner}/{repo}"
+    def _refresh_graphify(self, owner: str, repo: str) -> None:
+        """Refresh graphify data in a background thread to avoid blocking the webhook handler."""
+        repo_workspace = Path(os.environ.get("RIPTIDE_REPO_DIR", str(Path.home() / "workspace"))) / repo
 
-        if self._is_skipped(owner, repo, pr_number):
-            logger.info("Skipped (user) %s#%d", full_name, pr_number)
-            return
-
-        # Refresh graphify data before analyzing — cheap AST-only update
-        if self.enable_graphify:
+        def _run():
             try:
-                import subprocess
-                from pathlib import Path
-                repo_workspace = Path.home() / "workspace" / repo
                 if repo_workspace.is_dir() and (repo_workspace / "graphify-out").is_dir():
                     result = subprocess.run(
                         ["graphify", "update", "."],
@@ -540,15 +533,29 @@ class Companion:
                         cwd=str(repo_workspace),
                     )
                     if result.returncode == 0:
-                        logger.info("Graphify updated for %s", repo)
+                        logger.info("Graphify updated for %s/%s", owner, repo)
                     else:
-                        logger.warning("Graphify update stderr for %s: %s", repo, result.stderr[:200])
+                        logger.warning("Graphify update stderr for %s/%s: %s", owner, repo, result.stderr[:200])
                 else:
                     logger.debug("No graphify-out dir at %s — skipping update", repo_workspace)
             except FileNotFoundError:
                 logger.debug("graphify binary not found — skipping update")
             except Exception as e:
-                logger.warning("Graphify update failed for %s: %s", repo, e)
+                logger.warning("Graphify update failed for %s/%s: %s", owner, repo, e)
+
+        if self.enable_graphify:
+            t = threading.Thread(target=_run, daemon=True, name=f"graphify-refresh-{owner}-{repo}")
+            t.start()
+
+    def _execute(self, installation_id, owner, repo, pr_number, title, author, changed_files):
+        full_name = f"{owner}/{repo}"
+
+        if self._is_skipped(owner, repo, pr_number):
+            logger.info("Skipped (user) %s#%d", full_name, pr_number)
+            return
+
+        # Refresh graphify data in background thread to avoid blocking webhook handler
+        self._refresh_graphify(owner, repo)
 
         # Get PR head SHA for change tracking
         pr_details = None
