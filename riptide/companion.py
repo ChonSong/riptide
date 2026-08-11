@@ -530,9 +530,7 @@ class Companion:
         # Refresh graphify data before analyzing — cheap AST-only update
         if self.enable_graphify:
             try:
-                import subprocess
-                from pathlib import Path
-                repo_workspace = Path.home() / "workspace" / repo
+                repo_workspace = Path(os.environ.get("RIPTIDE_REPO_DIR") or str(Path.home() / "workspace")) / repo
                 if repo_workspace.is_dir() and (repo_workspace / "graphify-out").is_dir():
                     result = subprocess.run(
                         ["graphify", "update", "."],
