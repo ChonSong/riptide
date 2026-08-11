@@ -108,7 +108,8 @@ Cron (every 10 min)
 ```
 riptide/
 ├── github_app.py      # JWT auth, GitHub API client
-├── companion.py       # Bot 1: TL;DR + ELI5 + ProofShot comment generator
+├── companion.py       # Bot 1: TL;DR + ELI5 + GIF reaction + ProofShot comment
+├── orchestrator.py    # T0: classify PR → dispatch to T1/T2/T3 tiers
 ├── deepthink.py       # Bot 2: Cron polling + Hermes session spawner
 ├── review_pipeline.py # Hybrid review: templates + deepthink + validation
 ├── proofshotter.py    # Bot 3: Cron-polled visual verification
