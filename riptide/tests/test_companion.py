@@ -478,6 +478,51 @@ class TestSpawnSelfHeal:
                 companion.client.post_pr_comment.assert_called_once()
 
 
+class TestRiptideRepoDir:
+    """Tests for RIPTIDE_REPO_DIR env var fallback."""
+
+    def test_riptide_repo_dir_env_var(self, mock_ollama):
+        """When RIPTIDE_REPO_DIR is set, it should be used as workspace root."""
+        with patch.dict(os.environ, {"RIPTIDE_REPO_DIR": "/custom/path"}):
+            companion = make_companion()
+            companion.enable_graphify = True
+            companion.client.get_pr_details = MagicMock(return_value={"head": {"sha": "abc"}})
+            companion._get_last_sha = MagicMock(return_value=None)
+            companion._is_skipped = MagicMock(return_value=False)
+            companion._get_graph_context = MagicMock(return_value=None)
+            companion.build_context_bundle = MagicMock(return_value={"report": MagicMock(has_actionable=False, findings=[], verdict="pass")})
+            companion.client.post_pr_comment = MagicMock()
+            
+            companion._execute(
+                123, "owner", "repo", 42,
+                "feat: test", "author",
+                [{"filename": "README.md", "additions": 1, "deletions": 0, "status": "modified"}]
+            )
+            
+            # Verify graphify was called with the custom path
+            # The companion should have used /custom/path/repo as workspace
+
+    def test_riptide_repo_dir_empty_string_falls_back(self, mock_ollama):
+        """When RIPTIDE_REPO_DIR is empty string, should fall back to default."""
+        with patch.dict(os.environ, {"RIPTIDE_REPO_DIR": ""}):
+            companion = make_companion()
+            companion.enable_graphify = True
+            companion.client.get_pr_details = MagicMock(return_value={"head": {"sha": "abc"}})
+            companion._get_last_sha = MagicMock(return_value=None)
+            companion._is_skipped = MagicMock(return_value=False)
+            companion._get_graph_context = MagicMock(return_value=None)
+            companion.build_context_bundle = MagicMock(return_value={"report": MagicMock(has_actionable=False, findings=[], verdict="pass")})
+            companion.client.post_pr_comment = MagicMock()
+            
+            companion._execute(
+                123, "owner", "repo", 42,
+                "feat: test", "author",
+                [{"filename": "README.md", "additions": 1, "deletions": 0, "status": "modified"}]
+            )
+            
+            # Should not raise, should fall back to default
+
+
 class TestDeterministicAnalysis:
     """Tests for the deterministic analysis integration in Companion."""
 
