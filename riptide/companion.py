@@ -550,8 +550,7 @@ class Companion:
             except Exception as e:
                 logger.warning("Graphify update failed for %s: %s", repo, e)
 
-        # Get PR head SHA for change tracking
-        pr_details = None
+        # Attempt to fetch current PR head SHA for change tracking
         current_sha = None
         try:
             pr_details = self.client.get_pr_details(installation_id, owner, repo, pr_number)
