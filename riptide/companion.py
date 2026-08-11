@@ -145,37 +145,42 @@ def _pick_best_tag(emoji: str, pr_title: str, changed_files: list[dict] = None) 
     return top_tags[idx]
 
 
-def select_gif(emoji: str, pr_title: str = "", changed_files: list[dict] = None) -> str:
+def select_gif(emoji: str, pr_title: str = "", changed_files: list[dict] = None, sha: str | None = None) -> str:
     """
     Select a GIF URL based on PR mood and content relevance.
-    
+
     Hybrid LLM + Python approach:
     1. Python: Generate candidate tags from PR title
     2. Python: Fetch candidate GIFs from Kilpy/Giphy/Tenor
     3. LLM: qwen2.5:7b scores each GIF's relevance to the PR
     4. Python: Pick highest-scoring GIF
-    
+
     Fallback chain (if LLM down or no API keys):
     - Kilpy → Giphy → Tenor → static map
+
+    sha: when provided, used as deterministic seed so the same PR
+         content always produces the same GIF (re-sync safe).
     """
     if not pr_title:
         return GIFI_MAP.get(emoji, GIFI_MAP["✨"])
-    
+
     best_tag = _pick_best_tag(emoji, pr_title, changed_files)
-    
+
     # Collect candidate GIFs from all available sources
     candidates = _fetch_gif_candidates(best_tag)
-    
+
     if not candidates:
         return _static_gif_for_tag(emoji, best_tag)
-    
+
     # Try LLM scoring for best relevance
     best_url = _score_gifs_with_llm(pr_title, candidates)
     if best_url:
         return best_url
-    
+
     # Fallback: deterministic pick from candidates
-    idx = zlib.crc32(best_tag.encode()) % len(candidates)
+    # Use SHA as seed when provided (re-sync safe), else tag-based
+    seed = sha if sha else best_tag
+    idx = zlib.crc32(seed.encode()) % len(candidates)
     return candidates[idx]["url"]
 
 
@@ -874,7 +879,8 @@ class Companion:
 
                 body = self._format_comment(emoji, author, tldr, graph_context, eli5, ui_files,
                                             owner=owner, repo=repo, pr_number=pr_number,
-                                            title=title, files=files, is_delta=is_delta)
+                                            title=title, files=files, is_delta=is_delta,
+                                            sha=current_sha)
                 try:
                     self.client.post_pr_comment(installation_id, owner, repo, pr_number, body)
                     logger.info("Posted TLDR (LLM fallback) for %s#%d", full_name, pr_number)
@@ -958,7 +964,8 @@ class Companion:
             enriched_body = self._format_comment(emoji, author, tldr, graph_context, eli5, ui_files,
                                                  owner=owner, repo=repo, pr_number=pr_number,
                                                  title=title, files=files, is_delta=is_delta,
-                                                 deterministic_report=deterministic_report, enriched=True)
+                                                 deterministic_report=deterministic_report, enriched=True,
+                                                 sha=current_sha)
             try:
                 self.client.update_pr_comment(installation_id, owner, repo, comment_id, enriched_body)
                 logger.info("Enriched Tier 2 for %s#%d comment_id=%s", full_name, pr_number, comment_id)
@@ -971,7 +978,8 @@ class Companion:
             body = self._format_comment(emoji, author, tldr, graph_context, eli5, ui_files,
                                         owner=owner, repo=repo, pr_number=pr_number,
                                         title=title, files=files, is_delta=is_delta,
-                                        deterministic_report=deterministic_report)
+                                        deterministic_report=deterministic_report,
+                                        sha=current_sha)
             try:
                 self.client.post_pr_comment(installation_id, owner, repo, pr_number, body)
                 logger.info("Posted TLDR for %s#%d", full_name, pr_number)
@@ -1329,10 +1337,12 @@ ELI5:"""
 
     def _format_comment(self, emoji, author, tldr, graph_context, eli5=None, ui_files=None,
                         owner=None, repo=None, pr_number=None, title=None, files=None, is_delta=False,
-                        deterministic_report: DiffReport | None = None, enriched: bool = False):
+                        deterministic_report: DiffReport | None = None, enriched: bool = False,
+                        sha: str | None = None):
         """
         Build the Markdown comment body.
         Uses deterministic findings if available, otherwise falls back to legacy format.
+        sha: commit SHA for deterministic GIF selection (re-sync safe).
         """
         prefix = "🔄 " if is_delta else ""
 
@@ -1359,7 +1369,7 @@ ELI5:"""
             parts.append(f"\n**📸 ProofShot Required**\nUI files changed: {ui_names}\nPlease run ProofShot visual verification before merging.")
 
         # GIF reaction
-        gif_url = select_gif(emoji, title or "", files or [])
+        gif_url = select_gif(emoji, title or "", files or [], sha=sha)
         parts.append(f"\n\n![{emoji}]({gif_url})")
 
         # Bot 2 status footer
