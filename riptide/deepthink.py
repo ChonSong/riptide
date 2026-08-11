@@ -133,6 +133,28 @@ def handle_review_command(
     total_loc = additions + deletions
     head_sha = pr_details.get("head", {}).get("sha", "")
 
+    # Authorization gate: the COMMENTER must be the PR author, the repo owner,
+    # or OUR_USERNAME. This prevents unauthorized users from spawning
+    # expensive deep-think sessions.
+    if commenter != OUR_USERNAME and commenter != author and commenter != owner:
+        log.info(
+            "Unauthorized review attempt on %s/%s#%d by %s (author=%s, owner=%s)",
+            owner, repo, pr_number, commenter, author, owner,
+        )
+        return (
+            f"🚫 **Not authorized.** Only the PR author (@{author}), the repo "
+            f"owner (@{owner}), or @{OUR_USERNAME} can trigger `@riptide-bot review` "
+            f"on this PR."
+        )
+
+    # Dedup guard: skip if this PR was reviewed in the last 24 hours
+    if _was_reviewed_today(owner, repo, pr_number):
+        log.info("Skipping %s/%s#%d — reviewed in last 24h", owner, repo, pr_number)
+        return (
+            f"⏭️ **Already reviewed.** PR #{pr_number} was reviewed in the last "
+            f"24 hours. Use `@riptide-bot review` again after 24h for a fresh review."
+        )
+
     try:
         _spawn_deepthink(owner, repo, pr_number, title, author, total_loc, head_sha)
     except Exception as e:
