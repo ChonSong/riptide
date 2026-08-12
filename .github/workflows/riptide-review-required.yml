@@ -56,8 +56,13 @@ jobs:
           ISSUE_COMMENTS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate 2>/dev/null || echo "[]")
 
           # Find the most recent deep-think review by riptide-review[bot]
+          # OR by any user if the review contains deep-think markers
+          # (Hermes sessions post as the triggering user, not the bot)
           REVIEW=$(echo "${ISSUE_COMMENTS}" | jq '
-            [.[] | select(.user.login == "riptide-review[bot]" and (.body | test("## 🎯 Summary|## 🔍 Findings"; "i")))]
+            [.[] | select(
+              (.user.login == "riptide-review[bot]" or
+               (.body | test("## 🎯 Summary|## 🔍 Findings"; "i")))
+            )]
             | sort_by(.created_at)
             | last
           ')

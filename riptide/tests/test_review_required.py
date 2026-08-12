@@ -42,6 +42,21 @@ class TestDeepThinkReviewDetection:
         )
         assert is_deep_think, "Deep-think review should match"
 
+    def test_deep_think_from_any_user_matches(self):
+        """Deep-think review from any user (not just bot) should match."""
+        review_comment = {
+            "id": 4,
+            "user": {"login": "ChonSong"},  # Not the bot
+            "body": "## 🎯 Summary\n\n1 issue(s) found\n\n## 🔍 Findings\n\n| 🟡 warning | `foo.py` | 10 | Bug |",
+        }
+        body = review_comment["body"]
+        import re
+
+        is_deep_think = bool(
+            re.search(r"## 🎯 Summary|## 🔍 Findings", body, re.IGNORECASE)
+        )
+        assert is_deep_think, "Deep-think review from any user should match"
+
     def test_clean_review_matches(self):
         """Clean deep-think review should still match (no findings)."""
         review_comment = {
