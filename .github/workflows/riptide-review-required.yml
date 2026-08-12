@@ -33,6 +33,18 @@ jobs:
               echo "Skipping — comment is not on a PR"
               exit 0
             fi
+
+            # Only process comments that might affect review state:
+            #   - @riptide-bot review command
+            #   - Comments from riptide-review[bot] itself (review posted)
+            COMMENT_BODY="${{ github.event.comment.body }}"
+            COMMENT_USER="${{ github.event.comment.user.login }}"
+            if ! echo "${COMMENT_BODY}" | grep -q "@riptide-bot review"; then
+              if [ "${COMMENT_USER}" != "riptide-review[bot]" ]; then
+                echo "Skipping — comment is not review-related"
+                exit 0
+              fi
+            fi
           fi
 
           echo "Checking for full Riptide review on PR #${PR_NUMBER}..."
@@ -64,9 +76,11 @@ jobs:
 
           echo "✅ Full Riptide review found (comment #${REVIEW_ID})"
 
-          # Check if the review has findings (🔴 critical or 🟡 warning)
+          # Check if the review has findings (🔴 critical or 🟡 warning in findings table)
+          # Match only as table row markers: "| 🔴 " or "| 🟡 " to avoid false positives
+          # from prose like "No 🔴 issues found"
           HAS_FINDINGS=$(echo "${REVIEW}" | jq -r '
-            if (.body | test("🔴|🟡"; "i")) then "true" else "false" end
+            if (.body // "" | test("\\|[\\s]*🔴\\|[\\s]*critical|\\|[\\s]*🟡\\|[\\s]*warning"; "i")) then "true" else "false" end
           ')
 
           if [ "${HAS_FINDINGS}" = "false" ]; then
@@ -79,9 +93,9 @@ jobs:
           # Get the review's created_at timestamp
           REVIEW_TIME=$(echo "${REVIEW}" | jq -r '.created_at')
 
-          # Check for commits after the review was posted
+          # Check for commits after the review was posted (with error handling)
           FOLLOWUP_COUNT=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/commits" --paginate \
-            --jq "[.[] | select(.commit.committer.date > \"${REVIEW_TIME}\")] | length")
+            --jq "[.[] | select(.commit.committer.date > \"${REVIEW_TIME}\")] | length" 2>/dev/null || echo "0")
 
           if [ "${FOLLOWUP_COUNT}" -eq 0 ]; then
             echo "::error::Review found issues. At least one commit addressing them is required before merge."

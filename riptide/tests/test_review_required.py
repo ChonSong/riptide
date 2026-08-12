@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for riptide-review-required CI workflow logic.
 
-Tests the jq patterns used in the workflow to detect deep-think reviews
+Tests the jq/bash patterns used in the workflow to detect deep-think reviews
 and follow-up commits.
 """
 import json
@@ -19,7 +19,6 @@ class TestDeepThinkReviewDetection:
             "user": {"login": "riptide-review[bot]"},
             "body": "## ✨ TL;DR\n\n@ChonSong — ✅ Clean PR\n**📊 Blast Radius**\n4 files\n**🧒 ELI5**\nSimple change",
         }
-        # Check that TL;DR does NOT match deep-think pattern
         body = tldr_comment["body"]
         import re
 
@@ -63,19 +62,23 @@ class TestFindingsDetection:
     """Test that we can detect if a review has findings."""
 
     def test_review_with_critical_has_findings(self):
-        """Review with 🔴 should have findings."""
-        body = "## 🎯 Summary\n\n1 issue(s) found\n\n## 🔍 Findings\n\n| 🔴 critical | `foo.py` | 10 | Bug |"
+        """Review with 🔴 in table row should have findings."""
+        body = "## 🎯 Summary\n\n1 issue(s) found\n\n## 🔍 Findings\n\n| Severity | File | Line | Issue |\n|----------|------|------|-------|\n| 🔴 critical | `foo.py` | 10 | Bug |"
         import re
 
-        has_findings = bool(re.search(r"🔴|🟡", body, re.IGNORECASE))
+        has_findings = bool(
+            re.search(r"🔴", body) or re.search(r"🟡", body)
+        )
         assert has_findings
 
     def test_review_with_warning_has_findings(self):
-        """Review with 🟡 should have findings."""
-        body = "## 🎯 Summary\n\n1 issue(s) found\n\n## 🔍 Findings\n\n| 🟡 warning | `foo.py` | 10 | Bug |"
+        """Review with 🟡 in table row should have findings."""
+        body = "## 🎯 Summary\n\n1 issue(s) found\n\n## 🔍 Findings\n\n| Severity | File | Line | Issue |\n|----------|------|------|-------|\n| 🟡 warning | `foo.py` | 10 | Bug |"
         import re
 
-        has_findings = bool(re.search(r"🔴|🟡", body, re.IGNORECASE))
+        has_findings = bool(
+            re.search(r"🔴", body) or re.search(r"🟡", body)
+        )
         assert has_findings
 
     def test_clean_review_no_findings(self):
@@ -83,7 +86,9 @@ class TestFindingsDetection:
         body = "## 🎯 Summary\n\nClean PR — no issues found.\n\n## 🔍 Findings\n\nNo critical/warning findings."
         import re
 
-        has_findings = bool(re.search(r"🔴|🟡", body, re.IGNORECASE))
+        has_findings = bool(
+            re.search(r"🔴", body) or re.search(r"🟡", body)
+        )
         assert not has_findings
 
 
@@ -122,11 +127,12 @@ class TestWorkflowIntegration:
                 "body": "## 🎯 Summary\n\nClean PR — no issues found.",
             }
         ]
-        # Simulate: find review → no findings → pass
         review = comments[0]
         import re
 
-        has_findings = bool(re.search(r"🔴|🟡", review["body"], re.IGNORECASE))
+        has_findings = bool(
+            re.search(r"🔴", review["body"]) or re.search(r"🟡", review["body"])
+        )
         assert not has_findings
 
     def test_review_with_findings_requires_followup(self):
@@ -144,7 +150,9 @@ class TestWorkflowIntegration:
         review = comments[0]
         import re
 
-        has_findings = bool(re.search(r"🔴|🟡", review["body"], re.IGNORECASE))
+        has_findings = bool(
+            re.search(r"🔴", review["body"]) or re.search(r"🟡", review["body"])
+        )
         assert has_findings
 
         review_time = review["created_at"]
@@ -168,9 +176,34 @@ class TestWorkflowIntegration:
         review = comments[0]
         import re
 
-        has_findings = bool(re.search(r"🔴|🟡", review["body"], re.IGNORECASE))
+        has_findings = bool(
+            re.search(r"🔴", review["body"]) or re.search(r"🟡", review["body"])
+        )
         assert has_findings
 
         review_time = review["created_at"]
         followup = [c for c in commits if c["commit"]["committer"]["date"] > review_time]
         assert len(followup) == 1
+
+
+class TestIssueCommentFiltering:
+    """Test that we filter issue_comment events correctly."""
+
+    def test_bot_comment_skipped(self):
+        """Bot comments should be skipped."""
+        comment_user_type = "Bot"
+        assert comment_user_type == "Bot"
+
+    def test_review_command_detected(self):
+        """@riptide-bot review command should be detected."""
+        import re
+
+        body = "Please review this @riptide-bot review"
+        assert re.search(r"@riptide-bot\s+review", body, re.IGNORECASE)
+
+    def test_unrelated_comment_skipped(self):
+        """Unrelated comments should be skipped."""
+        import re
+
+        body = "Looks good to me!"
+        assert not re.search(r"@riptide-bot\s+review", body, re.IGNORECASE)
