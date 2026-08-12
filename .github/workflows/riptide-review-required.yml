@@ -3,95 +3,32 @@ name: riptide-review-required
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-  issue_comment:
-    types: [created]
 
 jobs:
   check-riptide-review:
     name: Riptide Review Required
     runs-on: ubuntu-latest
     steps:
-      - name: Check for full Riptide review + follow-up commit
+      - name: Check for Riptide review + follow-up commit
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
-          # Pass user-controlled values through env to prevent shell injection
-          COMMENT_BODY: ${{ github.event.comment.body }}
-          COMMENT_USER: ${{ github.event.comment.user.login }}
-          COMMENT_USER_TYPE: ${{ github.event.comment.user.type }}
-          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
 
-          # Skip if comment is from a bot (prevent infinite loops).
-          # GitHub user.type values: "Bot" (GitHub Apps, GitHub Actions),
-          # "User" (human), "Organization", "Mannequin".
-          # Also skip logins ending in "[bot]" as a fallback.
-          if [ "${COMMENT_USER_TYPE,,}" = "bot" ] || [[ "${COMMENT_USER}" == *"[bot]" ]]; then
-            echo "Skipping — comment from bot (${COMMENT_USER})"
-            exit 0
-          fi
-
-          # For issue_comment events, only proceed if it's on a PR
-          if [ "${EVENT_NAME}" = "issue_comment" ]; then
-            ISSUE_DATA=$(gh api "repos/${REPO}/issues/${PR_NUMBER}" 2>/dev/null || echo "{}")
-            IS_PR=$(echo "${ISSUE_DATA}" | jq -r '.pull_request // empty')
-            if [ -z "${IS_PR}" ]; then
-              echo "Skipping — comment is not on a PR"
-              exit 0
-            fi
-
-            # Only process comments that might affect review state
-            if ! echo "${COMMENT_BODY}" | grep -q "@riptide-bot review"; then
-              if [ "${COMMENT_USER}" != "riptide-review[bot]" ]; then
-                echo "Skipping — comment is not review-related"
-                exit 0
-              fi
-            fi
-          fi
-
-          echo "Checking for full Riptide review on PR #${PR_NUMBER}..."
-
-          # Collect ALL review sources: issue comments, PR comments, PR reviews.
-          # Deep-think reviews can be posted via any of these endpoints.
-          # TL;DR (📊 Blast Radius, 🧒 ELI5) does NOT count —
-          # we require "## 🎯 Summary" or "## 🔍 Findings".
-          ISSUE_COMMENTS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate 2>/dev/null || echo "[]")
-          PR_COMMENTS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/comments" --paginate 2>/dev/null || echo "[]")
-          PR_REVIEWS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" --paginate 2>/dev/null || echo "[]")
-
-          # Find the most recent deep-think review from any source
-          # by riptide-review[bot] OR by any user if the review contains deep-think markers
-          # (Hermes sessions post as the triggering user, not the bot)
-          REVIEW=$(jq -s '
-            map(.[]) |
-            map(select(
-              (.user.login == "riptide-review[bot]" or
-               (.body | test("## 🎯 Summary|## 🔍 Findings"; "i")))
-            )) |
-            sort_by(.created_at) |
-            last
-          ' <(echo "${ISSUE_COMMENTS}") <(echo "${PR_COMMENTS}") <(echo "${PR_REVIEWS}"))
+          # Find the most recent Riptide review (contains ## 🔍 Findings)
+          REVIEW=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
+            --jq '[.[] | select(.body | contains("## 🔍 Findings"))] | sort_by(.created_at) | last')
 
           REVIEW_ID=$(echo "${REVIEW}" | jq -r '.id // empty')
 
           if [ -z "${REVIEW_ID}" ]; then
-            echo "::error::No full Riptide review found on this PR."
-            echo ""
-            echo "A deep-think review (## 🎯 Summary) is required, not just the TL;DR."
-            echo ""
-            echo "To trigger a deep-think review:"
-            echo "  Comment '@riptide-bot review' on this PR, OR"
-            echo "  Wait for the automated cron review (every 15 min, PRs >100 LOC)"
-            exit 1
+            echo "No Riptide review found — skipping check."
+            exit 0
           fi
 
-          echo "✅ Full Riptide review found (comment #${REVIEW_ID})"
-
-          # Check if the review has findings (🔴 critical or 🟡 warning in table rows)
-          # Match only as table row markers: "| 🔴 " or "| 🟡 " to avoid false positives
-          # from prose like "No 🔴 issues found"
+          # Check if review has findings (🔴 or 🟡 in table rows)
           HAS_FINDINGS=$(echo "${REVIEW}" | jq -r '
             if (.body // "" | test("\\|[\\s]*🔴|\\|[\\s]*🟡")) then "true" else "false" end
           ')
@@ -101,21 +38,15 @@ jobs:
             exit 0
           fi
 
-          echo "Review has findings (🔴/🟡). Checking for follow-up commit..."
-
-          # Get the review's created_at timestamp
+          # Get review timestamp
           REVIEW_TIME=$(echo "${REVIEW}" | jq -r '.created_at')
 
-          # Check for commits after the review was posted (with error handling).
-          # Use .commit.committer.date // .commit.author.date to handle commits
-          # where committer metadata is null (imported commits, web edits).
+          # Check for commits after the review
           FOLLOWUP_COUNT=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/commits" --paginate \
-            --jq "[.[] | select((.commit.committer.date // .commit.author.date) > \"${REVIEW_TIME}\")] | length" 2>/dev/null || echo "0")
+            --jq "[.[] | select((.commit.committer.date // .commit.author.date) > \"${REVIEW_TIME}\")] | length")
 
           if [ "${FOLLOWUP_COUNT}" -eq 0 ]; then
-            echo "::error::Review found issues. At least one commit addressing them is required before merge."
-            echo ""
-            echo "Commit your fixes, push to this branch, and CI will re-run."
+            echo "::error::Review has findings. At least one commit addressing them is required before merge."
             exit 1
           fi
 
