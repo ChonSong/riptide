@@ -419,3 +419,95 @@ class TestPollerReviewDiscovery:
                     client=client,
                 )
         assert "Companion review triggered" in caplog.text
+
+
+class TestSearchFixComments:
+    def test_search_restricts_to_comments_field(self, poller_mod):
+        """The gh search must pass --match comments."""
+        with patch("riptide.poller.subprocess.run") as mock_run, \
+             patch("riptide.poller._get_pr_comments", return_value=[]):
+            mock_run.return_value = _search_subprocess_return([])
+            poller_mod._search_fix_comments()
+        cmd = mock_run.call_args.args[0]
+        assert "--match" in cmd
+        assert cmd[cmd.index("--match") + 1] == "comments"
+
+    def test_search_uses_raised_limit(self, poller_mod):
+        """SEARCH_LIMIT must be passed to gh."""
+        assert poller_mod.SEARCH_LIMIT > 20
+        with patch("riptide.poller.subprocess.run") as mock_run, \
+             patch("riptide.poller._get_pr_comments", return_value=[]):
+            mock_run.return_value = _search_subprocess_return([])
+            poller_mod._search_fix_comments()
+        cmd = mock_run.call_args.args[0]
+        assert "--limit" in cmd
+        assert cmd[cmd.index("--limit") + 1] == str(poller_mod.SEARCH_LIMIT)
+
+    def test_search_trims_unused_json_fields(self, poller_mod):
+        """Only request the JSON fields the poller actually uses."""
+        with patch("riptide.poller.subprocess.run") as mock_run, \
+             patch("riptide.poller._get_pr_comments", return_value=[]):
+            mock_run.return_value = _search_subprocess_return([])
+            poller_mod._search_fix_comments()
+        cmd = mock_run.call_args.args[0]
+        json_idx = cmd.index("--json")
+        fields = cmd[json_idx + 1]
+        assert "number" in fields
+        assert "title" in fields
+        assert "repository" in fields
+        assert "createdAt" not in fields
+        assert "body" not in fields
+        assert "author" not in fields
+        assert "commentsCount" not in fields
+
+    def test_returns_matching_comment_details(self, poller_mod):
+        """Only comments whose body matches FIX_RE are returned."""
+        item = _fake_search_result(42)
+        comments = [
+            {"id": 9001, "user": {"login": "alice"}, "body": "@riptide-bot fix the poller", "created_at": "2026-08-02T00:00:00Z"},
+            {"id": 9002, "user": {"login": "bob"}, "body": "unrelated comment", "created_at": "2026-08-02T00:00:00Z"},
+        ]
+        with patch("riptide.poller.subprocess.run") as mock_run, \
+             patch("riptide.poller._get_pr_comments", return_value=comments) as mock_comments:
+            mock_run.return_value = _search_subprocess_return([item])
+            matches = poller_mod._search_fix_comments()
+
+        mock_comments.assert_called_once_with("ChonSong", "riptide", 42)
+        assert len(matches) == 1
+        assert matches[0]["comment_id"] == 9001
+        assert matches[0]["commenter"] == "alice"
+        assert matches[0]["pr_key"] == "ChonSong/riptide#42"
+
+    def test_search_failure_returns_empty(self, poller_mod):
+        """A failing gh search must not raise."""
+        result = MagicMock()
+        result.returncode = 1
+        result.stdout = ""
+        result.stderr = "rate limit exceeded"
+        with patch("riptide.poller.subprocess.run", return_value=result), \
+             patch("riptide.poller._get_pr_comments") as mock_comments:
+            matches = poller_mod._search_fix_comments()
+        assert matches == []
+        mock_comments.assert_not_called()
+
+
+def _fake_search_result(number=42, owner="ChonSong", repo="riptide"):
+    """Create a fake GitHub search result item."""
+    return {
+        "number": number,
+        "title": "PR",
+        "repository": {"owner": {"login": owner}, "name": repo},
+        "createdAt": "2026-08-01T00:00:00Z",
+        "body": "",
+        "author": {"login": owner},
+        "commentsCount": 1,
+    }
+
+
+def _search_subprocess_return(items):
+    """Wrap items as subprocess.run return value with JSON stdout."""
+    result = MagicMock()
+    result.returncode = 0
+    result.stdout = json.dumps(items)
+    result.stderr = ""
+    return result
