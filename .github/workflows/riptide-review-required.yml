@@ -64,13 +64,14 @@ jobs:
           # Find the most recent deep-think review from any source
           # by riptide-review[bot] OR by any user if the review contains deep-think markers
           # (Hermes sessions post as the triggering user, not the bot)
+          # Normalize timestamp: PR reviews use submitted_at, comments use created_at
           REVIEW=$(jq -s '
             map(.[]) |
             map(select(
               (.user.login == "riptide-review[bot]" or
                (.body | test("## 🎯 Summary|## 🔍 Findings"; "i")))
             )) |
-            sort_by(.created_at) |
+            sort_by(.created_at // .submitted_at) |
             last
           ' <(echo "${ISSUE_COMMENTS}") <(echo "${PR_COMMENTS}") <(echo "${PR_REVIEWS}"))
 
@@ -103,8 +104,8 @@ jobs:
 
           echo "Review has findings (🔴/🟡). Checking for follow-up commit..."
 
-          # Get the review's created_at timestamp
-          REVIEW_TIME=$(echo "${REVIEW}" | jq -r '.created_at')
+          # Get the review's timestamp (submitted_at for PR reviews, created_at for comments)
+          REVIEW_TIME=$(echo "${REVIEW}" | jq -r '.created_at // .submitted_at')
 
           # Check for commits after the review was posted (with error handling).
           # Use .commit.committer.date // .commit.author.date to handle commits

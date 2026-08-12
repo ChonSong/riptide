@@ -104,6 +104,35 @@ class TestDeepThinkReviewDetection:
         )
         assert is_deep_think, "PR comment body should be detected"
 
+    def test_pr_review_uses_submitted_at_when_null_created_at(self):
+        """PR reviews have null created_at and use submitted_at. Must still sort correctly."""
+        # Simulate mixed sources: comment (created_at only) + PR review (submitted_at only)
+        comment = {
+            "id": 1,
+            "user": {"login": "ChonSong"},
+            "body": "## 🎯 Summary\n\nClean PR.\n\n## 🔍 Findings\n\n| 🔵 info | `a.py` | 1 | nothing |",
+            "created_at": "2026-08-12T10:00:00Z",
+            "submitted_at": None,
+        }
+        pr_review = {
+            "id": 2,
+            "user": {"login": "ChonSong"},
+            "body": "## 🎯 Summary\n\n1 issue\n\n## 🔍 Findings\n\n| 🔴 critical | `b.py` | 5 | bug |",
+            "created_at": None,  # PR reviews return null created_at
+            "submitted_at": "2026-08-12T12:00:00Z",
+        }
+        items = [comment, pr_review]
+        sorted_items = sorted(
+            items,
+            key=lambda x: x.get("created_at") or x.get("submitted_at") or ""
+        )
+        # PR review (12:00) should come AFTER comment (10:00)
+        assert sorted_items[-1]["id"] == 2, "PR review with later submitted_at should sort last"
+        # Verify the selected review has a valid timestamp
+        selected = sorted_items[-1]
+        ts = selected.get("created_at") or selected.get("submitted_at")
+        assert ts == "2026-08-12T12:00:00Z", f"Expected valid timestamp, got {ts}"
+
 
 class TestFindingsDetection:
     """Test that we can detect if a review has findings."""
