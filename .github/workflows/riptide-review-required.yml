@@ -24,9 +24,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Skip if comment is from a bot (prevent infinite loops)
-          if [ "${COMMENT_USER_TYPE}" = "Bot" ]; then
-            echo "Skipping — comment from bot"
+          # Skip if comment is from a bot (prevent infinite loops).
+          # GitHub user.type values: "Bot" (GitHub Apps, GitHub Actions),
+          # "User" (human), "Organization", "Mannequin".
+          # Also skip logins ending in "[bot]" as a fallback.
+          if [ "${COMMENT_USER_TYPE,,}" = "bot" ] || [[ "${COMMENT_USER}" == *"[bot]" ]]; then
+            echo "Skipping — comment from bot (${COMMENT_USER})"
             exit 0
           fi
 
@@ -50,22 +53,26 @@ jobs:
 
           echo "Checking for full Riptide review on PR #${PR_NUMBER}..."
 
-          # Only check issue comments for a DEEP-THINK review.
+          # Collect ALL review sources: issue comments, PR comments, PR reviews.
+          # Deep-think reviews can be posted via any of these endpoints.
           # TL;DR (📊 Blast Radius, 🧒 ELI5) does NOT count —
           # we require "## 🎯 Summary" or "## 🔍 Findings".
           ISSUE_COMMENTS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate 2>/dev/null || echo "[]")
+          PR_COMMENTS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/comments" --paginate 2>/dev/null || echo "[]")
+          PR_REVIEWS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" --paginate 2>/dev/null || echo "[]")
 
-          # Find the most recent deep-think review by riptide-review[bot]
-          # OR by any user if the review contains deep-think markers
+          # Find the most recent deep-think review from any source
+          # by riptide-review[bot] OR by any user if the review contains deep-think markers
           # (Hermes sessions post as the triggering user, not the bot)
-          REVIEW=$(echo "${ISSUE_COMMENTS}" | jq '
-            [.[] | select(
+          REVIEW=$(jq -s '
+            map(.[]) |
+            map(select(
               (.user.login == "riptide-review[bot]" or
                (.body | test("## 🎯 Summary|## 🔍 Findings"; "i")))
-            )]
-            | sort_by(.created_at)
-            | last
-          ')
+            )) |
+            sort_by(.created_at) |
+            last
+          ' <(echo "${ISSUE_COMMENTS}") <(echo "${PR_COMMENTS}") <(echo "${PR_REVIEWS}"))
 
           REVIEW_ID=$(echo "${REVIEW}" | jq -r '.id // empty')
 
@@ -99,9 +106,11 @@ jobs:
           # Get the review's created_at timestamp
           REVIEW_TIME=$(echo "${REVIEW}" | jq -r '.created_at')
 
-          # Check for commits after the review was posted (with error handling)
+          # Check for commits after the review was posted (with error handling).
+          # Use .commit.committer.date // .commit.author.date to handle commits
+          # where committer metadata is null (imported commits, web edits).
           FOLLOWUP_COUNT=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/commits" --paginate \
-            --jq "[.[] | select(.commit.committer.date > \"${REVIEW_TIME}\")] | length" 2>/dev/null || echo "0")
+            --jq "[.[] | select((.commit.committer.date // .commit.author.date) > \"${REVIEW_TIME}\")] | length" 2>/dev/null || echo "0")
 
           if [ "${FOLLOWUP_COUNT}" -eq 0 ]; then
             echo "::error::Review found issues. At least one commit addressing them is required before merge."
