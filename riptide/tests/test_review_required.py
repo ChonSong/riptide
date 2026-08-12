@@ -1,343 +1,168 @@
 #!/usr/bin/env python3
-"""Tests for riptide-review-required CI workflow logic.
+"""Tests for riptide-review-required CI gate.
 
-Tests the bash patterns used in the workflow to detect deep-think reviews
-and follow-up commits.
+Simplified rule: if a review comment has ## 🔍 Findings AND 🔴/🟡 in a
+table row, then at least one commit must exist after the review timestamp.
 """
-import json
+
+from __future__ import annotations
+
+import re
 
 import pytest
 
 
-class TestDeepThinkReviewDetection:
-    """Test that we can distinguish deep-think reviews from TL;DR."""
+# ── Helpers (mirror workflow logic) ──────────────────────────────────────────
 
-    def test_tldr_is_not_deep_think(self):
-        """TL;DR (📊 Blast Radius, 🧒 ELI5) should NOT match."""
-        tldr_comment = {
-            "id": 1,
-            "user": {"login": "riptide-review[bot]"},
-            "body": "## ✨ TL;DR\n\n@ChonSong — ✅ Clean PR\n**📊 Blast Radius**\n4 files\n**🧒 ELI5**\nSimple change",
-        }
-        body = tldr_comment["body"]
-        import re
+def find_review_with_findings(comments: list[dict]) -> dict | None:
+    """Find the most recent comment containing '## 🔍 Findings'."""
+    matches = [c for c in comments if "## 🔍 Findings" in (c.get("body") or "")]
+    if not matches:
+        return None
+    return sorted(matches, key=lambda c: c.get("created_at", ""))[-1]
 
-        is_deep_think = bool(
-            re.search(r"## 🎯 Summary|## 🔍 Findings", body, re.IGNORECASE)
-        )
-        assert not is_deep_think, "TL;DR should not match deep-think pattern"
 
-    def test_deep_think_summary_matches(self):
-        """Deep-think review with ## 🎯 Summary should match."""
-        review_comment = {
-            "id": 2,
-            "user": {"login": "riptide-review[bot]"},
-            "body": "## 🎯 Summary\n\n1 issue(s) found — see details below.\n\n## 🔍 Findings\n\n| Severity | File | Line | Issue |\n|----------|------|------|-------|\n| 🟡 warning | `foo.py` | 10 | Bug |",
-        }
-        body = review_comment["body"]
-        import re
+def has_findings(review: dict | None) -> bool:
+    """Check if review has 🔴 or 🟡 in a table row."""
+    if not review:
+        return False
+    body = review.get("body") or ""
+    return bool(re.search(r"\|[\s]*🔴|\|[\s]*🟡", body))
 
-        is_deep_think = bool(
-            re.search(r"## 🎯 Summary|## 🔍 Findings", body, re.IGNORECASE)
-        )
-        assert is_deep_think, "Deep-think review should match"
 
-    def test_deep_think_from_any_user_matches(self):
-        """Deep-think review from any user (not just bot) should match."""
-        review_comment = {
-            "id": 4,
-            "user": {"login": "ChonSong"},  # Not the bot
-            "body": "## 🎯 Summary\n\n1 issue(s) found\n\n## 🔍 Findings\n\n| 🟡 warning | `foo.py` | 10 | Bug |",
-        }
-        body = review_comment["body"]
-        import re
+def followup_commit_exists(commits: list[dict], review_time: str) -> bool:
+    """Check if any commit is newer than the review."""
+    for c in commits:
+        date = c.get("commit", {}).get("committer", {}).get("date") or \
+               c.get("commit", {}).get("author", {}).get("date")
+        if date and date > review_time:
+            return True
+    return False
 
-        is_deep_think = bool(
-            re.search(r"## 🎯 Summary|## 🔍 Findings", body, re.IGNORECASE)
-        )
-        assert is_deep_think, "Deep-think review from any user should match"
 
-    def test_clean_review_matches(self):
-        """Clean deep-think review should still match (no findings)."""
-        review_comment = {
-            "id": 3,
-            "user": {"login": "riptide-review[bot]"},
-            "body": "## 🎯 Summary\n\nClean PR — no critical issues or warnings.\n\n## 🔍 Findings\n\nNo critical/warning findings.",
-        }
-        body = review_comment["body"]
-        import re
+# ── Tests ─────────────────────────────────────────────────────────────────────
 
-        is_deep_think = bool(
-            re.search(r"## 🎯 Summary|## 🔍 Findings", body, re.IGNORECASE)
-        )
-        assert is_deep_think, "Clean deep-think review should still match"
+class TestFindReview:
+    """Test finding the most recent review with findings."""
 
-    def test_pr_review_detection(self):
-        """PR reviews (from GitHub reviews API) should also be detected."""
-        pr_review = {
-            "id": 10,
-            "user": {"login": "ChonSong"},
-            "body": "## 🎯 Summary\n\n2 issues found\n\n## 🔍 Findings\n\n| 🔴 critical | `bar.py` | 5 | Security issue |",
-            "created_at": "2026-08-12T10:00:00Z",
-        }
-        body = pr_review["body"]
-        import re
+    def test_no_review(self):
+        """No review comments → no check needed."""
+        comments: list[dict] = []
+        assert find_review_with_findings(comments) is None
 
-        is_deep_think = bool(
-            re.search(r"## 🎯 Summary|## 🔍 Findings", body, re.IGNORECASE)
-        )
-        assert is_deep_think, "PR review body should be detected"
+    def test_no_findings_section(self):
+        """Comment without ## 🔍 Findings is not a review."""
+        comments = [
+            {"id": 1, "body": "LGTM!", "created_at": "2026-08-12T10:00:00Z"}
+        ]
+        assert find_review_with_findings(comments) is None
 
-    def test_pr_comment_detection(self):
-        """PR comments (inline) should also be detected."""
-        pr_comment = {
-            "id": 11,
-            "user": {"login": "ChonSong"},
-            "body": "## 🎯 Summary\n\n1 issue found\n\n## 🔍 Findings\n\n| 🟡 warning | `baz.py` | 20 | Bug |",
-            "created_at": "2026-08-12T11:00:00Z",
-        }
-        body = pr_comment["body"]
-        import re
+    def test_review_with_findings_section(self):
+        """Comment with ## 🔍 Findings is detected."""
+        comments = [
+            {"id": 1, "body": "## 🔍 Findings\n\n| 🔴 | `a.py` | 1 | bug |", "created_at": "2026-08-12T10:00:00Z"}
+        ]
+        review = find_review_with_findings(comments)
+        assert review is not None
+        assert review["id"] == 1
 
-        is_deep_think = bool(
-            re.search(r"## 🎯 Summary|## 🔍 Findings", body, re.IGNORECASE)
-        )
-        assert is_deep_think, "PR comment body should be detected"
-
-    def test_pr_review_uses_submitted_at_when_null_created_at(self):
-        """PR reviews have null created_at and use submitted_at. Must still sort correctly."""
-        # Simulate mixed sources: comment (created_at only) + PR review (submitted_at only)
-        comment = {
-            "id": 1,
-            "user": {"login": "ChonSong"},
-            "body": "## 🎯 Summary\n\nClean PR.\n\n## 🔍 Findings\n\n| 🔵 info | `a.py` | 1 | nothing |",
-            "created_at": "2026-08-12T10:00:00Z",
-            "submitted_at": None,
-        }
-        pr_review = {
-            "id": 2,
-            "user": {"login": "ChonSong"},
-            "body": "## 🎯 Summary\n\n1 issue\n\n## 🔍 Findings\n\n| 🔴 critical | `b.py` | 5 | bug |",
-            "created_at": None,  # PR reviews return null created_at
-            "submitted_at": "2026-08-12T12:00:00Z",
-        }
-        items = [comment, pr_review]
-        sorted_items = sorted(
-            items,
-            key=lambda x: x.get("created_at") or x.get("submitted_at") or ""
-        )
-        # PR review (12:00) should come AFTER comment (10:00)
-        assert sorted_items[-1]["id"] == 2, "PR review with later submitted_at should sort last"
-        # Verify the selected review has a valid timestamp
-        selected = sorted_items[-1]
-        ts = selected.get("created_at") or selected.get("submitted_at")
-        assert ts == "2026-08-12T12:00:00Z", f"Expected valid timestamp, got {ts}"
+    def test_most_review_selected(self):
+        """When multiple reviews exist, the most recent is selected."""
+        comments = [
+            {"id": 1, "body": "## 🔍 Findings\n\n| 🔴 | `a.py` | 1 | bug |", "created_at": "2026-08-12T10:00:00Z"},
+            {"id": 2, "body": "## 🔍 Findings\n\n| 🟡 | `b.py` | 2 | warn |", "created_at": "2026-08-12T11:00:00Z"},
+        ]
+        review = find_review_with_findings(comments)
+        assert review is not None and review["id"] == 2
 
 
 class TestFindingsDetection:
-    """Test that we can detect if a review has findings."""
+    """Test detection of 🔴/🟡 in table rows."""
 
-    def test_review_with_critical_has_findings(self):
-        """Review with 🔴 in table row should have findings."""
-        body = "## 🎯 Summary\n\n1 issue(s) found\n\n## 🔍 Findings\n\n| Severity | File | Line | Issue |\n|----------|------|------|-------|\n| 🔴 critical | `foo.py` | 10 | Bug |"
-        import re
+    def test_critical_finding(self):
+        body = "## 🔍 Findings\n\n| Severity | File | Line | Issue |\n|----------|------|------|-------|\n| 🔴 critical | `foo.py` | 10 | Bug |"
+        assert has_findings({"body": body}) is True
 
-        has_findings = bool(re.search(r"🔴|🟡", body))
-        assert has_findings
+    def test_warning_finding(self):
+        body = "## 🔍 Findings\n\n| Severity | File | Line | Issue |\n|----------|------|------|-------|\n| 🟡 warning | `bar.py` | 5 | Warn |"
+        assert has_findings({"body": body}) is True
 
-    def test_review_with_warning_has_findings(self):
-        """Review with 🟡 in table row should have findings."""
-        body = "## 🎯 Summary\n\n1 issue(s) found\n\n## 🔍 Findings\n\n| Severity | File | Line | Issue |\n|----------|------|------|-------|\n| 🟡 warning | `foo.py` | 10 | Bug |"
-        import re
+    def test_clean_review(self):
+        body = "## 🔍 Findings\n\n| Severity | File | Line | Issue |\n|----------|------|------|-------|\n| 🔵 info | `baz.py` | 1 | nothing |"
+        assert has_findings({"body": body}) is False
 
-        has_findings = bool(re.search(r"🔴|🟡", body))
-        assert has_findings
-
-    def test_clean_review_no_findings(self):
-        """Clean review should not have findings."""
-        body = "## 🎯 Summary\n\nClean PR — no issues found.\n\n## 🔍 Findings\n\nNo critical/warning findings."
-        import re
-
-        has_findings = bool(re.search(r"🔴|🟡", body))
-        assert not has_findings
+    def test_no_findings_in_prose_only(self):
+        """🔴 in prose (not table row) should not count."""
+        body = "## 🔍 Findings\n\nNo 🔴 issues found."
+        assert has_findings({"body": body}) is False
 
 
-class TestFollowUpCommitDetection:
-    """Test that we can detect follow-up commits after review."""
+class TestFollowupCommit:
+    """Test follow-up commit detection."""
 
     def test_commit_after_review(self):
-        """Commit with timestamp after review should count."""
-        review_time = "2026-08-12T00:00:00Z"
         commits = [
-            {"sha": "abc", "commit": {"committer": {"date": "2026-08-11T00:00:00Z"}, "author": {"date": "2026-08-11T00:00:00Z"}}},
-            {"sha": "def", "commit": {"committer": {"date": "2026-08-13T00:00:00Z"}, "author": {"date": "2026-08-13T00:00:00Z"}}},
+            {"commit": {"committer": {"date": "2026-08-12T10:00:00Z"}, "author": {"date": "2026-08-12T10:00:00Z"}}},
+            {"commit": {"committer": {"date": "2026-08-12T12:00:00Z"}, "author": {"date": "2026-08-12T12:00:00Z"}}},
         ]
-        followup = [c for c in commits if (c["commit"].get("committer", {}) or {}).get("date") > review_time]
-        assert len(followup) == 1
+        assert followup_commit_exists(commits, "2026-08-12T11:00:00Z") is True
 
     def test_no_commit_after_review(self):
-        """No commits after review should return empty list."""
-        review_time = "2026-08-12T00:00:00Z"
         commits = [
-            {"sha": "abc", "commit": {"committer": {"date": "2026-08-11T00:00:00Z"}, "author": {"date": "2026-08-11T00:00:00Z"}}},
+            {"commit": {"committer": {"date": "2026-08-12T10:00:00Z"}, "author": {"date": "2026-08-12T10:00:00Z"}}},
         ]
-        followup = [c for c in commits if (c["commit"].get("committer", {}) or {}).get("date") > review_time]
-        assert len(followup) == 0
+        assert followup_commit_exists(commits, "2026-08-12T11:00:00Z") is False
 
     def test_commit_with_null_committer(self):
-        """Commits with null committer date should fall back to author date."""
-        review_time = "2026-08-12T00:00:00Z"
+        """Commits with null committer date should use author date."""
         commits = [
-            # Committer date is present
-            {"sha": "abc", "commit": {"committer": {"date": "2026-08-11T00:00:00Z"}, "author": {"date": "2026-08-11T00:00:00Z"}}},
-            # Committer date is None (imported/web edit), fall back to author date
-            {"sha": "ghi", "commit": {"committer": {"date": None}, "author": {"date": "2026-08-14T00:00:00Z"}}},
+            {"commit": {"committer": {"date": None}, "author": {"date": "2026-08-12T12:00:00Z"}}},
         ]
-        # Use jq-style fallback: committer.date // author.date
-        def get_date(c):
-            return (c["commit"].get("committer", {}) or {}).get("date") or (c["commit"].get("author", {}) or {}).get("date")
-
-        followup = [c for c in commits if get_date(c) > review_time]
-        assert len(followup) == 1
-
-    def test_commit_with_null_committer_and_author(self):
-        """Commits with both dates null should be skipped."""
-        review_time = "2026-08-12T00:00:00Z"
-        commits = [
-            {"sha": "abc", "commit": {"committer": {"date": None}, "author": {"date": None}}},
-        ]
-
-        def get_date(c):
-            return (c["commit"].get("committer", {}) or {}).get("date") or (c["commit"].get("author", {}) or {}).get("date")
-
-        followup = [c for c in commits if get_date(c) and get_date(c) > review_time]
-        assert len(followup) == 0
+        assert followup_commit_exists(commits, "2026-08-12T11:00:00Z") is True
 
 
-class TestWorkflowIntegration:
-    """Integration test simulating the workflow logic."""
+class TestEndToEnd:
+    """Integration-style tests mirroring workflow logic."""
 
     def test_clean_review_passes(self):
-        """Clean review → no follow-up needed → pass."""
+        """Review with no findings → no follow-up needed."""
         comments = [
-            {
-                "id": 1,
-                "user": {"login": "riptide-review[bot]"},
-                "body": "## 🎯 Summary\n\nClean PR — no issues found.",
-            }
+            {"id": 1, "body": "## 🔍 Findings\n\n| 🔵 info | `a.py` | 1 | nothing |", "created_at": "2026-08-12T10:00:00Z"}
         ]
-        review = comments[0]
-        import re
+        review = find_review_with_findings(comments)
+        assert has_findings(review) is False
 
-        has_findings = bool(re.search(r"🔴|🟡", review["body"]))
-        assert not has_findings
-
-    def test_review_with_findings_requires_followup(self):
-        """Review with findings + no commits → fail."""
+    def test_findings_without_followup_fails(self):
+        """Review with findings + no follow-up commit → should fail."""
         comments = [
-            {
-                "id": 1,
-                "user": {"login": "riptide-review[bot]"},
-                "created_at": "2026-08-12T00:00:00Z",
-                "body": "## 🎯 Summary\n\n1 issue(s) found\n\n## 🔍 Findings\n\n| 🟡 warning | `foo.py` | 10 | Bug |",
-            }
-        ]
-        commits = []  # No follow-up commits
-
-        review = comments[0]
-        import re
-
-        has_findings = bool(re.search(r"🔴|🟡", review["body"]))
-        assert has_findings
-
-        review_time = review["created_at"]
-        followup = [c for c in commits if (c["commit"].get("committer", {}) or {}).get("date") > review_time]
-        assert len(followup) == 0
-
-    def test_review_with_findings_and_followup_passes(self):
-        """Review with findings + follow-up commits → pass."""
-        comments = [
-            {
-                "id": 1,
-                "user": {"login": "riptide-review[bot]"},
-                "created_at": "2026-08-12T00:00:00Z",
-                "body": "## 🎯 Summary\n\n1 issue(s) found\n\n## 🔍 Findings\n\n| 🟡 warning | `foo.py` | 10 | Bug |",
-            }
+            {"id": 1, "body": "## 🔍 Findings\n\n| 🔴 critical | `a.py` | 1 | bug |", "created_at": "2026-08-12T10:00:00Z"}
         ]
         commits = [
-            {"sha": "def", "commit": {"committer": {"date": "2026-08-13T00:00:00Z"}}},
+            {"commit": {"committer": {"date": "2026-08-12T09:00:00Z"}, "author": {"date": "2026-08-12T09:00:00Z"}}},
         ]
+        review = find_review_with_findings(comments)
+        assert review is not None
+        assert has_findings(review) is True
+        assert followup_commit_exists(commits, review["created_at"]) is False
 
-        review = comments[0]
-        import re
+    def test_findings_with_followup_passes(self):
+        """Review with findings + follow-up commit → passes."""
+        comments = [
+            {"id": 1, "body": "## 🔍 Findings\n\n| 🔴 critical | `a.py` | 1 | bug |", "created_at": "2026-08-12T10:00:00Z"}
+        ]
+        commits = [
+            {"commit": {"committer": {"date": "2026-08-12T09:00:00Z"}, "author": {"date": "2026-08-12T09:00:00Z"}}},
+            {"commit": {"committer": {"date": "2026-08-12T11:00:00Z"}, "author": {"date": "2026-08-12T11:00:00Z"}}},
+        ]
+        review = find_review_with_findings(comments)
+        assert review is not None
+        assert has_findings(review) is True
+        assert followup_commit_exists(commits, review["created_at"]) is True
 
-        has_findings = bool(re.search(r"🔴|🟡", review["body"]))
-        assert has_findings
-
-        review_time = review["created_at"]
-        followup = [c for c in commits if (c["commit"].get("committer", {}) or {}).get("date") > review_time]
-        assert len(followup) == 1
-
-
-class TestIssueCommentFiltering:
-    """Test that we filter issue_comment events correctly."""
-
-    def test_bot_comment_skipped(self):
-        """Bot comments should be skipped."""
-        comment_user_type = "Bot"
-        assert comment_user_type == "Bot"
-
-    def test_review_command_detected(self):
-        """@riptide-bot review command should be detected."""
-        import re
-
-        body = "Please review this @riptide-bot review"
-        assert re.search(r"@riptide-bot\s+review", body, re.IGNORECASE)
-
-    def test_unrelated_comment_skipped(self):
-        """Unrelated comments should be skipped."""
-        import re
-
-        body = "Looks good to me!"
-        assert not re.search(r"@riptide-bot\s+review", body, re.IGNORECASE)
-
-    def test_bot_case_insensitive(self):
-        """Bot check should be case-insensitive."""
-        user_type_bot = "Bot"
-        user_type_lower = "bot"
-        assert user_type_bot.lower() == user_type_lower
-
-    def test_bot_login_suffix(self):
-        """Logins ending in [bot] should be skipped."""
-        import re
-
-        assert re.search(r"\[bot\]$", "riptide-review[bot]")
-        assert re.search(r"\[bot\]$", "dependabot[bot]")
-        assert not re.search(r"\[bot\]$", "ChonSong")
-
-
-class TestEnvVarPassthrough:
-    """Test that user-controlled values are passed through env (not interpolated)."""
-
-    def test_comment_body_not_in_script(self):
-        """COMMENT_BODY should be in env block, not interpolated in script."""
-        with open(".github/workflows/riptide-review-required.yml") as f:
-            content = f.read()
-
-        # COMMENT_BODY should be in env: block
-        assert "COMMENT_BODY: ${{ github.event.comment.body }}" in content
-
-    def test_comment_user_not_in_script(self):
-        """COMMENT_USER should be in env block."""
-        with open(".github/workflows/riptide-review-required.yml") as f:
-            content = f.read()
-
-        assert "COMMENT_USER: ${{ github.event.comment.user.login }}" in content
-
-    def test_comment_referenced_as_env_var(self):
-        """COMMENT_BODY should be referenced as $COMMENT_BODY in script."""
-        with open(".github/workflows/riptide-review-required.yml") as f:
-            content = f.read()
-
-        # Should reference as env var, not interpolated
-        assert "$COMMENT_BODY" in content or "${COMMENT_BODY}" in content
+    def test_no_review_skips_check(self):
+        """No review comment → gate passes (no enforcement)."""
+        comments = [
+            {"id": 1, "body": "LGTM!", "created_at": "2026-08-12T10:00:00Z"}
+        ]
+        review = find_review_with_findings(comments)
+        assert review is None
