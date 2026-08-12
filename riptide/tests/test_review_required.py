@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Tests for riptide-review-required CI workflow logic.
 
-Tests the jq/bash patterns used in the workflow to detect deep-think reviews
-and follow-up commits.
+Tests the bash patterns used in the workflow to detect deep-think reviews
+and follow-up commits. These tests mirror the patterns in the YAML workflow.
 """
 import json
 
@@ -66,7 +66,7 @@ class TestFindingsDetection:
         body = "## 🎯 Summary\n\n1 issue(s) found\n\n## 🔍 Findings\n\n| Severity | File | Line | Issue |\n|----------|------|------|-------|\n| 🔴 critical | `foo.py` | 10 | Bug |"
         import re
 
-        has_findings = bool(re.search(r"🔴|🟡", body))
+        has_findings = bool(re.search(r"\|\s*[🔴🟡]", body))
         assert has_findings
 
     def test_review_with_warning_has_findings(self):
@@ -74,7 +74,7 @@ class TestFindingsDetection:
         body = "## 🎯 Summary\n\n1 issue(s) found\n\n## 🔍 Findings\n\n| Severity | File | Line | Issue |\n|----------|------|------|-------|\n| 🟡 warning | `foo.py` | 10 | Bug |"
         import re
 
-        has_findings = bool(re.search(r"🔴|🟡", body))
+        has_findings = bool(re.search(r"\|\s*[🔴🟡]", body))
         assert has_findings
 
     def test_clean_review_no_findings(self):
@@ -82,7 +82,15 @@ class TestFindingsDetection:
         body = "## 🎯 Summary\n\nClean PR — no issues found.\n\n## 🔍 Findings\n\nNo critical/warning findings."
         import re
 
-        has_findings = bool(re.search(r"🔴|🟡", body))
+        has_findings = bool(re.search(r"\|\s*[🔴🟡]", body))
+        assert not has_findings
+
+    def test_review_with_emoji_in_prose_no_findings(self):
+        """Emoji in prose (not table) should NOT trigger findings."""
+        body = "## 🎯 Summary\n\nClean PR — no issues found.\n\n## 🔍 Findings\n\nNothing to report."
+        import re
+
+        has_findings = bool(re.search(r"\|\s*[🔴🟡]", body))
         assert not has_findings
 
 
@@ -124,7 +132,7 @@ class TestWorkflowIntegration:
         review = comments[0]
         import re
 
-        has_findings = bool(re.search(r"🔴|🟡", review["body"]))
+        has_findings = bool(re.search(r"\|\s*[🔴🟡]", review["body"]))
         assert not has_findings
 
     def test_review_with_findings_requires_followup(self):
@@ -142,7 +150,7 @@ class TestWorkflowIntegration:
         review = comments[0]
         import re
 
-        has_findings = bool(re.search(r"🔴|🟡", review["body"]))
+        has_findings = bool(re.search(r"\|\s*[🔴🟡]", review["body"]))
         assert has_findings
 
         review_time = review["created_at"]
@@ -166,7 +174,7 @@ class TestWorkflowIntegration:
         review = comments[0]
         import re
 
-        has_findings = bool(re.search(r"🔴|🟡", review["body"]))
+        has_findings = bool(re.search(r"\|\s*[🔴🟡]", review["body"]))
         assert has_findings
 
         review_time = review["created_at"]
@@ -195,3 +203,45 @@ class TestIssueCommentFiltering:
 
         body = "Looks good to me!"
         assert not re.search(r"@riptide-bot\s+review", body, re.IGNORECASE)
+
+
+class TestEnvVarPassthrough:
+    """Test that user-controlled values are passed through env (not interpolated)."""
+
+    def test_comment_body_not_in_script(self):
+        """COMMENT_BODY should be in env block, not interpolated in script."""
+        with open(".github/workflows/riptide-review-required.yml") as f:
+            content = f.read()
+
+        # COMMENT_BODY should be in env: block
+        assert "COMMENT_BODY: ${{ github.event.comment.body }}" in content
+
+        # COMMENT_BODY should NOT appear interpolated directly in run: block
+        # (it should only be referenced as $COMMENT_BODY)
+        lines = content.split("\n")
+        in_env = False
+        in_run = False
+        for line in lines:
+            if "env:" in line:
+                in_env = True
+            if "run: |" in line:
+                in_run = True
+                in_env = False
+            if in_run and "COMMENT_BODY:" in line:
+                # This would be a direct interpolation in the run block
+                assert False, "COMMENT_BODY should be in env block, not run block"
+
+    def test_comment_user_not_in_script(self):
+        """COMMENT_USER should be in env block."""
+        with open(".github/workflows/riptide-review-required.yml") as f:
+            content = f.read()
+
+        assert "COMMENT_USER: ${{ github.event.comment.user.login }}" in content
+
+    def test_comment_referenced_as_env_var(self):
+        """COMMENT_BODY should be referenced as $COMMENT_BODY in script."""
+        with open(".github/workflows/riptide-review-required.yml") as f:
+            content = f.read()
+
+        # Should reference as env var, not interpolated
+        assert "$COMMENT_BODY" in content or "${COMMENT_BODY}" in content

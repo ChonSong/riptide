@@ -16,17 +16,22 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
           REPO: ${{ github.repository }}
+          # Pass user-controlled values through env to prevent shell injection
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_USER: ${{ github.event.comment.user.login }}
+          COMMENT_USER_TYPE: ${{ github.event.comment.user.type }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
 
           # Skip if comment is from a bot (prevent infinite loops)
-          if [ "${{ github.event.comment.user.type }}" = "Bot" ]; then
+          if [ "${COMMENT_USER_TYPE}" = "Bot" ]; then
             echo "Skipping — comment from bot"
             exit 0
           fi
 
           # For issue_comment events, only proceed if it's on a PR
-          if [ "${{ github.event_name }}" = "issue_comment" ]; then
+          if [ "${EVENT_NAME}" = "issue_comment" ]; then
             ISSUE_DATA=$(gh api "repos/${REPO}/issues/${PR_NUMBER}" 2>/dev/null || echo "{}")
             IS_PR=$(echo "${ISSUE_DATA}" | jq -r '.pull_request // empty')
             if [ -z "${IS_PR}" ]; then
@@ -34,11 +39,7 @@ jobs:
               exit 0
             fi
 
-            # Only process comments that might affect review state:
-            #   - @riptide-bot review command
-            #   - Comments from riptide-review[bot] itself (review posted)
-            COMMENT_BODY="${{ github.event.comment.body }}"
-            COMMENT_USER="${{ github.event.comment.user.login }}"
+            # Only process comments that might affect review state
             if ! echo "${COMMENT_BODY}" | grep -q "@riptide-bot review"; then
               if [ "${COMMENT_USER}" != "riptide-review[bot]" ]; then
                 echo "Skipping — comment is not review-related"
@@ -76,9 +77,11 @@ jobs:
 
           echo "✅ Full Riptide review found (comment #${REVIEW_ID})"
 
-          # Check if the review has findings (🔴 critical or 🟡 warning)
+          # Check if the review has findings (🔴 critical or 🟡 warning in table rows)
+          # Match only as table row markers: "| 🔴 " or "| 🟡 " to avoid false positives
+          # from prose like "No 🔴 issues found"
           HAS_FINDINGS=$(echo "${REVIEW}" | jq -r '
-            if (.body // "" | test("🔴|🟡")) then "true" else "false" end
+            if (.body // "" | test("\\|[\\s]*🔴|\\|[\\s]*🟡")) then "true" else "false" end
           ')
 
           if [ "${HAS_FINDINGS}" = "false" ]; then
