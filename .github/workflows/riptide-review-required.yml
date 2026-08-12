@@ -3,6 +3,8 @@ name: riptide-review-required
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
 
 jobs:
   check-riptide-review:
@@ -12,10 +14,26 @@ jobs:
       - name: Check for full Riptide review + follow-up commit
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+
+          # Skip if comment is from a bot (prevent infinite loops)
+          if [ "${{ github.event.comment.user.type }}" = "Bot" ]; then
+            echo "Skipping — comment from bot"
+            exit 0
+          fi
+
+          # For issue_comment events, only proceed if it's on a PR
+          if [ "${{ github.event_name }}" = "issue_comment" ]; then
+            ISSUE_DATA=$(gh api "repos/${REPO}/issues/${PR_NUMBER}" 2>/dev/null || echo "{}")
+            IS_PR=$(echo "${ISSUE_DATA}" | jq -r '.pull_request // empty')
+            if [ -z "${IS_PR}" ]; then
+              echo "Skipping — comment is not on a PR"
+              exit 0
+            fi
+          fi
 
           echo "Checking for full Riptide review on PR #${PR_NUMBER}..."
 
