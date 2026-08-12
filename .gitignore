@@ -29,7 +29,6 @@ scripts/
 terraform/
 turbo.json
 .octopusignore
-.github/
 .dockerignore
 # Generated graphify artifacts — regenerable, machine-specific
 graphify-out/
