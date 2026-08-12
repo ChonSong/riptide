@@ -470,6 +470,25 @@ class TestSearchFixComments:
         assert "--limit" in cmd
         assert cmd[cmd.index("--limit") + 1] == str(poller_mod.SEARCH_LIMIT)
 
+    def test_search_trims_unused_json_fields(self, poller_mod):
+        """Only request the JSON fields the poller actually uses."""
+        with patch("riptide.poller.subprocess.run") as mock_run, \
+             patch("riptide.poller._get_pr_comments", return_value=[]):
+            mock_run.return_value = _search_subprocess_return([])
+            poller_mod._search_fix_comments()
+        cmd = mock_run.call_args.args[0]
+        json_idx = cmd.index("--json")
+        fields = cmd[json_idx + 1]
+        # Only request fields the poller actually reads
+        assert "number" in fields
+        assert "title" in fields
+        assert "repository" in fields
+        # These fields are NOT requested (trimmed for efficiency)
+        assert "createdAt" not in fields
+        assert "body" not in fields
+        assert "author" not in fields
+        assert "commentsCount" not in fields
+
     def test_returns_matching_comment_details(self, poller_mod):
         """Only comments whose body matches FIX_RE are returned."""
         item = _fake_search_result(42)
