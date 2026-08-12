@@ -276,6 +276,7 @@ def _spawn_deepthink(
             data=data,
             diagram_url=diagram_url,
             deterministic=bundle,
+            pr_created_at=data.get("pr_created_at"),
         )
     except Exception as e:
         state.mark_failed(job_id)
@@ -351,9 +352,23 @@ def _gather_review_data(
         "god_nodes": [],
         "communities": [],
         "graph_context": {},
+        "pr_created_at": "",
     }
 
-    # 1. Fetch PR diff
+    # 1. Fetch PR details (for created_at timestamp)
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", str(pr_number), "--repo", f"{owner}/{repo}",
+             "--json", "createdAt"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            pr_data = json.loads(result.stdout)
+            data["pr_created_at"] = pr_data.get("createdAt", "")
+    except Exception as e:
+        log.warning(f"Failed to fetch PR created_at: {e}")
+
+    # 2. Fetch PR diff
     try:
         result = subprocess.run(
             ["gh", "pr", "diff", str(pr_number), "--repo", f"{owner}/{repo}"],
@@ -364,7 +379,7 @@ def _gather_review_data(
     except Exception as e:
         log.warning(f"Failed to fetch diff: {e}")
 
-    # 2. Fetch PR files
+    # 3. Fetch PR files
     try:
         result = subprocess.run(
             ["gh", "pr", "view", str(pr_number), "--repo", f"{owner}/{repo}",
@@ -503,6 +518,7 @@ def _build_orchestrator_prompt(
     data: dict,
     diagram_url: Optional[str] = None,
     deterministic: Optional[dict] = None,
+    pr_created_at: Optional[str] = None,
 ) -> str:
     """
     Build a small orchestrator prompt that delegates to subagents.
@@ -616,7 +632,8 @@ Run the assembly script — it validates, formats, and posts. Do NOT hand-format
 python -m riptide.assemble_review \
   --findings /tmp/findings.json \
   --owner {owner} --repo {repo} --pr {pr_number} \
-  --model "{DEEPTHINK_MODEL}" --provider "{DEEPTHINK_PROVIDER}"
+  --model "{DEEPTHINK_MODEL}" --provider "{DEEPTHINK_PROVIDER}" \
+  --pr-created-at "{pr_created_at}"
 ```
 
 The script appends the model/provider to the sign-off deterministically.

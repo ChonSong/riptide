@@ -34,6 +34,7 @@ def assemble_review_body(
     diagram_url: Optional[str] = None,
     model: Optional[str] = None,
     provider: Optional[str] = None,
+    pr_created_at: Optional[str] = None,
 ) -> str:
     """
     Assemble a review comment from structured findings.
@@ -111,6 +112,22 @@ def assemble_review_body(
     signoff += "</sub>"
     parts.append(f"\n---\n{signoff}")
 
+    # Timing metric: PR opened → review posted (deterministic)
+    if pr_created_at:
+        from datetime import datetime, timezone
+        try:
+            created = datetime.fromisoformat(pr_created_at.replace("Z", "+00:00"))
+            elapsed = (datetime.now(timezone.utc) - created).total_seconds()
+            if elapsed < 1:
+                elapsed_str = f"{int(elapsed * 1000)}ms"
+            elif elapsed < 60:
+                elapsed_str = f"{elapsed:.1f}s"
+            else:
+                elapsed_str = f"{elapsed / 60:.1f}m"
+            parts.append(f"\n<sub>⏱️ Review posted in {elapsed_str}</sub>")
+        except (ValueError, TypeError):
+            pass
+
     body = "\n".join(parts)
 
     # Enforce GitHub comment length limit (65536 chars)
@@ -177,6 +194,7 @@ def main():
     parser.add_argument("--diagram-url", default=None, help="Pre-generated diagram URL")
     parser.add_argument("--model", default=None, help="Model used for the review (appended to sign-off)")
     parser.add_argument("--provider", default=None, help="Provider used for the review (appended to sign-off)")
+    parser.add_argument("--pr-created-at", default=None, help="PR created_at ISO timestamp (for timing metric)")
     parser.add_argument("--dry-run", action="store_true", help="Print review instead of posting")
     args = parser.parse_args()
 
@@ -209,6 +227,7 @@ def main():
         diagram_url=args.diagram_url,
         model=args.model,
         provider=args.provider,
+        pr_created_at=args.pr_created_at,
     )
 
     if args.dry_run:
