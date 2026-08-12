@@ -141,7 +141,7 @@ def _search_fix_comments(lookback_days: int = LOOKBACK_DAYS) -> list[dict]:
         "--order", "desc",
         "--limit", str(SEARCH_LIMIT),
         "--match", "comments",
-        "--json", "number,title,repository,createdAt,body,author,commentsCount",
+        "--json", "number,title,repository",
         f'"@riptide-bot fix"',
     ]
     try:
