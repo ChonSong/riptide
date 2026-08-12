@@ -56,34 +56,6 @@ class TestAssembleReviewBody:
         assert "model" not in body
         assert "provider" not in body
 
-    def test_signoff_includes_model_provider(self):
-        body = assemble_review_body(
-            [], "ChonSong", "riptide", 42,
-            model="custom:LongCat-2.0", provider="custom",
-        )
-        assert "model: `custom:LongCat-2.0`" in body
-        assert "provider: `custom`" in body
-
-    def test_signoff_model_only(self):
-        body = assemble_review_body(
-            [], "ChonSong", "riptide", 42, model="deepseek-v4-flash",
-        )
-        assert "model: `deepseek-v4-flash`" in body
-        assert "provider" not in body
-
-    def test_signoff_provider_only(self):
-        body = assemble_review_body(
-            [], "ChonSong", "riptide", 42, provider="opencode-go",
-        )
-        assert "provider: `opencode-go`" in body
-        assert "model" not in body
-
-    def test_signoff_neither(self):
-        body = assemble_review_body([], "ChonSong", "riptide", 42)
-        assert "<sub>Riptide Review via Hermes</sub>" in body
-        assert "model" not in body
-        assert "provider" not in body
-
     def test_findings_table_rendered(self):
         findings = [
             {"severity": "warning", "title": "Issue 1", "detail": "Detail 1", "file": "a.py", "line": 10},
