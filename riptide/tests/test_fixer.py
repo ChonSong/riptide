@@ -198,7 +198,7 @@ class TestSpawnFix:
         return base
 
     def test_spawn_builds_correct_command(self):
-        with patch("riptide.state.StateStore") as mock_state, \
+        with patch("riptide.orchestrator.StateStore") as mock_state, \
              patch("subprocess.run") as mock_run:
             mock_state.return_value.reserve_job.return_value = True
             mock_run.return_value = MagicMock(returncode=0)
@@ -212,7 +212,7 @@ class TestSpawnFix:
         assert "riptide-fix" in cmd
 
     def test_spawn_prompt_embeds_pr_context(self):
-        with patch("riptide.state.StateStore") as mock_state, \
+        with patch("riptide.orchestrator.StateStore") as mock_state, \
              patch("subprocess.run") as mock_run:
             mock_state.return_value.reserve_job.return_value = True
             mock_run.return_value = MagicMock(returncode=0)
@@ -225,7 +225,7 @@ class TestSpawnFix:
         assert "the flaky webhook test" in prompt
 
     def test_spawn_not_push_eligible_uses_patch_path(self):
-        with patch("riptide.state.StateStore") as mock_state, \
+        with patch("riptide.orchestrator.StateStore") as mock_state, \
              patch("subprocess.run") as mock_run:
             mock_state.return_value.reserve_job.return_value = True
             mock_run.return_value = MagicMock(returncode=0)
@@ -234,7 +234,7 @@ class TestSpawnFix:
         assert "Do NOT push" in prompt
 
     def test_spawn_skips_when_job_already_pending(self):
-        with patch("riptide.state.StateStore") as mock_state, \
+        with patch("riptide.orchestrator.StateStore") as mock_state, \
              patch("subprocess.run") as mock_run:
             mock_state.return_value.reserve_job.return_value = False
             result = _spawn_fix(**self._kwargs())
@@ -242,7 +242,7 @@ class TestSpawnFix:
         mock_run.assert_not_called()
 
     def test_spawn_retries_on_failure(self):
-        with patch("riptide.state.StateStore") as mock_state, \
+        with patch("riptide.orchestrator.StateStore") as mock_state, \
              patch("subprocess.run") as mock_run, \
              patch("time.sleep"):
             mock_state.return_value.reserve_job.return_value = True
@@ -252,7 +252,7 @@ class TestSpawnFix:
         assert mock_run.call_count == 3
 
     def test_spawn_marks_failed_on_prompt_build_error(self):
-        with patch("riptide.state.StateStore") as mock_state, \
+        with patch("riptide.orchestrator.StateStore") as mock_state, \
              patch("riptide.fixer._build_fix_prompt", side_effect=ValueError("boom")), \
              patch("subprocess.run"):
             mock_state.return_value.reserve_job.return_value = True

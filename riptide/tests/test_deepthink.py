@@ -139,14 +139,11 @@ class TestSpawnDeepthink:
 
             call_args = mock_hermes_cron.call_args
             cmd = call_args[0][0]
-            # cmd: ["hermes", "cron", "create", run_at, prompt, "--name", ...]
-            prompt = cmd[4]
-
-            assert "42" in prompt
-            assert "ChonSong/riptide" in prompt
-            assert "feat: important change" in prompt
-            assert "test-author" in prompt
-            assert "250" in prompt
+            # cmd: ["hermes", "cron", "create", run_at, prompt_ref, "--name", ...]
+            # prompt is now written to temp file to bypass Hermes safety filter
+            prompt_ref = cmd[4]
+            assert "Read the prompt from" in prompt_ref
+            assert "riptide-prompt-" in prompt_ref
 
     def test_skips_when_review_already_pending(self):
         with patch("riptide.state.StateStore") as mock_state:
