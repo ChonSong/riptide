@@ -147,8 +147,31 @@ def handle_review_command(
             f"on this PR."
         )
 
-    # Note: no 24h dedup guard here — manual @riptide-bot review always spawns.
-    # The cron poller has its own dedup logic in poll().
+    # SHA-aware dedup: allow if head commit changed since last review
+    pr_key = f"{owner}/{repo}#{pr_number}"
+    heuristics = StateStore().get_pr_heuristics(pr_key)
+    if heuristics["last_sha"] and heuristics["reviewed_at"]:
+        try:
+            reviewed_time = datetime.fromisoformat(heuristics["reviewed_at"])
+            cooldown_expiry = reviewed_time + timedelta(hours=24)
+            if (
+                heuristics["last_sha"] == head_sha
+                and datetime.now(timezone.utc) < cooldown_expiry
+            ):
+                log.info(
+                    "Skipping %s — commit %s reviewed at %s, cooldown until %s",
+                    pr_key,
+                    head_sha[:12],
+                    reviewed_time.isoformat(),
+                    cooldown_expiry.isoformat(),
+                )
+                return (
+                    f"⏭️ **Already reviewed.** Commit `{head_sha[:12]}` was reviewed in "
+                    f"the last 24 hours. Use `@riptide-bot review` after "
+                    f"{cooldown_expiry.strftime('%Y-%m-%d %H:%M %Z')} for a fresh review."
+                )
+        except (ValueError, TypeError):
+            pass  # Corrupt timestamp — fall through and allow
 
     try:
         spawned = _spawn_deepthink(owner, repo, pr_number, title, author, total_loc, head_sha)

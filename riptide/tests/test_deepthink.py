@@ -679,3 +679,88 @@ class TestHandleReviewCommand:
             assert "🧠" in result
             assert "triggered" in result
 
+    def test_blocks_with_cooldown_message_when_same_sha_reviewed_recently(self):
+        """Same SHA + reviewed < 24h ago → blocked with timestamp message."""
+        from riptide.deepthink import handle_review_command
+        with patch("riptide.deepthink.StateStore") as mock_store:
+            mock_store.return_value.get_pr_heuristics.return_value = {
+                "skip": False,
+                "last_sha": "abc123def456",
+                "reviewed_at": "2026-08-13T10:00:00+00:00",
+            }
+            result = handle_review_command(
+                client=self._mock_client(),
+                installation_id=123,
+                owner="ChonSong",
+                repo="riptide",
+                pr_number=42,
+                commenter="ChonSong",
+            )
+            assert "⏭️" in result
+            assert "Already reviewed" in result
+            assert "abc123def456" in result
+            assert "2026-08-13" in result or "2026-08-14" in result  # cooldown expiry
+
+    def test_allows_when_new_sha(self):
+        """Different SHA since last review → spawn proceeds."""
+        from riptide.deepthink import handle_review_command
+        with patch("riptide.deepthink.StateStore") as mock_store, \
+             patch("riptide.deepthink._spawn_deepthink", return_value=True):
+            mock_store.return_value.get_pr_heuristics.return_value = {
+                "skip": False,
+                "last_sha": "old_sha_123",
+                "reviewed_at": "2026-08-13T10:00:00+00:00",
+            }
+            result = handle_review_command(
+                client=self._mock_client(),
+                installation_id=123,
+                owner="ChonSong",
+                repo="riptide",
+                pr_number=42,
+                commenter="ChonSong",
+            )
+            assert "🧠" in result
+            assert "triggered" in result
+
+    def test_allows_after_cooldown_expires(self):
+        """Same SHA but reviewed > 24h ago → spawn proceeds."""
+        from riptide.deepthink import handle_review_command
+        with patch("riptide.deepthink.StateStore") as mock_store, \
+             patch("riptide.deepthink._spawn_deepthink", return_value=True):
+            mock_store.return_value.get_pr_heuristics.return_value = {
+                "skip": False,
+                "last_sha": "abc123def456",
+                "reviewed_at": "2026-08-10T10:00:00+00:00",  # > 24h ago
+            }
+            result = handle_review_command(
+                client=self._mock_client(),
+                installation_id=123,
+                owner="ChonSong",
+                repo="riptide",
+                pr_number=42,
+                commenter="ChonSong",
+            )
+            assert "🧠" in result
+            assert "triggered" in result
+
+    def test_allows_when_no_previous_review(self):
+        """No heuristics → spawn proceeds."""
+        from riptide.deepthink import handle_review_command
+        with patch("riptide.deepthink.StateStore") as mock_store, \
+             patch("riptide.deepthink._spawn_deepthink", return_value=True):
+            mock_store.return_value.get_pr_heuristics.return_value = {
+                "skip": False,
+                "last_sha": None,
+                "reviewed_at": None,
+            }
+            result = handle_review_command(
+                client=self._mock_client(),
+                installation_id=123,
+                owner="ChonSong",
+                repo="riptide",
+                pr_number=42,
+                commenter="ChonSong",
+            )
+            assert "🧠" in result
+            assert "triggered" in result
+
