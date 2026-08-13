@@ -147,19 +147,21 @@ def handle_review_command(
             f"on this PR."
         )
 
-    # Dedup guard: skip if this PR was reviewed in the last 24 hours
-    if _was_reviewed_today(owner, repo, pr_number):
-        log.info("Skipping %s/%s#%d — reviewed in last 24h", owner, repo, pr_number)
-        return (
-            f"⏭️ **Already reviewed.** PR #{pr_number} was reviewed in the last "
-            f"24 hours. Use `@riptide-bot review` again after 24h for a fresh review."
-        )
+    # Note: no 24h dedup guard here — manual @riptide-bot review always spawns.
+    # The cron poller has its own dedup logic in poll().
 
     try:
-        _spawn_deepthink(owner, repo, pr_number, title, author, total_loc, head_sha)
+        spawned = _spawn_deepthink(owner, repo, pr_number, title, author, total_loc, head_sha)
     except Exception as e:
         log.error("Failed to spawn deep-think: %s", e)
         return f"⚠️ Failed to spawn deep-think review for #{pr_number}: {e}"
+
+    if not spawned:
+        log.info("Skipping %s/%s#%d — review already pending", owner, repo, pr_number)
+        return (
+            f"⏭️ **Already pending.** PR #{pr_number} already has a deep-think review in progress. "
+            f"Check back in a few minutes — the review will be posted when complete."
+        )
 
     log.info("On-demand review spawned for %s/%s#%d by %s", owner, repo, pr_number, commenter)
     return (
@@ -213,7 +215,7 @@ def _spawn_deepthink(
     job_id = f"{name}-{head_sha[:12]}-{uuid.uuid4().hex[:12]}"
     if not state.reserve_job(job_id, pr_number, "t1", name):
         log.info(f"Skipping {owner}/{repo}#{pr_number} — review already pending")
-        return False
+        return False  # Only this path returns False — all others raise
 
     try:
         # Pre-gather data in Python (cheaper than having the agent do it)
@@ -280,8 +282,9 @@ def _spawn_deepthink(
         )
     except Exception as e:
         state.mark_failed(job_id)
-        log.error(f"Failed to gather data or build prompt for {owner}/{repo}#{pr_number}: {e}")
-        return False
+        raise RuntimeError(
+            f"Failed to gather data or build prompt for {owner}/{repo}#{pr_number}: {e}"
+        ) from e
 
     cmd = [
         "hermes", "cron", "create", run_at,
@@ -325,8 +328,9 @@ def _spawn_deepthink(
 
     # All attempts failed — mark the reserved job as failed
     state.mark_failed(job_id)
-    log.error(f"All {max_retries} attempts failed for {owner}/{repo}#{pr_number}")
-    return False
+    raise RuntimeError(
+        f"All {max_retries} Hermes cron attempts failed for {owner}/{repo}#{pr_number}"
+    )
 
 
 def _gather_review_data(
