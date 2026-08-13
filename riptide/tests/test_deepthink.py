@@ -96,7 +96,7 @@ class TestSpawnDeepthink:
             assert result is True
             mock_run.assert_called_once()
 
-    def test_spawn_failure_returns_false_after_retries(self):
+    def test_spawn_failure_raises_after_retries(self):
         with patch("subprocess.run", return_value=MagicMock(returncode=1, stderr="boom")) as mock_run, \
              patch("time.sleep") as mock_sleep, \
              patch("riptide.deepthink._is_cron_available", return_value=True), \
@@ -104,11 +104,11 @@ class TestSpawnDeepthink:
              patch("riptide.grafiphy.orchestrator.pre_generate_diagram", return_value=None), \
              patch("riptide.state.StateStore") as mock_state:
             mock_state.return_value.reserve_job.return_value = True
-            result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
-            assert result is False
+            with pytest.raises(RuntimeError, match="All 3 Hermes cron attempts failed"):
+                _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
             assert mock_run.call_count == 3
 
-    def test_spawn_timeout_returns_false_after_retries(self):
+    def test_spawn_timeout_raises_after_retries(self):
         with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="hermes", timeout=15)) as mock_run, \
              patch("time.sleep") as mock_sleep, \
              patch("riptide.deepthink._is_cron_available", return_value=True), \
@@ -116,9 +116,16 @@ class TestSpawnDeepthink:
              patch("riptide.grafiphy.orchestrator.pre_generate_diagram", return_value=None), \
              patch("riptide.state.StateStore") as mock_state:
             mock_state.return_value.reserve_job.return_value = True
-            result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
-            assert result is False
+            with pytest.raises(RuntimeError, match="All 3 Hermes cron attempts failed"):
+                _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
             assert mock_run.call_count == 3
+
+    def test_spawn_data_gathering_failure_raises(self):
+        with patch("riptide.deepthink._gather_review_data", side_effect=Exception("gh failed")), \
+             patch("riptide.state.StateStore") as mock_state:
+            mock_state.return_value.reserve_job.return_value = True
+            with pytest.raises(RuntimeError, match="Failed to gather data"):
+                _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
 
     def test_spawn_includes_pr_details_in_prompt(self):
         with patch("subprocess.run", return_value=self._success_result()) as mock_hermes_cron, \
@@ -612,4 +619,63 @@ class TestBuildOrchestratorPrompt:
             "ChonSong", "riptide", 42, "feat: test", "author", 300, "abc123", data
         )
         assert "Deterministic Analysis (pre-computed)" not in prompt
+
+
+# ── handle_review_command tests ──────────────────────────────────────────────
+
+
+class TestHandleReviewCommand:
+    """Tests for handle_review_command — verifies honest messaging."""
+
+    def _mock_client(self):
+        client = MagicMock()
+        client.get_pr_details.return_value = {
+            "title": "test",
+            "user": {"login": "ChonSong"},
+            "additions": 100,
+            "deletions": 50,
+            "head": {"sha": "abc123def456"},
+        }
+        return client
+
+    def test_returns_already_pending_message_when_reservation_fails(self):
+        from riptide.deepthink import handle_review_command
+        with patch("riptide.deepthink._spawn_deepthink", return_value=False):
+            result = handle_review_command(
+                client=self._mock_client(),
+                installation_id=123,
+                owner="ChonSong",
+                repo="riptide",
+                pr_number=42,
+                commenter="ChonSong",
+            )
+            assert "Already pending" in result
+
+    def test_returns_error_message_when_spawn_raises(self):
+        from riptide.deepthink import handle_review_command
+        with patch("riptide.deepthink._spawn_deepthink", side_effect=RuntimeError("Hermes cron failed")):
+            result = handle_review_command(
+                client=self._mock_client(),
+                installation_id=123,
+                owner="ChonSong",
+                repo="riptide",
+                pr_number=42,
+                commenter="ChonSong",
+            )
+            assert "⚠️" in result
+            assert "Hermes cron failed" in result
+
+    def test_returns_triggered_message_on_success(self):
+        from riptide.deepthink import handle_review_command
+        with patch("riptide.deepthink._spawn_deepthink", return_value=True):
+            result = handle_review_command(
+                client=self._mock_client(),
+                installation_id=123,
+                owner="ChonSong",
+                repo="riptide",
+                pr_number=42,
+                commenter="ChonSong",
+            )
+            assert "🧠" in result
+            assert "triggered" in result
 
