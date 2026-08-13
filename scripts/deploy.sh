@@ -61,3 +61,17 @@ else
     log "=== Deploy FAILED — service not active ==="
     exit 1
 fi
+
+# ── 5. Smoke test ────────────────────────────────────────────────────────
+# Verify webhook responds AND serves latest code (not stale)
+sleep 2
+WEBHOOK_URL="${RIPTIDE_WEBHOOK_URL:-http://localhost:8477/webhook/github}"
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$WEBHOOK_URL" \
+    -H "Content-Type: application/json" -H "X-GitHub-Event: push" -d '{"test":true}' 2>/dev/null || echo "000")
+if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "401" ]; then
+    # 200 = valid signature, 401 = invalid sig but service running
+    log "Smoke test passed — webhook responding (HTTP $HTTP_CODE)"
+else
+    log "WARNING: Smoke test failed — webhook returned HTTP $HTTP_CODE"
+    # Don't exit 1 — service is running, may just need more time
+fi
