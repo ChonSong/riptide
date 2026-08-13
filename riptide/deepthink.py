@@ -292,12 +292,28 @@ def _spawn_deepthink(
     # Write prompt to temp file to bypass Hermes safety filter
     # (safety system scans command-line args for keywords like subprocess/threading/daemon)
     fd, prompt_file = tempfile.mkstemp(suffix=".txt", prefix="riptide-prompt-")
-    with open(prompt_file, "w") as f:
-        f.write(prompt)
+    try:
+        with open(prompt_file, "w") as f:
+            f.write(prompt)
+    except Exception:
+        # Prompt file creation or write failed — clean up partial file and release reservation
+        try:
+            os.unlink(prompt_file)
+        except OSError:
+            pass
+        state.mark_failed(job_id)
+        raise
+
+    # For successful scheduling, Hermes will clean up the prompt file after reading it.
+    # For scheduling failures, we clean it up immediately in the finally block.
+    cmd_prompt = (
+        f"Read the prompt from {prompt_file} and execute it. "
+        f"After execution, delete the file {prompt_file}."
+    )
 
     cmd = [
         "hermes", "cron", "create", run_at,
-        f"Read the prompt from {prompt_file} and execute it.",
+        cmd_prompt,
         "--name", name,
     ]
     for skill in skills:
@@ -308,39 +324,50 @@ def _spawn_deepthink(
         "--deliver", "origin",
     ])
 
-    for attempt in range(max_retries):
-        if attempt > 0:
-            delay = base_delay * (2 ** attempt)  # 5s, 10s, 20s
-            log.info(f"Retry {attempt+1}/{max_retries} for {owner}/{repo}#{pr_number} in {delay}s...")
-            time.sleep(delay)
+    scheduled = False
+    try:
+        for attempt in range(max_retries):
+            if attempt > 0:
+                delay = base_delay * (2 ** attempt)  # 5s, 10s, 20s
+                log.info(f"Retry {attempt+1}/{max_retries} for {owner}/{repo}#{pr_number} in {delay}s...")
+                time.sleep(delay)
 
-        # Check hermes availability before each attempt
-        if not _is_cron_available():
-            log.warning(f"hermes not available on attempt {attempt+1} for {owner}/{repo}#{pr_number}")
-            continue
+            # Check hermes availability before each attempt
+            if not _is_cron_available():
+                log.warning(f"hermes not available on attempt {attempt+1} for {owner}/{repo}#{pr_number}")
+                continue
 
-        log.info(f"Spawning: hermes cron create {run_at} --name {name} (attempt {attempt+1})")
-        try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=15
-            )
-            # Hermes returns exit code 0 even when blocked — check stdout for failure markers
-            if result.returncode == 0 and "Failed to create job" not in result.stdout:
-                # Reservation stays pending — the scheduled worker marks it complete when done
-                log.info(f"✓ Spawned deep-think for {owner}/{repo}#{pr_number}: {result.stdout[:200]}")
-                return True
-            else:
-                log.error(f"✗ Spawn failed (attempt {attempt+1}): stdout={result.stdout[:300]} stderr={result.stderr[:300]}")
-        except subprocess.TimeoutExpired:
-            log.warning(f"Timeout spawning deep-think (attempt {attempt+1})")
-        except Exception as e:
-            log.error(f"Error spawning deep-think (attempt {attempt+1}): {e}")
+            log.info(f"Spawning: hermes cron create {run_at} --name {name} (attempt {attempt+1})")
+            try:
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=15
+                )
+                # Hermes returns exit code 0 even when blocked — check stdout for failure markers
+                if result.returncode == 0 and "Failed to create job" not in result.stdout:
+                    # Reservation stays pending — the scheduled worker marks it complete when done
+                    log.info(f"✓ Spawned deep-think for {owner}/{repo}#{pr_number}: {result.stdout[:200]}")
+                    scheduled = True
+                    return True
+                else:
+                    log.error(f"✗ Spawn failed (attempt {attempt+1}): stdout={result.stdout[:300]} stderr={result.stderr[:300]}")
+            except subprocess.TimeoutExpired:
+                log.warning(f"Timeout spawning deep-think (attempt {attempt+1})")
+            except Exception as e:
+                log.error(f"Error spawning deep-think (attempt {attempt+1}): {e}")
 
-    # All attempts failed — mark the reserved job as failed
-    state.mark_failed(job_id)
-    raise RuntimeError(
-        f"All {max_retries} Hermes cron attempts failed for {owner}/{repo}#{pr_number}"
-    )
+        # All attempts failed — mark the reserved job as failed
+        state.mark_failed(job_id)
+        raise RuntimeError(
+            f"All {max_retries} Hermes cron attempts failed for {owner}/{repo}#{pr_number}"
+        )
+    finally:
+        # On scheduling failure, clean up the prompt file immediately.
+        # On success, Hermes will clean it up after reading (via cmd_prompt instruction).
+        if not scheduled:
+            try:
+                os.unlink(prompt_file)
+            except OSError:
+                pass
 
 
 def _gather_review_data(

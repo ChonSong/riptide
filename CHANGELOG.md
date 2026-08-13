@@ -15,7 +15,7 @@
 
 ### Added
 - Deterministic timing metrics for all 3 bots (⏱️ Review posted in Xm Ys)
-- `@riptide-bot review` command always spawns deep-think (no silent skips)
+- `@riptide-bot review` attempts to spawn deep-think whenever same-commit cooldown allows (no silent skips)
 - Auto-deploy smoke test verifies webhook after restart
 
 ### Fixed

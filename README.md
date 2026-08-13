@@ -29,7 +29,7 @@ python3 -m pytest riptide/tests/ -q
 
 ### Data Flow
 
-```
+```text
 GitHub Webhook → FastAPI /webhook → verify_signature()
                                           │
                                           ▼
@@ -63,7 +63,7 @@ Comment `@riptide-bot review` on any PR to trigger an on-demand deep-think sessi
 
 ## Auto-Deploy
 
-When a PR merges into `main`:
+When a PR merges into the configured deployment branch (`main` by default):
 1. Webhook triggers `scripts/deploy.sh`
 2. Script: `git pull` → clean `__pycache__` → `systemctl restart riptide.service` → smoke test
 3. Service runs the new code automatically
@@ -77,7 +77,7 @@ SQLite at `~/.local/share/riptide/state.db`:
 
 ## File Layout
 
-```
+```text
 riptide/
 ├── webhook.py         # FastAPI server, GitHub webhook handler
 ├── companion.py       # Bot 1: TL;DR + ELI5 + timing footer

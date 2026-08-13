@@ -97,8 +97,20 @@ class TestSpawnDeepthink:
             assert result is True
             call_args = mock_run.call_args
             cmd = call_args[0][0]
+            # Extract the prompt file path from cmd[4]
             assert "Read the prompt from" in cmd[4]
             assert "riptide-prompt-" in cmd[4]
+            # Verify the prompt file contains the expected content
+            prompt_path = cmd[4].split("Read the prompt from ")[1].split(" and execute it.")[0]
+            with open(prompt_path) as f:
+                content = f.read()
+            assert "test" in content  # pr_title was "test"
+            # Clean up the temp file
+            import os
+            try:
+                os.unlink(prompt_path)
+            except OSError:
+                pass
 
     def test_spawn_fails_when_hermes_blocked(self):
         """Hermes returns exit 0 with 'Failed to create job' — should raise."""
