@@ -301,6 +301,13 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
                 # Deterministic companion flow — the single pipeline entry.
                 # Runs depth decision → context bundle → Tier-1 canonical thread
                 # (Stage 0/1/2) inside Companion.run_for_pr (semaphore-guarded).
+                #
+                # IMPORTANT: webhook_received_at is captured by the closure but
+                # time.time() is called INSIDE the thread (when run_for_pr executes),
+                # not when the closure is created. This means the timing reflects
+                # when the companion actually starts processing, not when the
+                # webhook was received. For true receipt time, pass it as an
+                # argument instead.
                 def _safe_run():
                     try:
                         companion.run_for_pr(

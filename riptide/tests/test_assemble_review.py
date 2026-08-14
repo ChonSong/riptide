@@ -105,3 +105,41 @@ class TestTimingAssembly:
             provider="custom",
         )
         assert "⏱️" not in body
+
+    def test_future_triggered_at(self):
+        """Future triggered_at (negative elapsed) should not produce confusing negative numbers."""
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        triggered = (now + timedelta(minutes=5)).isoformat()
+        body = assemble_review_body(
+            self._base_findings(), "ChonSong", "riptide", 1,
+            triggered_at=triggered,
+            model="LongCat-2.0",
+            provider="custom",
+        )
+        if "⏱️" in body:
+            timing_part = body.split("⏱️")[1]
+            assert "-" not in timing_part, f"Future timestamp produced negative: {timing_part}"
+
+    def test_timezone_aware_parsing(self):
+        """Timezone-aware ISO strings are parsed correctly."""
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        # Test with explicit Z suffix
+        triggered_z = (now - timedelta(seconds=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        body_z = assemble_review_body(
+            self._base_findings(), "ChonSong", "riptide", 1,
+            triggered_at=triggered_z,
+            model="LongCat-2.0",
+            provider="custom",
+        )
+        assert "⏱️ Review posted in" in body_z
+        # Test with explicit +00:00 offset
+        triggered_offset = (now - timedelta(seconds=5)).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+        body_offset = assemble_review_body(
+            self._base_findings(), "ChonSong", "riptide", 1,
+            triggered_at=triggered_offset,
+            model="LongCat-2.0",
+            provider="custom",
+        )
+        assert "⏱️ Review posted in" in body_offset
