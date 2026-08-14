@@ -215,6 +215,9 @@ async def github_webhook(request: Request) -> Response:
 
 async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
     """Handle pull_request events — spawn companion TLDR thread."""
+    # Capture webhook receipt time up front so the companion timing metric
+    # reflects webhook receipt → comment posting (not thread-start → posting).
+    webhook_received_at = time.time()
     action = payload.get("action", "")
     pr = payload.get("pull_request", {})
     repo = payload.get("repository", {})
@@ -303,7 +306,7 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
                         companion.run_for_pr(
                             installation_id, owner, repo_name, pr_number,
                             title, author, files,
-                            webhook_received_at=time.time(),
+                            webhook_received_at=webhook_received_at,
                         )
                     except Exception as e:
                         log.error(

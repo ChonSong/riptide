@@ -1085,6 +1085,16 @@ ELI5:"""
 
         return "\n".join(parts)
 
+    @staticmethod
+    def _format_elapsed(webhook_received_at: float) -> str:
+        """Format elapsed time since webhook received (sub-second → ms)."""
+        elapsed = time.time() - webhook_received_at
+        if elapsed < 1:
+            return f"{int(elapsed * 1000)}ms"
+        if elapsed < 60:
+            return f"{elapsed:.1f}s"
+        return f"{elapsed / 60:.1f}m"
+
     def _build_tier1_body(self, emoji: str, author: str, tldr: str, deterministic_report,
                           depth: str = "standard", webhook_received_at=None) -> str:
         """Build the Tier 1 deterministic comment body (no LLM required).
@@ -1114,15 +1124,7 @@ ELI5:"""
 
         # Timing metric: webhook received → comment posted
         if webhook_received_at:
-            import time as _time
-            elapsed = _time.time() - webhook_received_at
-            if elapsed < 1:
-                elapsed_str = f"{int(elapsed * 1000)}ms"
-            elif elapsed < 60:
-                elapsed_str = f"{elapsed:.1f}s"
-            else:
-                elapsed_str = f"{elapsed / 60:.1f}m"
-            body += f"\n\n---\n<sub>⏱️ Review posted in {elapsed_str}</sub>"
+            body += f"\n\n---\n<sub>⏱️ Review posted in {self._format_elapsed(webhook_received_at)}</sub>"
 
         return body
 
@@ -1209,15 +1211,6 @@ ELI5:"""
 
         # Timing metric: webhook received → comment posted
         if webhook_received_at:
-            import time as _time
-            elapsed = _time.time() - webhook_received_at
-            # Inline format_elapsed to avoid test_utils dependency in production
-            if elapsed < 1:
-                elapsed_str = f"{int(elapsed * 1000)}ms"
-            elif elapsed < 60:
-                elapsed_str = f"{elapsed:.1f}s"
-            else:
-                elapsed_str = f"{elapsed / 60:.1f}m"
-            parts.append(f"\n\n---\n<sub>⏱️ Review posted in {elapsed_str}</sub>")
+            parts.append(f"\n\n---\n<sub>⏱️ Review posted in {self._format_elapsed(webhook_received_at)}</sub>")
 
         return "".join(parts)

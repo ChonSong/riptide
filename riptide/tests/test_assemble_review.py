@@ -13,17 +13,18 @@ class TestTimingAssembly:
 
     def test_milliseconds(self):
         """Sub-second → milliseconds."""
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        triggered = (now - timedelta(milliseconds=100)).isoformat()
         body = assemble_review_body(
             self._base_findings(), "ChonSong", "riptide", 1,
-            triggered_at="2026-08-13T00:00:00.000000+00:00",
+            triggered_at=triggered,
             model="LongCat-2.0",
             provider="custom",
         )
-        # Default test: if triggered_at is in the past, it'll be a large value.
-        # Instead, verify the format is correct for a known elapsed time.
+        # Sub-second elapsed (< 1s) → milliseconds format
         assert "⏱️ Review posted in" in body
-        # The actual value depends on current time, but it should be a valid format
-        assert "sub>" in body
+        assert "ms" in body
 
     def test_seconds(self):
         """1-60 seconds → seconds format."""
