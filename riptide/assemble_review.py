@@ -35,6 +35,7 @@ def assemble_review_body(
     model: Optional[str] = None,
     provider: Optional[str] = None,
     pr_created_at: Optional[str] = None,
+    triggered_at: Optional[str] = None,
 ) -> str:
     """
     Assemble a review comment from structured findings.
@@ -45,6 +46,7 @@ def assemble_review_body(
         repo: Repo name
         pr_number: PR number
         diagram_url: Optional pre-generated diagram URL
+        triggered_at: ISO timestamp when review was triggered (for timing metric)
 
     Returns:
         Markdown review body ready for `gh pr comment`
@@ -112,8 +114,25 @@ def assemble_review_body(
     signoff += "</sub>"
     parts.append(f"\n---\n{signoff}")
 
-    # Timing metric: PR opened → review posted (deterministic)
-    if pr_created_at:
+    # Timing metric: review triggered → review posted (deterministic)
+    if triggered_at:
+        from datetime import datetime, timezone
+        try:
+            triggered = datetime.fromisoformat(triggered_at.replace("Z", "+00:00"))
+            elapsed = (datetime.now(timezone.utc) - triggered).total_seconds()
+            if elapsed < 1:
+                elapsed_str = f"{int(elapsed * 1000)}ms"
+            elif elapsed < 60:
+                elapsed_str = f"{elapsed:.1f}s"
+            elif elapsed < 3600:
+                elapsed_str = f"{elapsed / 60:.1f}m"
+            else:
+                elapsed_str = f"{elapsed / 3600:.1f}h"
+            parts.append(f"\n<sub>⏱️ Review posted in {elapsed_str}</sub>")
+        except (ValueError, TypeError):
+            pass
+    elif pr_created_at:
+        # Fallback: PR opened → review posted (less useful)
         from datetime import datetime, timezone
         try:
             created = datetime.fromisoformat(pr_created_at.replace("Z", "+00:00"))
@@ -122,9 +141,11 @@ def assemble_review_body(
                 elapsed_str = f"{int(elapsed * 1000)}ms"
             elif elapsed < 60:
                 elapsed_str = f"{elapsed:.1f}s"
-            else:
+            elif elapsed < 3600:
                 elapsed_str = f"{elapsed / 60:.1f}m"
-            parts.append(f"\n<sub>⏱️ Review posted in {elapsed_str}</sub>")
+            else:
+                elapsed_str = f"{elapsed / 3600:.1f}h"
+            parts.append(f"\n<sub>⏱️ Review posted in {elapsed_str} (since PR opened)</sub>")
         except (ValueError, TypeError):
             pass
 

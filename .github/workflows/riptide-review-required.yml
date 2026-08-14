@@ -24,8 +24,8 @@ jobs:
           REVIEW_ID=$(echo "${REVIEW}" | jq -r '.id // empty')
 
           if [ -z "${REVIEW_ID}" ]; then
-            echo "No Riptide review found — skipping check."
-            exit 0
+            echo "::error::No Riptide review found on this PR. Comment '@riptide-bot review' to trigger one."
+            exit 1
           fi
 
           # Check if review has findings (🔴 or 🟡 in table rows)
