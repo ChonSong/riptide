@@ -11,6 +11,9 @@
 - Simplified `riptide-review-required` CI gate to single rule: findings → require follow-up commit
 - Deep-think prompts written to temp file to bypass Hermes safety filter
 
+### Breaking
+- `riptide-review-required` now **fails** (exit 1) when no Riptide review exists on a PR. Previously it was lenient and skipped. PRs without a `@riptide-bot review` will now block merge until a review is posted.
+
 ## [0.14.0] - 2026-08-13
 
 ### Added

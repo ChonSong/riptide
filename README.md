@@ -99,3 +99,9 @@ riptide/
 - [COMPETITOR-PATTERNS.md](COMPETITOR-PATTERNS.md) — Analysis of CodeRabbit/Greptile patterns
 - [AGENTS.md](AGENTS.md) — Rules for AI agents editing this codebase
 - [CHANGELOG.md](CHANGELOG.md) — Recent changes
+
+## Security
+
+- Deep-think prompts are written to temp files with `0o600` permissions (owner-only) and cleaned up after Hermes reads them
+- Prompt contents are sanitized to redact secrets (GitHub tokens, private keys) before writing to disk
+- The `@riptide-bot review` command always spawns when the 24h same-commit cooldown allows — review data (findings, file paths, code) is treated as untrusted
