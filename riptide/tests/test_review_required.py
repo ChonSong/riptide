@@ -159,10 +159,12 @@ class TestEndToEnd:
         assert has_findings(review) is True
         assert followup_commit_exists(commits, review["created_at"]) is True
 
-    def test_no_review_skips_check(self):
-        """No review comment → gate passes (no enforcement)."""
+    def test_no_review_fails_check(self):
+        """No review comment → gate fails (fail-closed behavior)."""
         comments = [
             {"id": 1, "body": "LGTM!", "created_at": "2026-08-12T10:00:00Z"}
         ]
         review = find_review_with_findings(comments)
         assert review is None
+        # Fail-closed: when no review is found, the CI gate exits with status 1
+        # (see .github/workflows/riptide-review-required.yml)

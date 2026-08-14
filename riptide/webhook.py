@@ -303,6 +303,7 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
                         companion.run_for_pr(
                             installation_id, owner, repo_name, pr_number,
                             title, author, files,
+                            webhook_received_at=time.time(),
                         )
                     except Exception as e:
                         log.error(

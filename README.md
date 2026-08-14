@@ -29,7 +29,7 @@ python3 -m pytest riptide/tests/ -q
 
 ### Data Flow
 
-```
+```text
 GitHub Webhook → FastAPI /webhook → verify_signature()
                                           │
                                           ▼
@@ -63,7 +63,7 @@ Comment `@riptide-bot review` on any PR to trigger an on-demand deep-think sessi
 
 ## Auto-Deploy
 
-When a PR merges into `main`:
+When a PR merges into the configured deployment branch (`main` by default):
 1. Webhook triggers `scripts/deploy.sh`
 2. Script: `git pull` → clean `__pycache__` → `systemctl restart riptide.service` → smoke test
 3. Service runs the new code automatically
@@ -77,7 +77,7 @@ SQLite at `~/.local/share/riptide/state.db`:
 
 ## File Layout
 
-```
+```text
 riptide/
 ├── webhook.py         # FastAPI server, GitHub webhook handler
 ├── companion.py       # Bot 1: TL;DR + ELI5 + timing footer
@@ -99,3 +99,9 @@ riptide/
 - [COMPETITOR-PATTERNS.md](COMPETITOR-PATTERNS.md) — Analysis of CodeRabbit/Greptile patterns
 - [AGENTS.md](AGENTS.md) — Rules for AI agents editing this codebase
 - [CHANGELOG.md](CHANGELOG.md) — Recent changes
+
+## Security
+
+- Deep-think prompts are written to temp files with `0o600` permissions (owner-only) and cleaned up after Hermes reads them
+- Prompt contents are sanitized to redact secrets (GitHub tokens, private keys) before writing to disk
+- The `@riptide-bot review` command always spawns when the 24h same-commit cooldown allows — review data (findings, file paths, code) is treated as untrusted
