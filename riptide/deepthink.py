@@ -395,7 +395,6 @@ def _sanitize_prompt(prompt: str) -> str:
     Replaces common secret patterns (GitHub tokens, private keys, API keys)
     with a placeholder to minimize exposure if the temp file is read.
     """
-    import re
     # GitHub tokens (ghp_..., gho_..., github_pat_...)
     sanitized = re.sub(r'(ghp|gho|github_pat)_[a-zA-Z0-9_]+', '***REDACTED_TOKEN***', prompt)
     # Generic API keys (sk-...)

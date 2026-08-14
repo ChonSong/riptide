@@ -824,7 +824,13 @@ class TestTimingMetric:
         tier1_body = companion.client.post_pr_comment.call_args[0][4]
         assert "⏱️ Review posted in" in tier1_body
         # Should be around 2.5s
-        assert "2." in tier1_body and "s" in tier1_body
+        # Should be around 2.5s - use a tolerance check instead of exact
+        # string matching ("2." breaks if elapsed rounds to "1.9s" or the
+        # test runs slowly and reports "3.1s").
+        match = re.search(r"(\d+\.\d+)(?:ms|s|m|h)", tier1_body)
+        assert match, f"timing not found in body: {tier1_body!r}"
+        elapsed = float(match.group(1))
+        assert elapsed >= 2.0, f"elapsed {elapsed}s too low (expected ~2.5s)"
 
     def test_timing_present_in_enriched_output(self, mock_ollama):
         """Enriched (Tier 2) output also includes timing."""
