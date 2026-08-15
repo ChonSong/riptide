@@ -58,6 +58,12 @@ class TestFixRe:
 class TestFixerDefaults:
     """Verify fixer defaults route to LongCat, not OpenRouter."""
 
+    def teardown_method(self):
+        """Restore riptide.fixer module state after each test."""
+        import importlib
+        import riptide.fixer
+        importlib.reload(riptide.fixer)
+
     def test_default_fix_provider_is_longcat(self):
         """Default provider must be 'longcat', not 'custom'."""
         with patch.dict(os.environ, {}, clear=True):

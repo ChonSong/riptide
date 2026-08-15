@@ -106,12 +106,12 @@ Run an isolated test container for any branch without affecting production or ot
 - Reproduce issues in a clean environment
 
 **Requirements:**
-- `docker`, `git`, `python3` (for portable hash/datetime — works on Linux, macOS, BSD)
+- `docker`, `git`, `python3`, `curl` (for portable hash/datetime and health checks — works on Linux, macOS, BSD)
 - `hermes` CLI (optional — only needed for provider probe)
 
 **Hermes probe example output:**
 
-```
+```text
 ━━━ Hermes Provider Probe ━━━
 Test 1: --provider longcat --model LongCat-2.0
   ✅ Dispatched OK

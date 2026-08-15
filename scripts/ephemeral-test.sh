@@ -13,10 +13,10 @@
 #   -h, --help        Show this help message
 #
 # Isolation guarantees:
-#   - Container name: riptide-test-<branch> (no clashes with prod or other tests)
+#   - Container name: riptide-test-<branch>-<hash> (no clashes with prod or other tests)
 #   - Host port: 18477 + hash(branch) mod 1000 (avoids 8477 prod port)
 #   - State: anonymous volume (destroyed with container)
-#   - Network: bridge network riptide-ephemeral-net (no cross-talk)
+#   - Network: bridge network riptide-ephemeral-<hash> (per-branch isolation)
 #
 # Portability:
 #   - Uses python3 for hash and datetime (works on Linux, macOS, BSD)
@@ -98,6 +98,31 @@ if [[ -z "$BRANCH" ]]; then
     exit 1
 fi
 
+# ── Pre-flight checks ───────────────────────────────────────────────────────
+
+for cmd in docker git python3 curl; do
+    if ! command -v "$cmd" &>/dev/null; then
+        echo "ERROR: Required command '$cmd' not found in PATH" >&2
+        exit 1
+    fi
+done
+
+# ── Validate parsed values ──────────────────────────────────────────────────
+
+# Validate port
+if [[ -n "$OVERRIDE_PORT" ]]; then
+    if ! [[ "$OVERRIDE_PORT" =~ ^[0-9]+$ ]] || [[ "$OVERRIDE_PORT" -lt 1 ]] || [[ "$OVERRIDE_PORT" -gt 65535 ]]; then
+        echo "ERROR: --port must be a positive integer between 1 and 65535, got '$OVERRIDE_PORT'" >&2
+        exit 1
+    fi
+fi
+
+# Validate timeout
+if ! [[ "$HEALTH_TIMEOUT" =~ ^[0-9]+$ ]] || [[ "$HEALTH_TIMEOUT" -lt 1 ]]; then
+    echo "ERROR: --timeout must be a positive integer, got '$HEALTH_TIMEOUT'" >&2
+    exit 1
+fi
+
 # ── Python helpers (portable) ──────────────────────────────────────────────
 
 # Deterministic port from branch name using python (works on macOS/Linux/BSD)
@@ -116,24 +141,29 @@ fi
 # Sanitize branch name for Docker naming (replace / with -)
 SAFE_BRANCH="${BRANCH//\//-}"
 
-CONTAINER_NAME="riptide-test-${SAFE_BRANCH}"
-IMAGE_NAME="riptide-test:${SAFE_BRANCH}"
-NETWORK_NAME="riptide-ephemeral-net"
+# Deterministic Docker-safe hash from original BRANCH value
+BRANCH_HASH=$(python3 -c "
+import hashlib, sys
+branch = sys.argv[1]
+h = hashlib.sha256(branch.encode()).hexdigest()[:12]
+print(h)
+" "$BRANCH")
 
-# ── Pre-flight checks ───────────────────────────────────────────────────────
-
-for cmd in docker git python3; do
-    if ! command -v "$cmd" &>/dev/null; then
-        echo "ERROR: Required command '$cmd' not found in PATH" >&2
-        exit 1
-    fi
-done
+CONTAINER_NAME="riptide-test-${SAFE_BRANCH}-${BRANCH_HASH}"
+IMAGE_NAME="riptide-test:${BRANCH_HASH}"
+NETWORK_NAME="riptide-ephemeral-${BRANCH_HASH}"
 
 # ── Cleanup function ────────────────────────────────────────────────────────
+
+WORKTREE_DIR=""
 
 cleanup() {
     echo ""
     echo "━━━ Cleaning up ━━━"
+    if [[ -n "$WORKTREE_DIR" && -d "$WORKTREE_DIR" ]]; then
+        echo "Removing worktree: $WORKTREE_DIR"
+        git worktree remove "$WORKTREE_DIR" --force 2>/dev/null || true
+    fi
     if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
         echo "Stopping container: $CONTAINER_NAME"
         docker stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
@@ -153,9 +183,23 @@ cleanup() {
     fi
     echo "Done."
 }
-trap cleanup EXIT INT TERM
 
-# ── Step 1: Ensure we're on the right branch ────────────────────────────────
+# Signal handlers — cleanup then exit with signal status
+handle_sigint() {
+    cleanup
+    exit 130
+}
+
+handle_sigterm() {
+    cleanup
+    exit 143
+}
+
+trap cleanup EXIT
+trap handle_sigint INT
+trap handle_sigterm TERM
+
+# ── Step 1: Fetch and create worktree ───────────────────────────────────────
 
 echo "━━━ Riptide Ephemeral Test ━━━"
 echo "Branch:     $BRANCH"
@@ -167,25 +211,32 @@ echo "Probe:      $DO_PROBE"
 echo "Keep image: $KEEP_IMAGE"
 echo ""
 
-echo "━━━ Checking out branch: $BRANCH ━━━"
+echo "━━━ Fetching branch: $BRANCH ━━━"
 cd "$PROJECT_ROOT"
 git fetch origin "$BRANCH" 2>/dev/null || true
-if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
-    git checkout "$BRANCH"
-elif git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
-    git checkout -b "$BRANCH" "origin/$BRANCH"
+
+# Resolve the commit SHA (prefer remote, fall back to local)
+if git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+    COMMIT_SHA=$(git rev-parse "origin/$BRANCH")
+elif git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+    COMMIT_SHA=$(git rev-parse "$BRANCH")
 else
     echo "ERROR: Branch '$BRANCH' not found locally or on origin"
     exit 1
 fi
 
-echo "Commit: $(git rev-parse --short HEAD) — $(git log -1 --pretty=%s)"
+echo "Commit: ${COMMIT_SHA[:12]} — $(git log -1 --pretty=%s "$COMMIT_SHA")"
+
+# Create temporary detached worktree
+WORKTREE_DIR=$(mktemp -d -t riptide-worktree-XXXXXX)
+echo "Worktree:   $WORKTREE_DIR"
+git worktree add --detach "$WORKTREE_DIR" "$COMMIT_SHA"
 
 # ── Step 2: Build image ─────────────────────────────────────────────────────
 
 echo ""
 echo "━━━ Building image: $IMAGE_NAME ━━━"
-docker build -t "$IMAGE_NAME" .
+docker build -t "$IMAGE_NAME" "$WORKTREE_DIR"
 
 # ── Step 3: Create isolated network ─────────────────────────────────────────
 
@@ -253,20 +304,29 @@ if [[ "$DO_PROBE" == "true" ]]; then
         # Use python for datetime (portable)
         RUN_AT=$(python3 -c "from datetime import datetime, timedelta; print((datetime.utcnow() + timedelta(minutes=1)).strftime('%Y-%m-%dT%H:%M:%S'))")
 
+        PROBE_JOB_IDS=()
+
         # Test 1: longcat provider (expected to work)
         echo ""
         echo "Test 1: --provider longcat --model LongCat-2.0"
-        LONGCAT_RESULT=$(hermes cron create \
+        LONGCAT_OUTPUT=$(hermes cron create \
             "$RUN_AT" \
             "# Ephemeral test — longcat probe" \
-            --name "probe-longcat-${SAFE_BRANCH}" \
+            --name "probe-longcat-${BRANCH_HASH}" \
             --model "LongCat-2.0" \
             --provider "longcat" \
             --repeat 1 \
             --deliver local 2>&1) || true
 
-        if echo "$LONGCAT_RESULT" | grep -qi "failed\|error\|unknown"; then
-            echo "  ❌ FAILED: $LONGCAT_RESULT"
+        # Extract job ID from output (hermes cron create prints the job ID)
+        LONGCAT_ID=$(echo "$LONGCAT_OUTPUT" | grep -oE '[a-f0-9-]{36}' | head -1 || true)
+        if [[ -n "$LONGCAT_ID" ]]; then
+            PROBE_JOB_IDS+=("$LONGCAT_ID")
+            echo "  Created job: $LONGCAT_ID"
+        fi
+
+        if echo "$LONGCAT_OUTPUT" | grep -qi "failed\|error\|unknown"; then
+            echo "  ❌ FAILED: $LONGCAT_OUTPUT"
         else
             echo "  ✅ Dispatched OK"
         fi
@@ -274,27 +334,52 @@ if [[ "$DO_PROBE" == "true" ]]; then
         # Test 2: custom provider (expected to fail/misroute)
         echo ""
         echo "Test 2: --provider custom --model custom:LongCat-2.0"
-        CUSTOM_RESULT=$(hermes cron create \
+        CUSTOM_OUTPUT=$(hermes cron create \
             "$RUN_AT" \
             "# Ephemeral test — custom probe" \
-            --name "probe-custom-${SAFE_BRANCH}" \
+            --name "probe-custom-${BRANCH_HASH}" \
             --model "custom:LongCat-2.0" \
             --provider "custom" \
             --repeat 1 \
             --deliver local 2>&1) || true
 
-        if echo "$CUSTOM_RESULT" | grep -qi "failed\|error\|unknown"; then
-            echo "  ❌ FAILED (expected — custom provider has no LongCat-2.0): $CUSTOM_RESULT"
+        CUSTOM_ID=$(echo "$CUSTOM_OUTPUT" | grep -oE '[a-f0-9-]{36}' | head -1 || true)
+        if [[ -n "$CUSTOM_ID" ]]; then
+            PROBE_JOB_IDS+=("$CUSTOM_ID")
+            echo "  Created job: $CUSTOM_ID"
+        fi
+
+        if echo "$CUSTOM_OUTPUT" | grep -qi "failed\|error\|unknown"; then
+            echo "  ❌ FAILED (expected — custom provider has no LongCat-2.0): $CUSTOM_OUTPUT"
         else
             echo "  ⚠️  Dispatched (may be routed elsewhere — check Hermes logs)"
         fi
 
-        # Cleanup probe jobs
-        echo ""
-        echo "Cleaning up probe cron jobs..."
-        hermes cron list 2>/dev/null | grep "probe-" | awk '{print $1}' | while read -r job_id; do
-            hermes cron remove "$job_id" 2>/dev/null || true
-        done
+        # Poll jobs until terminal state (max 30 seconds)
+        if [[ ${#PROBE_JOB_IDS[@]} -gt 0 ]]; then
+            echo ""
+            echo "Polling probe jobs for terminal state..."
+            POLL_RETRIES=15
+            for job_id in "${PROBE_JOB_IDS[@]}"; do
+                for ((i=1; i<=POLL_RETRIES; i++)); do
+                    JOB_STATUS=$(hermes cron list 2>/dev/null | grep "$job_id" | awk '{print $3}' || true)
+                    if [[ "$JOB_STATUS" == "completed" || "$JOB_STATUS" == "failed" || "$JOB_STATUS" == "removed" ]]; then
+                        echo "  Job $job_id: $JOB_STATUS"
+                        break
+                    fi
+                    sleep 2
+                done
+            done
+        fi
+
+        # Cleanup probe jobs (only the ones we created)
+        if [[ ${#PROBE_JOB_IDS[@]} -gt 0 ]]; then
+            echo ""
+            echo "Cleaning up probe cron jobs..."
+            for job_id in "${PROBE_JOB_IDS[@]}"; do
+                hermes cron remove "$job_id" 2>/dev/null || true
+            done
+        fi
     fi
 else
     echo ""
