@@ -163,6 +163,7 @@ cleanup() {
     if [[ -n "$WORKTREE_DIR" && -d "$WORKTREE_DIR" ]]; then
         echo "Removing worktree: $WORKTREE_DIR"
         git worktree remove "$WORKTREE_DIR" --force 2>/dev/null || true
+        rm -rf "$WORKTREE_DIR" 2>/dev/null || true
     fi
     if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
         echo "Stopping container: $CONTAINER_NAME"
@@ -173,12 +174,12 @@ cleanup() {
         echo "Removing network: $NETWORK_NAME"
         docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
     fi
-    if [[ "$KEEP_IMAGE" == "false" ]]; then
+    if [[ -n "${IMAGE_NAME:-}" ]] && [[ "$KEEP_IMAGE" == "false" ]]; then
         if docker image ls --format '{{.Repository}}:{{.Tag}}' | grep -q "^${IMAGE_NAME}$"; then
             echo "Removing image: $IMAGE_NAME"
             docker image rm "$IMAGE_NAME" >/dev/null 2>&1 || true
         fi
-    else
+    elif [[ "$KEEP_IMAGE" == "true" ]]; then
         echo "Keeping image: $IMAGE_NAME"
     fi
     echo "Done."
@@ -213,30 +214,55 @@ echo ""
 
 echo "━━━ Fetching branch: $BRANCH ━━━"
 cd "$PROJECT_ROOT"
-git fetch origin "$BRANCH" 2>/dev/null || true
+
+# Resolve the ref: accept branch names (main, feature/x) or full refs (refs/heads/main, refs/tags/v1)
+if [[ "$BRANCH" == refs/* ]]; then
+    # Full ref — use directly
+    REF="$BRANCH"
+    # Fetch the specific ref
+    git fetch origin "$REF" 2>/dev/null || {
+        echo "ERROR: Could not fetch ref '$REF' from origin" >&2
+        exit 1
+    }
+else
+    # Branch name — fetch and resolve
+    git fetch origin "$BRANCH" 2>/dev/null || {
+        echo "ERROR: Could not fetch branch '$BRANCH' from origin" >&2
+        exit 1
+    }
+fi
 
 # Resolve the commit SHA (prefer remote, fall back to local)
-if git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+if git show-ref --verify --quiet "refs/remotes/origin/$BRANCH" 2>/dev/null; then
     COMMIT_SHA=$(git rev-parse "origin/$BRANCH")
-elif git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+elif git show-ref --verify --quiet "refs/heads/$BRANCH" 2>/dev/null; then
+    COMMIT_SHA=$(git rev-parse "$BRANCH")
+elif [[ "$BRANCH" == refs/* ]] && git show-ref --verify --quiet "$BRANCH" 2>/dev/null; then
     COMMIT_SHA=$(git rev-parse "$BRANCH")
 else
-    echo "ERROR: Branch '$BRANCH' not found locally or on origin"
+    echo "ERROR: Branch/ref '$BRANCH' not found locally or on origin" >&2
     exit 1
 fi
 
-echo "Commit: ${COMMIT_SHA[:12]} — $(git log -1 --pretty=%s "$COMMIT_SHA")"
+echo "Commit: ${COMMIT_SHA:0:12} — $(git log -1 --pretty=%s "$COMMIT_SHA")"
 
 # Create temporary detached worktree
 WORKTREE_DIR=$(mktemp -d -t riptide-worktree-XXXXXX)
 echo "Worktree:   $WORKTREE_DIR"
-git worktree add --detach "$WORKTREE_DIR" "$COMMIT_SHA"
+if ! git worktree add --detach "$WORKTREE_DIR" "$COMMIT_SHA"; then
+    echo "ERROR: Failed to create worktree at '$WORKTREE_DIR'" >&2
+    rm -rf "$WORKTREE_DIR"
+    exit 1
+fi
 
 # ── Step 2: Build image ─────────────────────────────────────────────────────
 
 echo ""
 echo "━━━ Building image: $IMAGE_NAME ━━━"
-docker build -t "$IMAGE_NAME" "$WORKTREE_DIR"
+if ! docker build -t "$IMAGE_NAME" "$WORKTREE_DIR"; then
+    echo "ERROR: Docker build failed" >&2
+    exit 1
+fi
 
 # ── Step 3: Create isolated network ─────────────────────────────────────────
 
@@ -361,14 +387,25 @@ if [[ "$DO_PROBE" == "true" ]]; then
             echo "Polling probe jobs for terminal state..."
             POLL_RETRIES=15
             for job_id in "${PROBE_JOB_IDS[@]}"; do
+                job_found=false
                 for ((i=1; i<=POLL_RETRIES; i++)); do
-                    JOB_STATUS=$(hermes cron list 2>/dev/null | grep "$job_id" | awk '{print $3}' || true)
+                    JOB_LINE=$(hermes cron list 2>/dev/null | grep "$job_id" || true)
+                    if [[ -z "$JOB_LINE" ]]; then
+                        echo "  Job $job_id: removed"
+                        job_found=true
+                        break
+                    fi
+                    JOB_STATUS=$(echo "$JOB_LINE" | awk '{print $3}' || true)
                     if [[ "$JOB_STATUS" == "completed" || "$JOB_STATUS" == "failed" || "$JOB_STATUS" == "removed" ]]; then
                         echo "  Job $job_id: $JOB_STATUS"
+                        job_found=true
                         break
                     fi
                     sleep 2
                 done
+                if [[ "$job_found" == "false" ]]; then
+                    echo "  Job $job_id: timeout (still running)"
+                fi
             done
         fi
 

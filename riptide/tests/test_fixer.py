@@ -67,8 +67,6 @@ class TestFixerDefaults:
     def test_default_fix_provider_is_longcat(self):
         """Default provider must be 'longcat', not 'custom'."""
         with patch.dict(os.environ, {}, clear=True):
-            os.environ.pop("RIPTIDE_FIX_PROVIDER", None)
-            os.environ.pop("RIPTIDE_FIX_MODEL", None)
             import importlib
             import riptide.fixer
             importlib.reload(riptide.fixer)
@@ -80,8 +78,6 @@ class TestFixerDefaults:
     def test_default_fix_model_is_longcat(self):
         """Default model must be 'LongCat-2.0' without 'custom:' prefix."""
         with patch.dict(os.environ, {}, clear=True):
-            os.environ.pop("RIPTIDE_FIX_PROVIDER", None)
-            os.environ.pop("RIPTIDE_FIX_MODEL", None)
             import importlib
             import riptide.fixer
             importlib.reload(riptide.fixer)

@@ -105,6 +105,8 @@ Run an isolated test container for any branch without affecting production or ot
 - Test webhook handling on a feature branch
 - Reproduce issues in a clean environment
 
+**Security note:** Only run this script on branches you trust. The script builds and runs a Docker container from the branch's code, which may include arbitrary code execution.
+
 **Requirements:**
 - `docker`, `git`, `python3`, `curl` (for portable hash/datetime and health checks — works on Linux, macOS, BSD)
 - `hermes` CLI (optional — only needed for provider probe)
