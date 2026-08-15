@@ -1,4 +1,5 @@
 """Tests for riptide/fixer.py — @riptide-bot fix command."""
+import os
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -49,6 +50,47 @@ class TestFixRe:
     def test_rejects_prefix_words(self):
         # "prefix" contains "fix" but must not match (\b word boundary)
         assert FIX_RE.search("@riptide-bot prefix") is None
+
+
+# ── Fixer Defaults ──────────────────────────────────────────────────────────
+
+
+class TestFixerDefaults:
+    """Verify fixer defaults route to LongCat, not OpenRouter."""
+
+    def test_default_fix_provider_is_longcat(self):
+        """Default provider must be 'longcat', not 'custom'."""
+        with patch.dict(os.environ, {}, clear=True):
+            os.environ.pop("RIPTIDE_FIX_PROVIDER", None)
+            os.environ.pop("RIPTIDE_FIX_MODEL", None)
+            import importlib
+            import riptide.fixer
+            importlib.reload(riptide.fixer)
+            assert riptide.fixer.FIX_PROVIDER == "longcat", (
+                f"Expected FIX_PROVIDER='longcat', got '{riptide.fixer.FIX_PROVIDER}'. "
+                f"provider='custom' resolves to OpenRouter, not LongCat."
+            )
+
+    def test_default_fix_model_is_longcat(self):
+        """Default model must be 'LongCat-2.0' without 'custom:' prefix."""
+        with patch.dict(os.environ, {}, clear=True):
+            os.environ.pop("RIPTIDE_FIX_PROVIDER", None)
+            os.environ.pop("RIPTIDE_FIX_MODEL", None)
+            import importlib
+            import riptide.fixer
+            importlib.reload(riptide.fixer)
+            assert riptide.fixer.FIX_MODEL == "LongCat-2.0", (
+                f"Expected FIX_MODEL='LongCat-2.0', got '{riptide.fixer.FIX_MODEL}'"
+            )
+
+    def test_fix_provider_env_override(self):
+        """Env vars override defaults."""
+        with patch.dict(os.environ, {"RIPTIDE_FIX_PROVIDER": "custom", "RIPTIDE_FIX_MODEL": "custom:LongCat-2.0"}, clear=True):
+            import importlib
+            import riptide.fixer
+            importlib.reload(riptide.fixer)
+            assert riptide.fixer.FIX_PROVIDER == "custom"
+            assert riptide.fixer.FIX_MODEL == "custom:LongCat-2.0"
 
 
 # ── Authorization gate ───────────────────────────────────────────────────────

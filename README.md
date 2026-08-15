@@ -66,8 +66,27 @@ Comment `@riptide-bot review` on any PR to trigger an on-demand deep-think sessi
 Run an isolated test container for any branch without affecting production or other tests:
 
 ```bash
-./scripts/ephemeral-test.sh <branch-name>
+./scripts/ephemeral-test.sh <branch-name> [--no-probe] [--keep-image] [--port <port>] [--timeout <seconds>]
 ```
+
+**Example:**
+
+```bash
+# Basic usage — auto-selects port, runs Hermes probe
+./scripts/ephemeral-test.sh fix/fixer-provider-defaults
+
+# Skip probe, keep image for faster re-runs
+./scripts/ephemeral-test.sh fix/fixer-provider-defaults --no-probe --keep-image
+
+# Custom port and timeout
+./scripts/ephemeral-test.sh fix/fixer-provider-defaults --port 19000 --timeout 120
+```
+
+**Flags:**
+- `--no-probe` — Skip Hermes provider probe (useful if `hermes` CLI not installed)
+- `--keep-image` — Don't remove the built Docker image on cleanup (faster re-runs)
+- `--port <port>` — Override automatic port selection with a specific host port
+- `--timeout <secs>` — Health check timeout in seconds (default: 60)
 
 **Isolation guarantees:**
 - Unique container name (`riptide-test-<branch>`)
@@ -85,6 +104,20 @@ Run an isolated test container for any branch without affecting production or ot
 - Verify provider config changes (e.g., `longcat` vs `custom`) without risking production
 - Test webhook handling on a feature branch
 - Reproduce issues in a clean environment
+
+**Requirements:**
+- `docker`, `git`, `python3` (for portable hash/datetime — works on Linux, macOS, BSD)
+- `hermes` CLI (optional — only needed for provider probe)
+
+**Hermes probe example output:**
+
+```
+━━━ Hermes Provider Probe ━━━
+Test 1: --provider longcat --model LongCat-2.0
+  ✅ Dispatched OK
+Test 2: --provider custom --model custom:LongCat-2.0
+  ❌ FAILED (expected — custom provider has no LongCat-2.0)
+```
 
 ## Auto-Deploy
 
