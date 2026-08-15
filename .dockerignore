@@ -1,0 +1,29 @@
+# .dockerignore — keep ephemeral builds lean
+
+.git
+.github
+.hermes
+.pytest_cache
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+dist/
+build/
+*.log
+tmp/
+tmp-*
+logs/
+
+# Local secrets
+*.pem
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

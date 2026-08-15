@@ -61,6 +61,31 @@ Comment `@riptide-bot review` on any PR to trigger an on-demand deep-think sessi
 | `HOST` | `0.0.0.0` | Webhook server host |
 | `PORT` | `8477` | Webhook server port |
 
+## Ephemeral Testing
+
+Run an isolated test container for any branch without affecting production or other tests:
+
+```bash
+./scripts/ephemeral-test.sh <branch-name>
+```
+
+**Isolation guarantees:**
+- Unique container name (`riptide-test-<branch>`)
+- Unique host port (avoids 8477 production port)
+- Anonymous volume for state (destroyed on cleanup)
+- Separate Docker network (no cross-talk)
+
+**What it does:**
+1. Checks out the branch and builds a Docker image
+2. Runs the container with health checks
+3. Optionally probes Hermes provider config (verifies provider/model combos actually dispatch)
+4. Keeps container alive for manual testing — Ctrl+C cleans up automatically
+
+**Use cases:**
+- Verify provider config changes (e.g., `longcat` vs `custom`) without risking production
+- Test webhook handling on a feature branch
+- Reproduce issues in a clean environment
+
 ## Auto-Deploy
 
 When a PR merges into the configured deployment branch (`main` by default):
