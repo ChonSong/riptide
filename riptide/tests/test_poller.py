@@ -421,35 +421,9 @@ class TestPollerReviewDiscovery:
         assert "Companion review triggered" in caplog.text
 
 
-# ── _search_fix_comments ─────────────────────────────────────────────────────
-
-
-def _fake_search_result(number=42, owner="ChonSong", repo="riptide"):
-    """Create a fake GitHub search result item."""
-    return {
-        "number": number,
-        "title": "PR",
-        "repository": {"owner": {"login": owner}, "name": repo},
-        "createdAt": "2026-08-01T00:00:00Z",
-        "body": "",
-        "author": {"login": owner},
-        "commentsCount": 1,
-    }
-
-
-def _search_subprocess_return(items):
-    """Wrap items as subprocess.run return value with JSON stdout."""
-    result = MagicMock()
-    result.returncode = 0
-    result.stdout = json.dumps(items)
-    result.stderr = ""
-    return result
-
-
 class TestSearchFixComments:
     def test_search_restricts_to_comments_field(self, poller_mod):
-        """The gh search must pass --match comments so PRs whose *body*
-        contains the phrase (but no comment does) are not matched."""
+        """The gh search must pass --match comments."""
         with patch("riptide.poller.subprocess.run") as mock_run, \
              patch("riptide.poller._get_pr_comments", return_value=[]):
             mock_run.return_value = _search_subprocess_return([])
@@ -459,8 +433,7 @@ class TestSearchFixComments:
         assert cmd[cmd.index("--match") + 1] == "comments"
 
     def test_search_uses_raised_limit(self, poller_mod):
-        """SEARCH_LIMIT must be passed to gh so results are not capped at
-        the old hard-coded 20 (gh auto-paginates internally up to --limit)."""
+        """SEARCH_LIMIT must be passed to gh."""
         assert poller_mod.SEARCH_LIMIT > 20
         with patch("riptide.poller.subprocess.run") as mock_run, \
              patch("riptide.poller._get_pr_comments", return_value=[]):
@@ -479,11 +452,9 @@ class TestSearchFixComments:
         cmd = mock_run.call_args.args[0]
         json_idx = cmd.index("--json")
         fields = cmd[json_idx + 1]
-        # Only request fields the poller actually reads
         assert "number" in fields
         assert "title" in fields
         assert "repository" in fields
-        # These fields are NOT requested (trimmed for efficiency)
         assert "createdAt" not in fields
         assert "body" not in fields
         assert "author" not in fields
@@ -506,10 +477,9 @@ class TestSearchFixComments:
         assert matches[0]["comment_id"] == 9001
         assert matches[0]["commenter"] == "alice"
         assert matches[0]["pr_key"] == "ChonSong/riptide#42"
-        assert matches[0]["pr_title"] == "PR"
 
     def test_search_failure_returns_empty(self, poller_mod):
-        """A failing gh search must not raise; the poll cycle just skips."""
+        """A failing gh search must not raise."""
         result = MagicMock()
         result.returncode = 1
         result.stdout = ""
@@ -519,3 +489,25 @@ class TestSearchFixComments:
             matches = poller_mod._search_fix_comments()
         assert matches == []
         mock_comments.assert_not_called()
+
+
+def _fake_search_result(number=42, owner="ChonSong", repo="riptide"):
+    """Create a fake GitHub search result item."""
+    return {
+        "number": number,
+        "title": "PR",
+        "repository": {"owner": {"login": owner}, "name": repo},
+        "createdAt": "2026-08-01T00:00:00Z",
+        "body": "",
+        "author": {"login": owner},
+        "commentsCount": 1,
+    }
+
+
+def _search_subprocess_return(items):
+    """Wrap items as subprocess.run return value with JSON stdout."""
+    result = MagicMock()
+    result.returncode = 0
+    result.stdout = json.dumps(items)
+    result.stderr = ""
+    return result

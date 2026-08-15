@@ -215,9 +215,6 @@ async def github_webhook(request: Request) -> Response:
 
 async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
     """Handle pull_request events — spawn companion TLDR thread."""
-    # Capture webhook receipt time up front so the companion timing metric
-    # reflects webhook receipt → comment posting (not thread-start → posting).
-    webhook_received_at = time.time()
     action = payload.get("action", "")
     pr = payload.get("pull_request", {})
     repo = payload.get("repository", {})
@@ -301,19 +298,11 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
                 # Deterministic companion flow — the single pipeline entry.
                 # Runs depth decision → context bundle → Tier-1 canonical thread
                 # (Stage 0/1/2) inside Companion.run_for_pr (semaphore-guarded).
-                #
-                # IMPORTANT: webhook_received_at is captured by the closure but
-                # time.time() is called INSIDE the thread (when run_for_pr executes),
-                # not when the closure is created. This means the timing reflects
-                # when the companion actually starts processing, not when the
-                # webhook was received. For true receipt time, pass it as an
-                # argument instead.
                 def _safe_run():
                     try:
                         companion.run_for_pr(
                             installation_id, owner, repo_name, pr_number,
                             title, author, files,
-                            webhook_received_at=webhook_received_at,
                         )
                     except Exception as e:
                         log.error(

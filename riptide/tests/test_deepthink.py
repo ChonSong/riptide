@@ -87,7 +87,6 @@ class TestSpawnDeepthink:
 
     def test_spawn_writes_prompt_to_temp_file(self):
         """Prompt should be written to temp file to bypass Hermes safety filter."""
-        import tempfile
         with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="Created job: 123")) as mock_run, \
              patch("riptide.deepthink._is_cron_available", return_value=True), \
              patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
@@ -97,8 +96,21 @@ class TestSpawnDeepthink:
             assert result is True
             call_args = mock_run.call_args
             cmd = call_args[0][0]
+            # Extract the prompt file path from cmd[4]
             assert "Read the prompt from" in cmd[4]
             assert "riptide-prompt-" in cmd[4]
+            # Verify the prompt file contains the expected content
+            # cmd[4] format: "Read the prompt from {path} and execute it. After execution, delete the file {path}."
+            prompt_path = cmd[4].split("Read the prompt from ")[1].split(" and execute it.")[0]
+            with open(prompt_path) as f:
+                content = f.read()
+            assert "test" in content  # pr_title was "test"
+            # Clean up the temp file (in real usage Hermes would do this)
+            import os
+            try:
+                os.unlink(prompt_path)
+            except OSError:
+                pass
 
     def test_spawn_fails_when_hermes_blocked(self):
         """Hermes returns exit 0 with 'Failed to create job' — should raise."""
@@ -113,6 +125,57 @@ class TestSpawnDeepthink:
                 _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
             # 3 spawn attempts + 1 diagram generation call (which also gets blocked)
             assert mock_run.call_count == 4
+
+    def test_spawn_fails_when_hermes_blocked_in_stderr(self):
+        """Hermes blocks with message in stderr instead of stdout — should still detect."""
+        blocked_stderr = "Failed to create job: Blocked: cron job contains a gateway lifecycle command"
+        with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr=blocked_stderr)) as mock_run, \
+             patch("time.sleep"), \
+             patch("riptide.deepthink._is_cron_available", return_value=True), \
+             patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
+             patch("riptide.state.StateStore") as mock_state:
+            mock_state.return_value.reserve_job.return_value = True
+            with pytest.raises(RuntimeError, match="All 3 Hermes cron attempts failed"):
+                _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
+
+    def test_prompt_file_cleaned_up_on_failure(self):
+        """Prompt file is removed when scheduling fails."""
+        with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="Failed to create job: Blocked")), \
+             patch("time.sleep"), \
+             patch("riptide.deepthink._is_cron_available", return_value=True), \
+             patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
+             patch("riptide.state.StateStore") as mock_state, \
+             patch("os.unlink") as mock_unlink:
+            mock_state.return_value.reserve_job.return_value = True
+            with pytest.raises(RuntimeError):
+                _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
+            # Verify cleanup was called
+            mock_unlink.assert_called()
+
+    def test_sanitize_prompt_redacts_secrets(self):
+        """Prompt sanitizer should redact common secret patterns."""
+        from riptide.deepthink import _sanitize_prompt
+        # GitHub token
+        assert "ghp_abc123" not in _sanitize_prompt("token: ghp_abc123xyz")
+        # API key
+        assert "sk-abcdefghijklmnopqrstuvwxyz" not in _sanitize_prompt("key: sk-abcdefghijklmnopqrstuvwxyz")
+        # Private key
+        assert "BEGIN RSA PRIVATE KEY" not in _sanitize_prompt("key: -----BEGIN RSA PRIVATE KEY-----\nsecret\n-----END RSA PRIVATE KEY-----")
+        # Normal text preserved
+        assert "normal text here" in _sanitize_prompt("normal text here")
+
+    def test_hermes_blocked_detection(self):
+        """_hermes_blocked detects blocked jobs case-insensitively from stdout and stderr."""
+        from riptide.deepthink import _hermes_blocked
+        # stdout detection
+        assert _hermes_blocked("Failed to create job: Blocked", "") is True
+        # stderr detection
+        assert _hermes_blocked("", "Failed to create job: Blocked") is True
+        # case insensitive
+        assert _hermes_blocked("FAILED TO CREATE JOB", "") is True
+        # not blocked
+        assert _hermes_blocked("Created job: 123", "") is False
+        assert _hermes_blocked("", "") is False
 
     def test_spawn_success_returns_true(self):
         with patch("subprocess.run", return_value=self._success_result()) as mock_run, \

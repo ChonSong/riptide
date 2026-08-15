@@ -120,9 +120,6 @@ def assemble_review_body(
         try:
             triggered = datetime.fromisoformat(triggered_at.replace("Z", "+00:00"))
             elapsed = (datetime.now(timezone.utc) - triggered).total_seconds()
-            # Clamp negative (future timestamps) to 0
-            if elapsed < 0:
-                elapsed = 0
             if elapsed < 1:
                 elapsed_str = f"{int(elapsed * 1000)}ms"
             elif elapsed < 60:

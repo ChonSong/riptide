@@ -46,8 +46,8 @@ OUR_ORG = os.environ.get("RIPTIDE_OUR_ORG", "ChonSong")
 # Pin the inference config on spawned cron jobs — the global config drifts,
 # and unpinned jobs are skipped to prevent unintended spend (Hermes #44585).
 # Mirrors deepthink.py's DEEPTHINK_MODEL/DEEPTHINK_PROVIDER.
-FIX_MODEL = os.environ.get("RIPTIDE_FIX_MODEL", "LongCat-2.0")
-FIX_PROVIDER = os.environ.get("RIPTIDE_FIX_PROVIDER", "longcat")
+FIX_MODEL = os.environ.get("RIPTIDE_FIX_MODEL", "custom:LongCat-2.0")
+FIX_PROVIDER = os.environ.get("RIPTIDE_FIX_PROVIDER", "custom")
 
 # Workspace root for spawned sessions (PYTHONPATH pitfall — spawned
 # sessions have no PYTHONPATH; the prompt must insert this path).
