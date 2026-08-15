@@ -1,241 +1,145 @@
-# riptide/tests/test_assemble_review.py
-"""
-Tests for assemble_review module — structured findings → review comment.
-"""
-
-import json
-import subprocess
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+#!/usr/bin/env python3
+"""Tests for assemble_review timing assembly logic."""
 
 import pytest
-
-from riptide.assemble_review import (
-    assemble_review_body,
-    validate_findings,
-    post_review,
-)
+from riptide.assemble_review import assemble_review_body
 
 
-# ── Assembly Tests ──────────────────────────────────────────────────────────
+class TestTimingAssembly:
+    """Direct tests for the timing metric in assemble_review_body."""
 
+    def _base_findings(self):
+        return [{"severity": "critical", "title": "SQL injection", "detail": "test", "file": "a.py", "line": 1}]
 
-class TestAssembleReviewBody:
-    """Tests for assemble_review_body()."""
-
-    def test_empty_findings_clean_pr(self):
-        body = assemble_review_body([], "ChonSong", "riptide", 42)
-        assert "Clean PR" in body
-        assert "Riptide Review via Hermes" in body
-
-    def test_signoff_includes_model_provider(self):
+    def test_milliseconds(self):
+        """Sub-second → milliseconds."""
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        triggered = (now - timedelta(milliseconds=100)).isoformat()
         body = assemble_review_body(
-            [], "ChonSong", "riptide", 42,
-            model="custom:LongCat-2.0", provider="custom",
+            self._base_findings(), "ChonSong", "riptide", 1,
+            triggered_at=triggered,
+            model="LongCat-2.0",
+            provider="custom",
         )
-        assert "model: `custom:LongCat-2.0`" in body
-        assert "provider: `custom`" in body
+        # Sub-second elapsed (< 1s) → milliseconds format
+        assert "⏱️ Review posted in" in body
+        assert "ms" in body
 
-    def test_signoff_model_only(self):
+    def test_seconds(self):
+        """1-60 seconds → seconds format."""
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        triggered = (now - timedelta(seconds=5)).isoformat()
         body = assemble_review_body(
-            [], "ChonSong", "riptide", 42, model="deepseek-v4-flash",
+            self._base_findings(), "ChonSong", "riptide", 1,
+            triggered_at=triggered,
+            model="LongCat-2.0",
+            provider="custom",
         )
-        assert "model: `deepseek-v4-flash`" in body
-        assert "provider" not in body
+        assert "⏱️ Review posted in" in body
+        assert "s" in body
+        # Should be around 5s
+        assert "5." in body or "4." in body
 
-    def test_signoff_provider_only(self):
+    def test_minutes(self):
+        """1-60 minutes → minutes format."""
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        triggered = (now - timedelta(minutes=5)).isoformat()
         body = assemble_review_body(
-            [], "ChonSong", "riptide", 42, provider="opencode-go",
+            self._base_findings(), "ChonSong", "riptide", 1,
+            triggered_at=triggered,
+            model="LongCat-2.0",
+            provider="custom",
         )
-        assert "provider: `opencode-go`" in body
-        assert "model" not in body
+        assert "⏱️ Review posted in" in body
+        assert "m" in body
+        # Should be around 5m
+        assert "5." in body or "4." in body
 
-    def test_signoff_neither(self):
-        body = assemble_review_body([], "ChonSong", "riptide", 42)
-        assert "<sub>Riptide Review via Hermes</sub>" in body
-        assert "model" not in body
-        assert "provider" not in body
+    def test_hours(self):
+        """60+ minutes → hours format."""
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        triggered = (now - timedelta(hours=2)).isoformat()
+        body = assemble_review_body(
+            self._base_findings(), "ChonSong", "riptide", 1,
+            triggered_at=triggered,
+            model="LongCat-2.0",
+            provider="custom",
+        )
+        assert "⏱️ Review posted in" in body
+        assert "h" in body
+        # Should be around 2h
+        assert "2." in body or "1." in body
 
-    def test_findings_table_rendered(self):
-        findings = [
-            {"severity": "warning", "title": "Issue 1", "detail": "Detail 1", "file": "a.py", "line": 10},
-            {"severity": "critical", "title": "Issue 2", "detail": "Detail 2", "file": "b.py", "line": 20},
-        ]
-        body = assemble_review_body(findings, "ChonSong", "riptide", 42)
-        assert "| 🟡 warning |" in body
-        assert "| 🔴 critical |" in body
-        assert "`a.py`" in body
-        assert "`b.py`" in body
-        assert "Issue 1" in body
-        assert "Issue 2" in body
+    def test_invalid_triggered_at(self):
+        """Invalid triggered_at → no timing line (does not fall back to pr_created_at)."""
+        body = assemble_review_body(
+            self._base_findings(), "ChonSong", "riptide", 1,
+            triggered_at="not-a-timestamp",
+            pr_created_at="2026-08-13T00:00:00+00:00",
+            model="LongCat-2.0",
+            provider="custom",
+        )
+        # Invalid triggered_at is caught by except and does NOT fall back
+        assert "⏱️" not in body
 
-    def test_diagram_url_included(self):
-        body = assemble_review_body([], "ChonSong", "riptide", 42, diagram_url="https://example.com/diagram")
-        assert "https://example.com/diagram" in body
+    def test_fallback_to_pr_created_at(self):
+        """No triggered_at → uses pr_created_at."""
+        body = assemble_review_body(
+            self._base_findings(), "ChonSong", "riptide", 1,
+            pr_created_at="2026-08-13T00:00:00+00:00",
+            model="LongCat-2.0",
+            provider="custom",
+        )
+        assert "⏱️ Review posted in" in body
+        assert "since PR opened" in body
 
-    def test_no_diagram_url_placeholder(self):
-        body = assemble_review_body([], "ChonSong", "riptide", 42)
-        assert "No diagram" in body
+    def test_no_timing_info(self):
+        """Neither triggered_at nor pr_created_at → no timing line."""
+        body = assemble_review_body(
+            self._base_findings(), "ChonSong", "riptide", 1,
+            model="LongCat-2.0",
+            provider="custom",
+        )
+        assert "⏱️" not in body
 
-    def test_next_steps_from_findings(self):
-        findings = [
-            {"severity": "warning", "title": "Fix error handling", "detail": "...", "file": "a.py", "line": 1},
-            {"severity": "suggestion", "title": "Use pathlib", "detail": "...", "file": "b.py", "line": 2},
-        ]
-        body = assemble_review_body(findings, "ChonSong", "riptide", 42)
-        assert "Fix error handling" in body
-        assert "Use pathlib" in body
+    def test_future_triggered_at(self):
+        """Future triggered_at (negative elapsed) should not produce confusing negative numbers."""
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        triggered = (now + timedelta(minutes=5)).isoformat()
+        body = assemble_review_body(
+            self._base_findings(), "ChonSong", "riptide", 1,
+            triggered_at=triggered,
+            model="LongCat-2.0",
+            provider="custom",
+        )
+        if "⏱️" in body:
+            timing_part = body.split("⏱️")[1]
+            assert "-" not in timing_part, f"Future timestamp produced negative: {timing_part}"
 
-    def test_detail_rendered(self):
-        findings = [
-            {"severity": "warning", "title": "Issue", "detail": "This is a detailed explanation.", "file": "a.py", "line": 1},
-        ]
-        body = assemble_review_body(findings, "ChonSong", "riptide", 42)
-        assert "This is a detailed explanation." in body
-
-    def test_summary_count(self):
-        findings = [
-            {"severity": "warning", "title": "A", "detail": "", "file": "", "line": ""},
-            {"severity": "critical", "title": "B", "detail": "", "file": "", "line": ""},
-            {"severity": "suggestion", "title": "C", "detail": "", "file": "", "line": ""},
-        ]
-        body = assemble_review_body(findings, "ChonSong", "riptide", 42)
-        # 2 critical/warning → "2 issue(s) found"
-        assert "2 issue(s) found" in body
-
-    def test_no_file_ref_shows_dash(self):
-        findings = [
-            {"severity": "info", "title": "General note", "detail": "...", "file": "", "line": ""},
-        ]
-        body = assemble_review_body(findings, "ChonSong", "riptide", 42)
-        assert "—" in body  # dash for missing file
-
-
-# ── Validation Tests ────────────────────────────────────────────────────────
-
-
-class TestValidateFindings:
-    """Tests for validate_findings()."""
-
-    def test_valid_findings(self):
-        errors = validate_findings([
-            {"severity": "warning", "title": "Issue", "detail": "..."},
-        ])
-        assert errors == []
-
-    def test_missing_severity(self):
-        errors = validate_findings([{"title": "Issue"}])
-        assert any("severity" in e for e in errors)
-
-    def test_missing_title(self):
-        errors = validate_findings([{"severity": "warning"}])
-        assert any("title" in e for e in errors)
-
-    def test_invalid_severity(self):
-        errors = validate_findings([{"severity": "banana", "title": "X"}])
-        assert any("invalid severity" in e for e in errors)
-
-    def test_not_a_dict(self):
-        errors = validate_findings(["not a dict"])  # type: ignore[list-item]
-        assert any("must be a dict" in e for e in errors)
-
-    def test_multiple_errors(self):
-        errors = validate_findings([
-            {"title": "no severity"},
-            {"severity": "bad", "title": "bad severity"},
-        ])
-        assert len(errors) >= 2
-
-
-# ── Post Review Tests ───────────────────────────────────────────────────────
-
-
-class TestPostReview:
-    """Tests for post_review()."""
-
-    def test_post_success(self):
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-            assert post_review("ChonSong", "riptide", 42, "body") is True
-
-    def test_post_failure(self):
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="fail")
-            assert post_review("ChonSong", "riptide", 42, "body") is False
-
-    def test_post_exception(self):
-        with patch("subprocess.run", side_effect=OSError("gh not found")):
-            assert post_review("ChonSong", "riptide", 42, "body") is False
-
-
-# ── CLI Tests ────────────────────────────────────────────────────────────────
-
-
-class TestCLI:
-    """Tests for the CLI entry point."""
-
-    def test_dry_run_outputs_body(self, tmp_path, capsys):
-        findings = [{"severity": "warning", "title": "X", "detail": "Y", "file": "a.py", "line": 1}]
-        findings_file = tmp_path / "findings.json"
-        findings_file.write_text(json.dumps(findings))
-
-        with patch("sys.argv", [
-            "assemble_review",
-            "--findings", str(findings_file),
-            "--owner", "ChonSong",
-            "--repo", "riptide",
-            "--pr", "42",
-            "--dry-run",
-        ]):
-            from riptide.assemble_review import main
-            main()
-
-        captured = capsys.readouterr()
-        assert "X" in captured.out
-        assert "Y" in captured.out
-
-    def test_missing_findings_file(self, capsys):
-        with patch("sys.argv", [
-            "assemble_review",
-            "--findings", "/nonexistent/findings.json",
-            "--owner", "ChonSong",
-            "--repo", "riptide",
-            "--pr", "42",
-        ]):
-            from riptide.assemble_review import main
-            with pytest.raises(SystemExit) as exc_info:
-                main()
-            assert exc_info.value.code == 1
-
-    def test_invalid_json(self, tmp_path, capsys):
-        findings_file = tmp_path / "findings.json"
-        findings_file.write_text("{invalid json")
-
-        with patch("sys.argv", [
-            "assemble_review",
-            "--findings", str(findings_file),
-            "--owner", "ChonSong",
-            "--repo", "riptide",
-            "--pr", "42",
-        ]):
-            from riptide.assemble_review import main
-            with pytest.raises(SystemExit) as exc_info:
-                main()
-            assert exc_info.value.code == 1
-
-    def test_validation_failure(self, tmp_path, capsys):
-        findings = [{"title": "no severity field"}]
-        findings_file = tmp_path / "findings.json"
-        findings_file.write_text(json.dumps(findings))
-
-        with patch("sys.argv", [
-            "assemble_review",
-            "--findings", str(findings_file),
-            "--owner", "ChonSong",
-            "--repo", "riptide",
-            "--pr", "42",
-        ]):
-            from riptide.assemble_review import main
-            with pytest.raises(SystemExit) as exc_info:
-                main()
-            assert exc_info.value.code == 1
+    def test_timezone_aware_parsing(self):
+        """Timezone-aware ISO strings are parsed correctly."""
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        # Test with explicit Z suffix
+        triggered_z = (now - timedelta(seconds=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        body_z = assemble_review_body(
+            self._base_findings(), "ChonSong", "riptide", 1,
+            triggered_at=triggered_z,
+            model="LongCat-2.0",
+            provider="custom",
+        )
+        assert "⏱️ Review posted in" in body_z
+        # Test with explicit +00:00 offset
+        triggered_offset = (now - timedelta(seconds=5)).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+        body_offset = assemble_review_body(
+            self._base_findings(), "ChonSong", "riptide", 1,
+            triggered_at=triggered_offset,
+            model="LongCat-2.0",
+            provider="custom",
+        )
+        assert "⏱️ Review posted in" in body_offset

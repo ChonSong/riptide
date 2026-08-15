@@ -784,3 +784,103 @@ class TestDepthGate:
             [{"filename": "README.md", "patch": "+hello", "additions": 1, "deletions": 0, "status": "modified"}],
         )
         assert companion._depth == "trivial"
+
+
+# ── Timing metric (webhook received → comment posted) ────────────────────────
+
+
+class TestTimingMetric:
+    """Tests for the deterministic-analysis timing metric."""
+
+    def test_timing_present_in_tier1_output(self, mock_ollama):
+        """When webhook_received_at is provided, Tier 1 output includes timing."""
+        import time as _time
+        companion = make_companion()
+        companion.enable_deterministic = True
+        companion.enable_graphify = False
+        companion._get_last_sha = MagicMock(return_value=None)
+        companion.client.post_pr_comment = MagicMock(return_value={"id": 999})
+        companion.client.update_pr_comment = MagicMock(return_value={"id": 999})
+
+        mock_report = MagicMock()
+        mock_report.has_actionable = True
+        mock_report.verdict = "review"
+        mock_report.summary = "Security risk detected"
+        mock_report.findings = [
+            MagicMock(severity="critical", message="Hardcoded secret", file="auth.py", category="security")
+        ]
+
+        # Pass webhook_received_at — this is what the webhook handler sends
+        received_at = _time.time() - 2.5  # 2.5 seconds ago
+        with patch("riptide.companion.build_context_bundle", return_value={"report": mock_report}):
+            companion._execute(
+                123, "owner", "repo", 42,
+                "feat: add auth", "author",
+                [{"filename": "src/auth.py", "patch": "+secret = 'hardcoded'", "additions": 1, "deletions": 0, "status": "modified"}],
+                webhook_received_at=received_at,
+            )
+
+        # Tier 1 body must contain the timing metric
+        tier1_body = companion.client.post_pr_comment.call_args[0][4]
+        assert "⏱️ Review posted in" in tier1_body
+        # Should be around 2.5s
+        assert "2." in tier1_body and "s" in tier1_body
+
+    def test_timing_present_in_enriched_output(self, mock_ollama):
+        """Enriched (Tier 2) output also includes timing."""
+        import time as _time
+        companion = make_companion()
+        companion.enable_deterministic = True
+        companion.enable_graphify = False
+        companion._get_last_sha = MagicMock(return_value=None)
+        companion.client.post_pr_comment = MagicMock(return_value={"id": 999})
+        companion.client.update_pr_comment = MagicMock(return_value={"id": 999})
+
+        mock_report = MagicMock()
+        mock_report.has_actionable = True
+        mock_report.verdict = "review"
+        mock_report.summary = "Security risk detected"
+        mock_report.findings = [
+            MagicMock(severity="critical", message="Hardcoded secret", file="auth.py", category="security")
+        ]
+
+        received_at = _time.time() - 1.5
+        with patch("riptide.companion.build_context_bundle", return_value={"report": mock_report}):
+            companion._execute(
+                123, "owner", "repo", 42,
+                "feat: add auth", "author",
+                [{"filename": "src/auth.py", "patch": "+secret = 'hardcoded'", "additions": 1, "deletions": 0, "status": "modified"}],
+                webhook_received_at=received_at,
+            )
+
+        # Enriched body must contain the timing metric
+        enriched_body = companion.client.update_pr_comment.call_args[0][4]
+        assert "⏱️ Review posted in" in enriched_body
+
+    def test_timing_absent_without_webhook_received_at(self, mock_ollama):
+        """When webhook_received_at is None, no timing metric is shown."""
+        companion = make_companion()
+        companion.enable_deterministic = True
+        companion.enable_graphify = False
+        companion._get_last_sha = MagicMock(return_value=None)
+        companion.client.post_pr_comment = MagicMock(return_value={"id": 999})
+        companion.client.update_pr_comment = MagicMock(return_value={"id": 999})
+
+        mock_report = MagicMock()
+        mock_report.has_actionable = True
+        mock_report.verdict = "review"
+        mock_report.summary = "Security risk detected"
+        mock_report.findings = [
+            MagicMock(severity="critical", message="Hardcoded secret", file="auth.py", category="security")
+        ]
+
+        # No webhook_received_at (e.g., poller path)
+        with patch("riptide.companion.build_context_bundle", return_value={"report": mock_report}):
+            companion._execute(
+                123, "owner", "repo", 42,
+                "feat: add auth", "author",
+                [{"filename": "src/auth.py", "patch": "+secret = 'hardcoded'", "additions": 1, "deletions": 0, "status": "modified"}],
+            )
+
+        tier1_body = companion.client.post_pr_comment.call_args[0][4]
+        assert "⏱️" not in tier1_body
