@@ -341,7 +341,9 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
 
     # PR merged into default branch → auto-deploy
     elif action == "closed" and pr.get("merged"):
-        default_branch = os.environ.get("RIPTIDE_DEPLOY_BRANCH", "main")
+        # Authoritative source: repo's actual default_branch from payload.
+        # Fall back to env var RIPTIDE_DEPLOY_BRANCH, then "main".
+        default_branch = repo.get("default_branch", os.environ.get("RIPTIDE_DEPLOY_BRANCH", "main"))
         base_ref = pr.get("base", {}).get("ref", "")
         if base_ref == default_branch:
             log.info(f"[{delivery_id}] PR #{pr_number} merged into {default_branch} — triggering auto-deploy")
@@ -355,21 +357,25 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
                     f"[{delivery_id}] Auto-deploy skipped — script not executable: {deploy_script}"
                 )
             else:
-                log.info(f"[{delivery_id}] Auto-deploy: invoking systemd-run with script={deploy_script}")
-                try:
-                    proc = subprocess.Popen(
-                        ["systemd-run", "--user", "--scope", "--property=KillMode=process", "--collect", deploy_script],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        start_new_session=True,
-                    )
-                    log.info(f"[{delivery_id}] Auto-deploy triggered (pid={proc.pid})")
-                except FileNotFoundError:
+                import shutil
+                if not shutil.which("systemd-run"):
                     log.error(
-                        f"[{delivery_id}] Auto-deploy skipped — systemd-run not found. Install systemd or trigger deploy manually."
+                        f"[{delivery_id}] Auto-deploy skipped — systemd-run not found in PATH. Install systemd or trigger deploy manually."
                     )
-                except Exception as e:
-                    log.error(f"[{delivery_id}] Failed to trigger auto-deploy: {e}")
+                else:
+                    cmd = ["systemd-run", "--user", "--scope", "--property=KillMode=process", "--collect", deploy_script]
+                    log.info(f"[{delivery_id}] Auto-deploy: invoking systemd-run with script={deploy_script}")
+                    log.debug(f"[{delivery_id}] Auto-deploy: full command: {cmd}")
+                    try:
+                        proc = subprocess.Popen(
+                            cmd,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            start_new_session=True,
+                        )
+                        log.info(f"[{delivery_id}] Auto-deploy triggered (pid={proc.pid})")
+                    except Exception as e:
+                        log.error(f"[{delivery_id}] Failed to trigger auto-deploy: {e}")
 
     return Response(status_code=200)
 

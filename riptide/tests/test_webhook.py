@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import shutil
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -25,7 +26,8 @@ class TestAutoDeployInvocation:
     @patch("riptide.webhook.subprocess.Popen")
     @patch("riptide.webhook.Path.exists", return_value=True)
     @patch("os.access", return_value=True)
-    def test_merge_into_default_triggers_deploy(self, mock_access, mock_exists, mock_popen):
+    @patch("shutil.which", return_value="/usr/bin/systemd-run")
+    def test_merge_into_default_triggers_deploy(self, mock_which, mock_access, mock_exists, mock_popen):
         """Merging into default branch triggers exactly one systemd-run invocation."""
         from riptide.webhook import handle_pull_request
 
@@ -54,7 +56,8 @@ class TestAutoDeployInvocation:
     @patch("riptide.webhook.subprocess.Popen")
     @patch("riptide.webhook.Path.exists", return_value=True)
     @patch("os.access", return_value=True)
-    def test_merge_into_non_default_no_deploy(self, mock_access, mock_exists, mock_popen):
+    @patch("shutil.which", return_value="/usr/bin/systemd-run")
+    def test_merge_into_non_default_no_deploy(self, mock_which, mock_access, mock_exists, mock_popen):
         """Merging into a non-default branch does NOT trigger deploy."""
         from riptide.webhook import handle_pull_request
 
@@ -76,7 +79,8 @@ class TestAutoDeployInvocation:
 
     @patch("riptide.webhook.subprocess.Popen")
     @patch("riptide.webhook.Path.exists", return_value=False)
-    def test_deploy_script_not_found_no_deploy(self, mock_exists, mock_popen):
+    @patch("shutil.which", return_value="/usr/bin/systemd-run")
+    def test_deploy_script_not_found_no_deploy(self, mock_which, mock_exists, mock_popen):
         """If deploy script doesn't exist, skip gracefully."""
         from riptide.webhook import handle_pull_request
 
@@ -99,7 +103,8 @@ class TestAutoDeployInvocation:
     @patch("riptide.webhook.subprocess.Popen")
     @patch("riptide.webhook.Path.exists", return_value=True)
     @patch("os.access", return_value=False)
-    def test_deploy_script_not_executable_no_deploy(self, mock_access, mock_exists, mock_popen):
+    @patch("shutil.which", return_value="/usr/bin/systemd-run")
+    def test_deploy_script_not_executable_no_deploy(self, mock_which, mock_access, mock_exists, mock_popen):
         """If deploy script exists but isn't executable, skip gracefully."""
         from riptide.webhook import handle_pull_request
 
@@ -122,7 +127,8 @@ class TestAutoDeployInvocation:
     @patch("riptide.webhook.subprocess.Popen", side_effect=FileNotFoundError("systemd-run not found"))
     @patch("riptide.webhook.Path.exists", return_value=True)
     @patch("os.access", return_value=True)
-    def test_systemd_run_not_found_no_crash(self, mock_access, mock_exists, mock_popen):
+    @patch("shutil.which", return_value="/usr/bin/systemd-run")
+    def test_systemd_run_not_found_no_crash(self, mock_which, mock_access, mock_exists, mock_popen):
         """If systemd-run binary is missing, handle gracefully (no crash)."""
         from riptide.webhook import handle_pull_request
 
@@ -149,7 +155,8 @@ class TestAutoDeployConcurrency:
     @patch("riptide.webhook.subprocess.Popen")
     @patch("riptide.webhook.Path.exists", return_value=True)
     @patch("os.access", return_value=True)
-    def test_different_prs_both_deploy(self, mock_access, mock_exists, mock_popen):
+    @patch("shutil.which", return_value="/usr/bin/systemd-run")
+    def test_different_prs_both_deploy(self, mock_which, mock_access, mock_exists, mock_popen):
         """Two different PRs with different delivery_ids should both trigger deploy."""
         from riptide.webhook import handle_pull_request
 
@@ -182,7 +189,8 @@ class TestAutoDeployConcurrency:
     @patch("riptide.webhook.subprocess.Popen")
     @patch("riptide.webhook.Path.exists", return_value=True)
     @patch("os.access", return_value=True)
-    def test_single_pr_single_deploy(self, mock_access, mock_exists, mock_popen):
+    @patch("shutil.which", return_value="/usr/bin/systemd-run")
+    def test_single_pr_single_deploy(self, mock_which, mock_access, mock_exists, mock_popen):
         """Single PR merge triggers exactly one deploy (regression test)."""
         from riptide.webhook import handle_pull_request
 
