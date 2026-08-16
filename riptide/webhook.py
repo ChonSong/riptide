@@ -13,6 +13,7 @@ Riptide Review (Bot 2) runs via cron polling in deepthink.py — not here.
 """
 import os
 import json
+import shutil
 import time
 import logging
 import threading
@@ -357,7 +358,6 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
                     f"[{delivery_id}] Auto-deploy skipped — script not executable: {deploy_script}"
                 )
             else:
-                import shutil
                 if not shutil.which("systemd-run"):
                     log.error(
                         f"[{delivery_id}] Auto-deploy skipped — systemd-run not found in PATH. Install systemd or trigger deploy manually."

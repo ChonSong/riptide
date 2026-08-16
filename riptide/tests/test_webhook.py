@@ -8,6 +8,23 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 
+def _make_payload(pr_number=42, merged=True, base_ref="main"):
+    """Create a test payload with all required fields."""
+    return {
+        "action": "closed",
+        "pull_request": {
+            "number": pr_number,
+            "merged": merged,
+            "base": {"ref": base_ref},
+        },
+        "repository": {
+            "full_name": "ChonSong/riptide",
+            "default_branch": "main",
+        },
+        "installation": {"id": 12345},
+    }
+
+
 class TestWebhookHealth:
     """Verify health check endpoint."""
 
@@ -31,19 +48,7 @@ class TestAutoDeployInvocation:
         """Merging into default branch triggers exactly one systemd-run invocation."""
         from riptide.webhook import handle_pull_request
 
-        payload = {
-            "action": "closed",
-            "pull_request": {
-                "number": 42,
-                "merged": True,
-                "base": {"ref": "main"},
-            },
-            "repository": {"full_name": "ChonSong/riptide"},
-            "installation": {"id": 12345},
-        }
-
-        import asyncio
-        result = asyncio.run(handle_pull_request(payload, "test-delivery-id"))
+        result = asyncio.run(handle_pull_request(_make_payload(), "test-delivery-id"))
 
         # systemd-run must be called exactly once (not twice — was a bug)
         assert mock_popen.call_count == 1, f"Expected 1 call, got {mock_popen.call_count}"
@@ -61,19 +66,7 @@ class TestAutoDeployInvocation:
         """Merging into a non-default branch does NOT trigger deploy."""
         from riptide.webhook import handle_pull_request
 
-        payload = {
-            "action": "closed",
-            "pull_request": {
-                "number": 42,
-                "merged": True,
-                "base": {"ref": "feature/not-default"},
-            },
-            "repository": {"full_name": "ChonSong/riptide"},
-            "installation": {"id": 12345},
-        }
-
-        import asyncio
-        result = asyncio.run(handle_pull_request(payload, "test-delivery-id"))
+        result = asyncio.run(handle_pull_request(_make_payload(base_ref="feature/not-default"), "test-delivery-id"))
 
         mock_popen.assert_not_called()
 
@@ -84,19 +77,7 @@ class TestAutoDeployInvocation:
         """If deploy script doesn't exist, skip gracefully."""
         from riptide.webhook import handle_pull_request
 
-        payload = {
-            "action": "closed",
-            "pull_request": {
-                "number": 42,
-                "merged": True,
-                "base": {"ref": "main"},
-            },
-            "repository": {"full_name": "ChonSong/riptide"},
-            "installation": {"id": 12345},
-        }
-
-        import asyncio
-        result = asyncio.run(handle_pull_request(payload, "test-delivery-id"))
+        result = asyncio.run(handle_pull_request(_make_payload(), "test-delivery-id"))
 
         mock_popen.assert_not_called()
 
@@ -108,19 +89,7 @@ class TestAutoDeployInvocation:
         """If deploy script exists but isn't executable, skip gracefully."""
         from riptide.webhook import handle_pull_request
 
-        payload = {
-            "action": "closed",
-            "pull_request": {
-                "number": 42,
-                "merged": True,
-                "base": {"ref": "main"},
-            },
-            "repository": {"full_name": "ChonSong/riptide"},
-            "installation": {"id": 12345},
-        }
-
-        import asyncio
-        result = asyncio.run(handle_pull_request(payload, "test-delivery-id"))
+        result = asyncio.run(handle_pull_request(_make_payload(), "test-delivery-id"))
 
         mock_popen.assert_not_called()
 
@@ -132,19 +101,7 @@ class TestAutoDeployInvocation:
         """If systemd-run binary is missing, handle gracefully (no crash)."""
         from riptide.webhook import handle_pull_request
 
-        payload = {
-            "action": "closed",
-            "pull_request": {
-                "number": 42,
-                "merged": True,
-                "base": {"ref": "main"},
-            },
-            "repository": {"full_name": "ChonSong/riptide"},
-            "installation": {"id": 12345},
-        }
-
-        import asyncio
-        result = asyncio.run(handle_pull_request(payload, "test-delivery-id"))
+        result = asyncio.run(handle_pull_request(_make_payload(), "test-delivery-id"))
 
         assert result.status_code == 200
 
@@ -160,18 +117,8 @@ class TestAutoDeployConcurrency:
         """Two different PRs with different delivery_ids should both trigger deploy."""
         from riptide.webhook import handle_pull_request
 
-        payload1 = {
-            "action": "closed",
-            "pull_request": {"number": 42, "merged": True, "base": {"ref": "main"}},
-            "repository": {"full_name": "ChonSong/riptide"},
-            "installation": {"id": 12345},
-        }
-        payload2 = {
-            "action": "closed",
-            "pull_request": {"number": 43, "merged": True, "base": {"ref": "main"}},
-            "repository": {"full_name": "ChonSong/riptide"},
-            "installation": {"id": 12345},
-        }
+        payload1 = _make_payload(pr_number=42)
+        payload2 = _make_payload(pr_number=43)
 
         async def run_both():
             results = await asyncio.gather(
@@ -194,13 +141,40 @@ class TestAutoDeployConcurrency:
         """Single PR merge triggers exactly one deploy (regression test)."""
         from riptide.webhook import handle_pull_request
 
-        payload = {
-            "action": "closed",
-            "pull_request": {"number": 42, "merged": True, "base": {"ref": "main"}},
-            "repository": {"full_name": "ChonSong/riptide"},
-            "installation": {"id": 12345},
-        }
-
-        result = asyncio.run(handle_pull_request(payload, "delivery-1"))
+        result = asyncio.run(handle_pull_request(_make_payload(), "delivery-1"))
         assert result.status_code == 200
         assert mock_popen.call_count == 1, f"Expected 1 call, got {mock_popen.call_count}"
+
+
+class TestDefaultBranch:
+    """Verify repo.default_branch is used as authoritative source."""
+
+    @patch("riptide.webhook.subprocess.Popen")
+    @patch("riptide.webhook.Path.exists", return_value=True)
+    @patch("os.access", return_value=True)
+    @patch("shutil.which", return_value="/usr/bin/systemd-run")
+    def test_deploy_when_base_matches_repo_default_branch(self, mock_which, mock_access, mock_exists, mock_popen):
+        """Deploy triggers when base.ref matches repo.default_branch."""
+        from riptide.webhook import handle_pull_request
+
+        payload = _make_payload(base_ref="develop")
+        payload["repository"]["default_branch"] = "develop"
+
+        result = asyncio.run(handle_pull_request(payload, "test-delivery-id"))
+
+        assert mock_popen.call_count == 1
+
+    @patch("riptide.webhook.subprocess.Popen")
+    @patch("riptide.webhook.Path.exists", return_value=True)
+    @patch("os.access", return_value=True)
+    @patch("shutil.which", return_value="/usr/bin/systemd-run")
+    def test_no_deploy_when_base_differs_from_repo_default_branch(self, mock_which, mock_access, mock_exists, mock_popen):
+        """No deploy when base.ref differs from repo.default_branch."""
+        from riptide.webhook import handle_pull_request
+
+        payload = _make_payload(base_ref="feature/x")
+        payload["repository"]["default_branch"] = "main"
+
+        result = asyncio.run(handle_pull_request(payload, "test-delivery-id"))
+
+        mock_popen.assert_not_called()
