@@ -19,7 +19,6 @@ import threading
 import subprocess
 import requests
 import traceback
-import subprocess
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING, Literal
 
@@ -143,9 +142,9 @@ def _get_state_store():
 
 
 @app.get("/health")
-async def health():
+async def health_check():
     """Return server health status for monitoring / tunnel-watchdog."""
-    return {"status": "ok"}
+    return {"status": "ok", "app": "riptide"}
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -356,6 +355,7 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
                     f"[{delivery_id}] Auto-deploy skipped — script not executable: {deploy_script}"
                 )
             else:
+                log.info(f"[{delivery_id}] Auto-deploy: invoking systemd-run with script={deploy_script}")
                 try:
                     proc = subprocess.Popen(
                         ["systemd-run", "--user", "--scope", "--property=KillMode=process", deploy_script],
@@ -369,35 +369,6 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
                     )
                 except Exception as e:
                     log.error(f"[{delivery_id}] Failed to trigger auto-deploy: {e}")
-
-    # PR merged into default branch → auto-deploy
-    if (
-        action == "closed"
-        and pr.get("merged")
-        and pr.get("base", {}).get("ref") == os.environ.get("RIPTIDE_DEPLOY_BRANCH", "main")
-    ):
-        repo_default_branch = repo.get("default_branch", "main")
-        if pr.get("base", {}).get("ref") == repo_default_branch:
-            log.info(
-                f"[{delivery_id}] PR #{pr_number} merged into {repo_full}@{repo_default_branch} — triggering auto-deploy"
-            )
-            deploy_script = os.environ.get(
-                "RIPTIDE_DEPLOY_SCRIPT", "/home/sc/workspace/riptide/scripts/deploy.sh"
-            )
-            # Run in a transient scope so it survives the service restart
-            subprocess.Popen(
-                [
-                    "systemd-run",
-                    "--user",
-                    "--scope",
-                    "--property=KillMode=process",
-                    "--collect",
-                    deploy_script,
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
 
     return Response(status_code=200)
 
@@ -599,9 +570,7 @@ async def handle_installation(payload: dict, event: str, delivery_id: str) -> Re
     return Response(status_code=200)
 
 
-@app.get("/health")
-async def health() -> dict:
-    return {"status": "ok", "app": "riptide"}
+
 
 
 # ── Init DB on startup ─────────────────────────────────────────────────────────
