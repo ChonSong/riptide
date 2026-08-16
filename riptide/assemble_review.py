@@ -216,6 +216,7 @@ def main():
     parser.add_argument("--model", default=None, help="Model used for the review (appended to sign-off)")
     parser.add_argument("--provider", default=None, help="Provider used for the review (appended to sign-off)")
     parser.add_argument("--pr-created-at", default=None, help="PR created_at ISO timestamp (for timing metric)")
+    parser.add_argument("--triggered-at", default=None, help="ISO timestamp when review was triggered (for timing metric)")
     parser.add_argument("--dry-run", action="store_true", help="Print review instead of posting")
     args = parser.parse_args()
 
@@ -249,6 +250,7 @@ def main():
         model=args.model,
         provider=args.provider,
         pr_created_at=args.pr_created_at,
+        triggered_at=args.triggered_at,
     )
 
     if args.dry_run:
