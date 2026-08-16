@@ -1,4 +1,5 @@
 """Tests for riptide/webhook.py — webhook handler and auto-deploy."""
+import asyncio
 import json
 import os
 from unittest.mock import patch, MagicMock
@@ -74,7 +75,7 @@ class TestAutoDeployInvocation:
         mock_popen.assert_not_called()
 
     @patch("riptide.webhook.subprocess.Popen")
-    @patch("pathlib.Path.exists", return_value=False)
+    @patch("riptide.webhook.Path.exists", return_value=False)
     def test_deploy_script_not_found_no_deploy(self, mock_exists, mock_popen):
         """If deploy script doesn't exist, skip gracefully."""
         from riptide.webhook import handle_pull_request
@@ -140,3 +141,58 @@ class TestAutoDeployInvocation:
         result = asyncio.run(handle_pull_request(payload, "test-delivery-id"))
 
         assert result.status_code == 200
+
+
+class TestAutoDeployConcurrency:
+    """Verify the dedup mechanism that prevents duplicate deploys."""
+
+    @patch("riptide.webhook.subprocess.Popen")
+    @patch("riptide.webhook.Path.exists", return_value=True)
+    @patch("os.access", return_value=True)
+    def test_different_prs_both_deploy(self, mock_access, mock_exists, mock_popen):
+        """Two different PRs with different delivery_ids should both trigger deploy."""
+        from riptide.webhook import handle_pull_request
+
+        payload1 = {
+            "action": "closed",
+            "pull_request": {"number": 42, "merged": True, "base": {"ref": "main"}},
+            "repository": {"full_name": "ChonSong/riptide"},
+            "installation": {"id": 12345},
+        }
+        payload2 = {
+            "action": "closed",
+            "pull_request": {"number": 43, "merged": True, "base": {"ref": "main"}},
+            "repository": {"full_name": "ChonSong/riptide"},
+            "installation": {"id": 12345},
+        }
+
+        async def run_both():
+            results = await asyncio.gather(
+                handle_pull_request(payload1, "delivery-1"),
+                handle_pull_request(payload2, "delivery-2"),
+            )
+            return results
+
+        results = asyncio.run(run_both())
+        assert results[0].status_code == 200
+        assert results[1].status_code == 200
+        # Both should deploy since they're different PRs with different delivery_ids
+        assert mock_popen.call_count == 2, f"Expected 2 calls, got {mock_popen.call_count}"
+
+    @patch("riptide.webhook.subprocess.Popen")
+    @patch("riptide.webhook.Path.exists", return_value=True)
+    @patch("os.access", return_value=True)
+    def test_single_pr_single_deploy(self, mock_access, mock_exists, mock_popen):
+        """Single PR merge triggers exactly one deploy (regression test)."""
+        from riptide.webhook import handle_pull_request
+
+        payload = {
+            "action": "closed",
+            "pull_request": {"number": 42, "merged": True, "base": {"ref": "main"}},
+            "repository": {"full_name": "ChonSong/riptide"},
+            "installation": {"id": 12345},
+        }
+
+        result = asyncio.run(handle_pull_request(payload, "delivery-1"))
+        assert result.status_code == 200
+        assert mock_popen.call_count == 1, f"Expected 1 call, got {mock_popen.call_count}"
