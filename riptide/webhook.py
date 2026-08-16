@@ -142,9 +142,9 @@ def _get_state_store():
 
 
 @app.get("/health")
-async def health():
+async def health_check():
     """Return server health status for monitoring / tunnel-watchdog."""
-    return {"status": "ok"}
+    return {"status": "ok", "app": "riptide"}
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -355,6 +355,7 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
                     f"[{delivery_id}] Auto-deploy skipped — script not executable: {deploy_script}"
                 )
             else:
+                log.info(f"[{delivery_id}] Auto-deploy: invoking systemd-run with script={deploy_script}")
                 try:
                     proc = subprocess.Popen(
                         ["systemd-run", "--user", "--scope", "--property=KillMode=process", deploy_script],
@@ -569,9 +570,7 @@ async def handle_installation(payload: dict, event: str, delivery_id: str) -> Re
     return Response(status_code=200)
 
 
-@app.get("/health")
-async def health() -> dict:
-    return {"status": "ok", "app": "riptide"}
+
 
 
 # ── Init DB on startup ─────────────────────────────────────────────────────────
