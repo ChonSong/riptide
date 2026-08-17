@@ -257,7 +257,7 @@ def _spawn_deepthink(
             return pre_generate_diagram(data, dict(
                 owner=owner, repo=repo, number=pr_number,
                 title=pr_title, author=pr_author, total_loc=total_loc,
-            ))
+            ), deterministic=bundle)
         with ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(_gen_diagram)
             try:

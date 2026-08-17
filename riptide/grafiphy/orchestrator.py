@@ -26,7 +26,7 @@ log = logging.getLogger("riptide.grafiphy.orchestrator")
 GRAFIPHY_DIR = Path(__file__).parent
 
 
-def pre_generate_diagram(data: dict, pr_metadata: dict) -> Optional[str]:
+def pre_generate_diagram(data: dict, pr_metadata: dict, deterministic: Optional[dict] = None) -> Optional[str]:
     """
     Synchronously render + upload an Excalidraw diagram BEFORE LLM spawn.
 
@@ -37,7 +37,8 @@ def pre_generate_diagram(data: dict, pr_metadata: dict) -> Optional[str]:
     The diagram becomes context the LLM references instead of generating.
 
     Args:
-        data: Output from _gather_review_data() with god_nodes, communities.
+        data: Output from _gather_review_data() with god_nodes, communities,
+              repo_tree, files_changed, diff_raw, graph_context, deterministic.
         pr_metadata: {owner, repo, number, title, author, total_loc}
 
     Returns:
@@ -62,6 +63,67 @@ def pre_generate_diagram(data: dict, pr_metadata: dict) -> Optional[str]:
         ],
     }
 
+    # Build file_tree from files_changed for PR SCOPE section
+    file_tree = None
+    files_changed = data.get("files_changed", [])
+    if files_changed:
+        lines = []
+        for f in files_changed:
+            fname = f.get("filename", "?")
+            additions = f.get("additions", 0)
+            deletions = f.get("deletions", 0)
+            status = f.get("status", "modified")
+            lines.append(f"{status[0].upper()} {fname} (+{additions}/-{deletions})")
+        file_tree = "\n".join(lines)
+
+    # Build repo_tree string for CODEBASE DIRECTORY TREE section
+    repo_tree = None
+    repo_tree_list = data.get("repo_tree", [])
+    if repo_tree_list:
+        repo_tree = "\n".join(repo_tree_list)
+
+    # Build findings from deterministic analysis for FINDINGS section
+    findings = []
+    deterministic = data.get("deterministic")
+    if deterministic:
+        for f in deterministic.get("findings", []):
+            findings.append({
+                "severity": f.get("severity", "info"),
+                "title": f.get("category", "unknown"),
+                "detail": f.get("message", ""),
+                "file": f.get("file", ""),
+            })
+
+    # Build human_narrative from deterministic verdict
+    human_narrative = None
+    if deterministic:
+        verdict = deterministic.get("verdict", "pass")
+        stats = deterministic.get("stats", {})
+        total_add = stats.get("total_add", 0)
+        total_del = stats.get("total_del", 0)
+        file_count = stats.get("file_count", 0)
+        human_narrative = (
+            f"PR #{pr_metadata.get('number', '?')} by {pr_metadata.get('author', 'unknown')} "
+            f"changes {total_add}+/{total_del}- LOC across {file_count} file(s). "
+            f"Deterministic analysis verdict: {verdict}."
+        )
+
+    # Build code_chunks from diff for CODE CHUNKS / WHY section
+    code_chunks = []
+    diff_raw = data.get("diff_raw", "")
+    if diff_raw:
+        # Extract first few diff hunks as code chunks
+        chunks = diff_raw.split("diff --git")
+        for chunk in chunks[1:4]:  # Limit to first 3 files
+            lines = chunk.strip().split("\n")
+            if len(lines) > 2:
+                file_line = lines[0] if lines else ""
+                code_chunks.append({
+                    "code": "\n".join(lines[:20]),  # First 20 lines of diff
+                    "why": f"Changes in {file_line}",
+                    "file": file_line,
+                })
+
     # Use TemporaryDirectory so cleanup happens automatically on success/failure
     with tempfile.TemporaryDirectory(prefix=f"riptide-pr{pr_metadata.get('number')}-pre-") as tmp_dir:
         excalidraw_path = Path(tmp_dir) / "diagram.excalidraw"
@@ -76,6 +138,11 @@ def pre_generate_diagram(data: dict, pr_metadata: dict) -> Optional[str]:
                     "loc": pr_metadata.get("total_loc", 0),
                 },
                 graph_data=graph_data,
+                file_tree=file_tree,
+                repo_tree=repo_tree,
+                findings=findings,
+                human_narrative=human_narrative,
+                code_chunks=code_chunks,
                 output_path=str(excalidraw_path),
             )
             url = upload_excalidraw(str(excalidraw_path))
