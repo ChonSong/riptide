@@ -718,8 +718,10 @@ Run the assembly script — it validates, formats, and posts. Do NOT hand-format
 python -m riptide.assemble_review \
   --findings /tmp/findings.json \
   --owner {owner} --repo {repo} --pr {pr_number} \
+  --diagram-url "{diagram_url}" \
   --model "{DEEPTHINK_MODEL}" --provider "{DEEPTHINK_PROVIDER}" \
-  --pr-created-at "{pr_created_at}"
+  --pr-created-at "{pr_created_at}" \
+  --triggered-at "{triggered_at}"
 ```
 
 The script appends the model/provider to the sign-off deterministically.
