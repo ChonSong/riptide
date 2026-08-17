@@ -133,3 +133,4 @@ riptide/
 - Deep-think prompts are written to temp files with `0o600` permissions (owner-only) and cleaned up after Hermes reads them
 - Prompt contents are sanitized to redact secrets (GitHub tokens, private keys) before writing to disk
 - The `@riptide-bot review` command always spawns when the 24h same-commit cooldown allows — review data (findings, file paths, code) is treated as untrusted
+
