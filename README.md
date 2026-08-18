@@ -81,8 +81,8 @@ The session always posts a summary comment with per-finding verdicts, test resul
 | `RIPTIDE_DEPLOY_BRANCH` | `main` | Branch that triggers auto-deploy |
 | `RIPTIDE_DEEPTHINK_MODEL` | `LongCat-2.0` | Model for deep-think sessions |
 | `RIPTIDE_DEEPTHINK_PROVIDER` | `longcat` | Provider for deep-think |
-| `RIPTIDE_FIX_MODEL` | `LongCat-2.0` | Model for fix sessions |
-| `RIPTIDE_FIX_PROVIDER` | `longcat` | Provider for fix |
+| `RIPTIDE_FIX_MODEL` | `custom:LongCat-2.0` | Model for fix sessions |
+| `RIPTIDE_FIX_PROVIDER` | `custom` | Provider for fix |
 | `RIPTIDE_WORKSPACE_ROOT` | `/home/sc/workspace` | Root path inserted into spawned session PYTHONPATH |
 | `RIPTIDE_OUR_USERNAME` | `ChonSong` | GitHub username for push eligibility / auth gate |
 | `RIPTIDE_OUR_ORG` | `ChonSong` | GitHub org for ownership checks |
@@ -91,7 +91,7 @@ The session always posts a summary comment with per-finding verdicts, test resul
 
 ## Auto-Deploy
 
-When a PR merges into the configured deployment branch (`main` by default):
+When a PR merges into `main`:
 1. Webhook triggers `scripts/deploy.sh`
 2. Script: `git pull` → clean `__pycache__` → `systemctl restart riptide.service` → smoke test
 3. Service runs the new code automatically
@@ -127,10 +127,4 @@ riptide/
 - [COMPETITOR-PATTERNS.md](COMPETITOR-PATTERNS.md) — Analysis of CodeRabbit/Greptile patterns
 - [AGENTS.md](AGENTS.md) — Rules for AI agents editing this codebase
 - [CHANGELOG.md](CHANGELOG.md) — Recent changes
-
-## Security
-
-- Deep-think prompts are written to temp files with `0o600` permissions (owner-only) and cleaned up after Hermes reads them
-- Prompt contents are sanitized to redact secrets (GitHub tokens, private keys) before writing to disk
-- The `@riptide-bot review` command always spawns when the 24h same-commit cooldown allows — review data (findings, file paths, code) is treated as untrusted
-
+- [SECURITY.md](SECURITY.md) — Security policy and vulnerability reporting
