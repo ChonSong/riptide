@@ -127,6 +127,66 @@ riptide/
 - [COMPETITOR-PATTERNS.md](COMPETITOR-PATTERNS.md) — Analysis of CodeRabbit/Greptile patterns
 - [AGENTS.md](AGENTS.md) — Rules for AI agents editing this codebase
 - [CHANGELOG.md](CHANGELOG.md) — Recent changes
+
+## Ephemeral Testing
+
+Run an isolated test container for any branch without affecting production or other tests:
+
+```bash
+./scripts/ephemeral-test.sh <branch-name> [--no-probe] [--keep-image] [--port <port>] [--timeout <seconds>]
+```
+
+**Example:**
+
+```bash
+# Basic usage — auto-selects port, runs Hermes probe
+./scripts/ephemeral-test.sh fix/fixer-provider-defaults
+
+# Skip probe, keep image for faster re-runs
+./scripts/ephemeral-test.sh fix/fixer-provider-defaults --no-probe --keep-image
+
+# Custom port and timeout
+./scripts/ephemeral-test.sh fix/fixer-provider-defaults --port 19000 --timeout 120
+```
+
+**Flags:**
+- `--no-probe` — Skip Hermes provider probe (useful if `hermes` CLI not installed)
+- `--keep-image` — Don't remove the built Docker image on cleanup (faster re-runs)
+- `--port <port>` — Override automatic port selection with a specific host port
+- `--timeout <secs>` — Health check timeout in seconds (default: 60)
+
+**Isolation guarantees:**
+- Unique container name (`riptide-test-<branch>`)
+- Unique host port (avoids 8477 production port)
+- Anonymous volume for state (destroyed on cleanup)
+- Separate Docker network (no cross-talk)
+
+**What it does:**
+1. Checks out the branch and builds a Docker image
+2. Runs the container with health checks
+3. Optionally probes Hermes provider config (verifies provider/model combos actually dispatch)
+4. Keeps container alive for manual testing — Ctrl+C cleans up automatically
+
+**Use cases:**
+- Verify provider config changes (e.g., `longcat` vs `custom`) without risking production
+- Test webhook handling on a feature branch
+- Reproduce issues in a clean environment
+
+**Security note:** Only run this script on branches you trust. The script builds and runs a Docker container from the branch's code, which may include arbitrary code execution.
+
+**Requirements:**
+- `docker`, `git`, `python3`, `curl` (for portable hash/datetime and health checks — works on Linux, macOS, BSD)
+- `hermes` CLI (optional — only needed for provider probe)
+
+**Hermes probe example output:**
+
+```text
+━━━ Hermes Provider Probe ━━━
+Test 1: --provider longcat --model LongCat-2.0
+  ✅ Dispatched OK
+Test 2: --provider custom --model custom:LongCat-2.0
+  ❌ FAILED (expected — custom provider has no LongCat-2.0)
+```
 - [SECURITY.md](SECURITY.md) — Security policy and vulnerability reporting
 
 
