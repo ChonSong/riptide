@@ -128,3 +128,4 @@ riptide/
 - [AGENTS.md](AGENTS.md) — Rules for AI agents editing this codebase
 - [CHANGELOG.md](CHANGELOG.md) — Recent changes
 - [SECURITY.md](SECURITY.md) — Security policy and vulnerability reporting
+
