@@ -29,7 +29,7 @@ python3 -m pytest riptide/tests/ -q
 
 ### Data Flow
 
-```
+```text
 GitHub Webhook → FastAPI /webhook → verify_signature()
                                           │
                                           ▼
@@ -50,6 +50,27 @@ Comment `@riptide-bot review` on any PR to trigger an on-demand deep-think sessi
 
 **Dedup logic:** Same commit SHA within 24h → blocked. New commit → always allowed.
 
+## Fix Command
+
+Comment `@riptide-bot fix [description]` on any PR to trigger an on-demand fix session that edits, commits, and pushes to the PR branch.
+
+The optional `description` narrows scope — e.g. `@riptide-bot fix the auth race condition in session.py`. Without one, the session addresses all outstanding findings from the latest `@riptide-bot review`.
+
+**Authorization gate:** Only the PR author, the repo owner, or `@ChonSong` can trigger fix. Others get a `🚫 Not authorized` reply.
+
+**Push eligibility:**
+- **Same-repo, author-eligible** → Hermes edits, commits, and pushes directly to the PR branch (Conventional Commits, `gh` CLI as ChonSong).
+- **Fork / foreign repo** → Comment-only patch with a "cannot push" note. Never pushes to forks.
+
+**Safety constraints (hard):**
+- Only touches files in this PR's diff — scope isolation
+- Verifies each finding against current HEAD before editing (skips already-addressed or stale findings)
+- Runs repo tests before pushing — no push on red
+- Never force-pushes, never rewrites pushed history
+- Never edits credential/secret files
+
+The session always posts a summary comment with per-finding verdicts, test results, and commit SHA (or patch).
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -58,6 +79,13 @@ Comment `@riptide-bot review` on any PR to trigger an on-demand deep-think sessi
 | `GITHUB_PRIVATE_KEY_PATH` | — | App private key |
 | `RIPTIDE_POLLER_REPOS` | — | Comma-separated repos to poll |
 | `RIPTIDE_DEPLOY_BRANCH` | `main` | Branch that triggers auto-deploy |
+| `RIPTIDE_DEEPTHINK_MODEL` | `LongCat-2.0` | Model for deep-think sessions |
+| `RIPTIDE_DEEPTHINK_PROVIDER` | `longcat` | Provider for deep-think |
+| `RIPTIDE_FIX_MODEL` | `custom:LongCat-2.0` | Model for fix sessions |
+| `RIPTIDE_FIX_PROVIDER` | `custom` | Provider for fix |
+| `RIPTIDE_WORKSPACE_ROOT` | `/home/sc/workspace` | Root path inserted into spawned session PYTHONPATH |
+| `RIPTIDE_OUR_USERNAME` | `ChonSong` | GitHub username for push eligibility / auth gate |
+| `RIPTIDE_OUR_ORG` | `ChonSong` | GitHub org for ownership checks |
 | `HOST` | `0.0.0.0` | Webhook server host |
 | `PORT` | `8477` | Webhook server port |
 
@@ -77,7 +105,7 @@ SQLite at `~/.local/share/riptide/state.db`:
 
 ## File Layout
 
-```
+```text
 riptide/
 ├── webhook.py         # FastAPI server, GitHub webhook handler
 ├── companion.py       # Bot 1: TL;DR + ELI5 + timing footer
@@ -99,4 +127,4 @@ riptide/
 - [COMPETITOR-PATTERNS.md](COMPETITOR-PATTERNS.md) — Analysis of CodeRabbit/Greptile patterns
 - [AGENTS.md](AGENTS.md) — Rules for AI agents editing this codebase
 - [CHANGELOG.md](CHANGELOG.md) — Recent changes
-
+- [SECURITY.md](SECURITY.md) — Security policy and vulnerability reporting
