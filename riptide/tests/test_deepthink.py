@@ -113,7 +113,7 @@ class TestSpawnDeepthink:
                 pass
 
     def test_spawn_fails_when_hermes_blocked(self):
-        """Hermes returns exit 0 with 'Failed to create job' — should raise."""
+        """Hermes returns exit 0 with 'Failed to create job' — should return False."""
         blocked_stdout = "Failed to create job: Blocked: cron job contains a gateway lifecycle command"
         with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout=blocked_stdout, stderr="")) as mock_run, \
              patch("time.sleep"), \
@@ -121,22 +121,23 @@ class TestSpawnDeepthink:
              patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
              patch("riptide.state.StateStore") as mock_state:
             mock_state.return_value.reserve_job.return_value = True
-            with pytest.raises(RuntimeError, match="All 3 Hermes cron attempts failed"):
-                _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
-            # 3 spawn attempts + 1 diagram generation call (which also gets blocked)
-            assert mock_run.call_count == 4
+            result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
+            assert result is False
+            assert mock_run.call_count == 4  # 3 spawn + 1 diagram generation
 
     def test_spawn_fails_when_hermes_blocked_in_stderr(self):
-        """Hermes blocks with message in stderr instead of stdout — should still detect."""
+        """Hermes blocks with message in stderr instead of stdout — should return False."""
         blocked_stderr = "Failed to create job: Blocked: cron job contains a gateway lifecycle command"
         with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr=blocked_stderr)) as mock_run, \
              patch("time.sleep"), \
              patch("riptide.deepthink._is_cron_available", return_value=True), \
              patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
+             patch("riptide.grafiphy.orchestrator.pre_generate_diagram", return_value=None), \
              patch("riptide.state.StateStore") as mock_state:
             mock_state.return_value.reserve_job.return_value = True
-            with pytest.raises(RuntimeError, match="All 3 Hermes cron attempts failed"):
-                _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
+            result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
+            assert result is False
+            assert mock_run.call_count >= 3
 
     def test_prompt_file_cleaned_up_on_failure(self):
         """Prompt file is removed when scheduling fails."""
@@ -147,8 +148,8 @@ class TestSpawnDeepthink:
              patch("riptide.state.StateStore") as mock_state, \
              patch("os.unlink") as mock_unlink:
             mock_state.return_value.reserve_job.return_value = True
-            with pytest.raises(RuntimeError):
-                _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
+            result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
+            assert result is False
             # Verify cleanup was called
             mock_unlink.assert_called()
 
@@ -196,8 +197,8 @@ class TestSpawnDeepthink:
              patch("riptide.grafiphy.orchestrator.pre_generate_diagram", return_value=None), \
              patch("riptide.state.StateStore") as mock_state:
             mock_state.return_value.reserve_job.return_value = True
-            with pytest.raises(RuntimeError, match="All 3 Hermes cron attempts failed"):
-                _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
+            result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
+            assert result is False
             assert mock_run.call_count == 3
 
     def test_spawn_timeout_raises_after_retries(self):
@@ -208,8 +209,8 @@ class TestSpawnDeepthink:
              patch("riptide.grafiphy.orchestrator.pre_generate_diagram", return_value=None), \
              patch("riptide.state.StateStore") as mock_state:
             mock_state.return_value.reserve_job.return_value = True
-            with pytest.raises(RuntimeError, match="All 3 Hermes cron attempts failed"):
-                _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
+            result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
+            assert result is False
             assert mock_run.call_count == 3
 
     def test_spawn_data_gathering_failure_raises(self):
