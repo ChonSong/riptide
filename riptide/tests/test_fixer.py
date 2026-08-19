@@ -321,7 +321,6 @@ class TestBuildFixPrompt:
             head_ref="feat-thing",
             description="",
             push_eligible=True,
-            job_id="test-job-id-123",
         )
         base.update(overrides)
         return base

@@ -376,7 +376,9 @@ def _spawn_deepthink(
 
         # All attempts failed — mark the reserved job as failed
         state.mark_failed(job_id)
-        return False
+        raise RuntimeError(
+            f"All {max_retries} Hermes cron attempts failed for {owner}/{repo}#{pr_number}"
+        )
     finally:
         # On scheduling failure, clean up the prompt file immediately.
         # On success, Hermes will clean it up after reading (via cmd_prompt instruction).

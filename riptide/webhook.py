@@ -134,7 +134,7 @@ def _get_state_store():
     global _state_store
     if _state_store is None:
         _state_store = StateStore(
-            db_path=os.environ.get("RIPTIDE_STATE_DB", str(Path.home() / ".local/share/riptide/state.db"))
+            db_path=os.environ.get("RIPTIDE_STATE_DB", "/tmp/riptide_state.db")
         )
     return _state_store
 
