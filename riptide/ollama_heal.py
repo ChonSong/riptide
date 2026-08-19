@@ -14,16 +14,19 @@ Exit codes:
     1 = Ollama is down and could not be restarted
     2 = systemd service not found (install issue)
 """
+
 import argparse
+import asyncio
+import os
 import subprocess
 import sys
 import time
 
 import requests
 
-OLLAMA_BASE = "http://localhost:11434"
+OLLAMA_BASE = os.environ.get("OLLAMA_BASE", "http://localhost:11434")
 SYSTEMD_SERVICE = "ollama.service"
-DEFAULT_TIMEOUT = 30  # seconds to wait for recovery
+DEFAULT_TIMEOUT = 10  # seconds to wait for recovery (webhook-friendly)
 
 
 def is_healthy() -> bool:
@@ -35,11 +38,21 @@ def is_healthy() -> bool:
         return False
 
 
+def is_systemd_available() -> bool:
+    """Check if systemd user session is functional."""
+    return os.environ.get("DBUS_SESSION_BUS_ADDRESS") is not None and os.path.exists(
+        f"/run/user/{os.getuid()}"
+    )
+
+
 def is_systemd_service_loaded() -> bool:
     """Check if the systemd user service exists and is loaded."""
+    if not is_systemd_available():
+        return False
     result = subprocess.run(
         ["systemctl", "--user", "is-enabled", SYSTEMD_SERVICE],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     return result.returncode in (0, 3)  # 0=enabled, 3=static (both mean "loaded")
 
@@ -49,7 +62,8 @@ def restart_ollama() -> bool:
     print(f"🛠  Restarting {SYSTEMD_SERVICE}...")
     result = subprocess.run(
         ["systemctl", "--user", "restart", SYSTEMD_SERVICE],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if result.returncode != 0:
         print(f"❌ Restart failed: {result.stderr.strip()}", file=sys.stderr)
@@ -72,7 +86,7 @@ def wait_for_recovery(timeout: int = DEFAULT_TIMEOUT) -> bool:
     return False
 
 
-def heal(wait_timeout: int = DEFAULT_TIMEOUT) -> int:
+def heal(wait_timeout: int = DEFAULT_TIMEOUT, base_url: str = OLLAMA_BASE) -> int:
     """Self-heal Ollama. Returns exit code."""
     # 1. Already healthy?
     if is_healthy():
@@ -81,17 +95,25 @@ def heal(wait_timeout: int = DEFAULT_TIMEOUT) -> int:
 
     print(f"⚠️  Ollama is unreachable at {OLLAMA_BASE}")
 
-    # 2. Is the systemd service available?
-    if not is_systemd_service_loaded():
-        print(f"❌ {SYSTEMD_SERVICE} not found in systemd user units", file=sys.stderr)
-        print("   Run: systemctl --user enable --now ollama.service", file=sys.stderr)
-        return 2
+    # 2. Is systemd available?
+    if is_systemd_available():
+        # 2a. systemd path: check service loaded → restart → wait
+        if not is_systemd_service_loaded():
+            print(f"❌ {SYSTEMD_SERVICE} not found in systemd user units", file=sys.stderr)
+            print("   Run: systemctl --user enable --now ollama.service", file=sys.stderr)
+            return 2
 
-    # 3. Attempt restart
-    if not restart_ollama():
+        if not restart_ollama():
+            return 1
+    else:
+        # 2b. Docker / non-systemd path: check if process is alive via TCP probe
+        #     (Ollama may be running as a container or standalone process)
+        print("⚠️  systemd not available — skipping restart (Docker/non-systemd environment)")
+        # If we reach here, Ollama is down and we can't restart it.
+        # Return 1 (down, couldn't restart) rather than 2 (systemd issue)
         return 1
 
-    # 4. Wait for recovery
+    # 3. Wait for recovery
     if wait_for_recovery(wait_timeout):
         return 0
 
@@ -102,8 +124,12 @@ def heal(wait_timeout: int = DEFAULT_TIMEOUT) -> int:
 def main():
     parser = argparse.ArgumentParser(description="Self-healing Ollama watchdog")
     parser.add_argument("--check", action="store_true", help="Probe only, no restart")
-    parser.add_argument("--wait", type=int, default=DEFAULT_TIMEOUT,
-                        help=f"Seconds to wait for recovery (default: {DEFAULT_TIMEOUT})")
+    parser.add_argument(
+        "--wait",
+        type=int,
+        default=DEFAULT_TIMEOUT,
+        help=f"Seconds to wait for recovery (default: {DEFAULT_TIMEOUT})",
+    )
     args = parser.parse_args()
 
     if args.check:

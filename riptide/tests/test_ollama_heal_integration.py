@@ -10,6 +10,7 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 from riptide.companion import Companion
+from riptide import ollama_heal
 
 
 def make_companion(tmp_path=None):
@@ -37,7 +38,9 @@ class TestOllamaHealIntegration:
         files = [{"filename": "src/main.py"}]
 
         with patch("riptide.ollama_heal.heal", return_value=0) as mock_heal:
-            with patch.object(companion, "_ollama_call", return_value="It's like adding a new room.") as mock_call:
+            with patch.object(
+                companion, "_ollama_call", return_value="It's like adding a new room."
+            ) as mock_call:
                 result = companion._generate_eli5("feat: add feature", files)
 
                 mock_heal.assert_called_once()
@@ -91,10 +94,47 @@ class TestOllamaHealIntegration:
         files = [{"filename": "src/main.py"}]
 
         with patch("riptide.ollama_heal.heal", return_value=0):
-            with patch.object(companion, "_ollama_call", return_value="It's like a new room.") as mock_call:
+            with patch.object(
+                companion, "_ollama_call", return_value="It's like a new room."
+            ) as mock_call:
                 result = companion._generate_eli5("feat: add feature", files, is_delta=True)
 
                 assert result == "It's like a new room."
                 # Verify delta context is in prompt
                 prompt = mock_call.call_args[0][0]
                 assert "new changes in this push of" in prompt
+
+
+class TestSystemdDetection:
+    """Tests for is_systemd_available() and Docker/non-systemd fallback in heal()."""
+
+    def test_is_systemd_available_with_dbus_and_runtime_dir(self):
+        """is_systemd_available() returns True when DBUS and /run/user/<uid> exist."""
+        with patch.dict("os.environ", {"DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus"}):
+            with patch("os.path.exists", return_value=True):
+                assert ollama_heal.is_systemd_available() is True
+
+    def test_is_systemd_available_missing_dbus(self):
+        """is_systemd_available() returns False when DBUS_SESSION_BUS_ADDRESS is unset."""
+        with patch.dict("os.environ", {}, clear=True):
+            with patch("os.path.exists", return_value=True):
+                assert ollama_heal.is_systemd_available() is False
+
+    def test_is_systemd_available_missing_runtime_dir(self):
+        """is_systemd_available() returns False when /run/user/<uid> is missing."""
+        with patch.dict("os.environ", {"DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus"}):
+            with patch("os.path.exists", return_value=False):
+                assert ollama_heal.is_systemd_available() is False
+
+    def test_heal_docker_returns_1_when_ollama_down(self):
+        """In Docker (no systemd), heal() returns 1 when Ollama is unreachable."""
+        with patch.object(ollama_heal, "is_healthy", return_value=False):
+            with patch.object(ollama_heal, "is_systemd_available", return_value=False):
+                result = ollama_heal.heal()
+                assert result == 1
+
+    def test_heal_healthy_returns_0(self):
+        """heal() returns 0 when Ollama is already healthy."""
+        with patch.object(ollama_heal, "is_healthy", return_value=True):
+            result = ollama_heal.heal()
+            assert result == 0
