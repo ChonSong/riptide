@@ -58,7 +58,7 @@ class TestHandleVisualCommand:
             mock_post.return_value.raise_for_status = MagicMock()
 
             result = handle_visual_command(
-                client, 12345, "ChonSong", "riptide", 1, "testuser"
+                client, None, "ChonSong", "riptide", 1, "testuser"
             )
 
             assert result is not None
@@ -90,7 +90,7 @@ class TestHandleVisualCommand:
             mock_post.return_value.raise_for_status = MagicMock()
 
             handle_visual_command(
-                client, 12345, "ChonSong", "riptide", 42, "testuser"
+                client, None, "ChonSong", "riptide", 42, "testuser"
             )
 
             mock_post.assert_called_once()
