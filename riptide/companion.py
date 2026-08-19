@@ -929,10 +929,18 @@ TLDR:"""
         # Self-heal: probe Ollama and attempt recovery before skipping enrichment.
         # If heal succeeds (exit 0), proceed with the Ollama call.
         # If heal fails (exit 1 or 2), skip enrichment immediately (degradation).
+        import os
         from riptide.ollama_heal import heal
 
-        if heal() != 0:
-            logger.warning("Ollama self-heal failed — skipping ELI5 enrichment")
+        heal_timeout = int(os.environ.get("RIPTIDE_HEAL_TIMEOUT", "10"))
+        try:
+            heal_result = heal(wait_timeout=heal_timeout)
+        except Exception as e:
+            logger.warning("Ollama heal failed: %s", e)
+            heal_result = 1  # Treat as failure, skip to degradation
+
+        if heal_result != 0:
+            logger.warning("Ollama self-heal failed (exit %d) — skipping ELI5 enrichment", heal_result)
             return None
 
         file_list = ", ".join(f.get("filename", "?") for f in files[:5])
