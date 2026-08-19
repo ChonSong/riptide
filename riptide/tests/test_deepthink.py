@@ -415,37 +415,36 @@ class TestLocFiltering:
 
 class TestDedupLogic:
     def test_same_pr_same_sha_not_spawned_twice(self, tmp_path):
-        state_file = tmp_path / "deepthink_acted_prs.json"
-        with patch("riptide.deepthink.STATE_FILE", state_file):
+        state_db = tmp_path / "state.db"
+        with patch("riptide.deepthink.StateStore") as mock_store_cls:
+            from riptide.state import StateStore
+            store = StateStore(str(state_db))
+            mock_store_cls.return_value = store
+
             # Simulate already-reviewed PR
-            _save_state({
-                "ChonSong/riptide#42": {
-                    "head_sha": "abc123",
-                    "reviewed_at": "2026-07-31T00:00:00+00:00",
-                }
-            })
+            store.set_pr_last_sha("ChonSong/riptide#42", "abc123")
+            store.set_pr_reviewed_at("ChonSong/riptide#42", "2026-07-31T00:00:00+00:00")
 
             # Same PR, same SHA — should be deduped
             pr_key = "ChonSong/riptide#42"
-            state = _load_state()
-            assert pr_key in state
-            assert state[pr_key]["head_sha"] == "abc123"
+            heuristics = store.get_pr_heuristics(pr_key)
+            assert heuristics["last_sha"] == "abc123"
 
     def test_same_pr_different_sha_spawns_again(self, tmp_path):
-        state_file = tmp_path / "deepthink_acted_prs.json"
-        with patch("riptide.deepthink.STATE_FILE", state_file):
-            _save_state({
-                "ChonSong/riptide#42": {
-                    "head_sha": "abc123",
-                    "reviewed_at": "2026-07-31T00:00:00+00:00",
-                }
-            })
+        state_db = tmp_path / "state.db"
+        with patch("riptide.deepthink.StateStore") as mock_store_cls:
+            from riptide.state import StateStore
+            store = StateStore(str(state_db))
+            mock_store_cls.return_value = store
+
+            store.set_pr_last_sha("ChonSong/riptide#42", "abc123")
+            store.set_pr_reviewed_at("ChonSong/riptide#42", "2026-07-31T00:00:00+00:00")
 
             # Different SHA — should not be deduped
             pr_key = "ChonSong/riptide#42"
-            state = _load_state()
+            heuristics = store.get_pr_heuristics(pr_key)
             new_sha = "def456"
-            assert state[pr_key]["head_sha"] != new_sha
+            assert heuristics["last_sha"] != new_sha
 
 
 # ── _was_reviewed_today tests ───────────────────────────────────────────────
@@ -453,35 +452,38 @@ class TestDedupLogic:
 
 class TestWasReviewedToday:
     def test_reviewed_today_returns_true(self, tmp_path):
-        state_file = tmp_path / "deepthink_acted_prs.json"
-        with patch("riptide.deepthink.STATE_FILE", state_file):
-            from datetime import datetime, timezone, timedelta
+        state_db = tmp_path / "state.db"
+        with patch("riptide.deepthink.StateStore") as mock_store_cls:
+            from riptide.state import StateStore
+            store = StateStore(str(state_db))
+            mock_store_cls.return_value = store
+
+            from datetime import datetime, timezone
             now = datetime.now(timezone.utc).isoformat()
-            _save_state({
-                "ChonSong/riptide#42": {
-                    "head_sha": "abc",
-                    "reviewed_at": now,
-                }
-            })
+            store.set_pr_last_sha("ChonSong/riptide#42", "abc")
+            store.set_pr_reviewed_at("ChonSong/riptide#42", now)
             assert _was_reviewed_today("ChonSong", "riptide", 42) is True
 
     def test_not_reviewed_today_returns_false(self, tmp_path):
-        state_file = tmp_path / "deepthink_acted_prs.json"
-        with patch("riptide.deepthink.STATE_FILE", state_file):
+        state_db = tmp_path / "state.db"
+        with patch("riptide.deepthink.StateStore") as mock_store_cls:
+            from riptide.state import StateStore
+            store = StateStore(str(state_db))
+            mock_store_cls.return_value = store
+
             from datetime import datetime, timezone, timedelta
             old = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
-            _save_state({
-                "ChonSong/riptide#42": {
-                    "head_sha": "abc",
-                    "reviewed_at": old,
-                }
-            })
+            store.set_pr_last_sha("ChonSong/riptide#42", "abc")
+            store.set_pr_reviewed_at("ChonSong/riptide#42", old)
             assert _was_reviewed_today("ChonSong", "riptide", 42) is False
 
     def test_never_reviewed_returns_false(self, tmp_path):
-        state_file = tmp_path / "deepthink_acted_prs.json"
-        with patch("riptide.deepthink.STATE_FILE", state_file):
-            _save_state({})
+        state_db = tmp_path / "state.db"
+        with patch("riptide.deepthink.StateStore") as mock_store_cls:
+            from riptide.state import StateStore
+            store = StateStore(str(state_db))
+            mock_store_cls.return_value = store
+
             assert _was_reviewed_today("ChonSong", "riptide", 42) is False
 
 
