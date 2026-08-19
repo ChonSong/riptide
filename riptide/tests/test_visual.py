@@ -49,7 +49,7 @@ class TestHandleVisualCommand:
         client = MagicMock()
         client.get_pr_details.return_value = {
             "number": 1,
-            "head": {"sha": "abc123"},
+            "head": {"sha": "abc123", "ref": "feat/test"},
             "user": {"login": "testuser"},
         }
 
@@ -58,7 +58,7 @@ class TestHandleVisualCommand:
             mock_post.return_value.raise_for_status = MagicMock()
 
             result = handle_visual_command(
-                client, None, "ChonSong", "riptide", 1, "testuser"
+                client, 12345, "ChonSong", "riptide", 1, "testuser"
             )
 
             assert result is not None
@@ -81,7 +81,7 @@ class TestHandleVisualCommand:
         client = MagicMock()
         client.get_pr_details.return_value = {
             "number": 42,
-            "head": {"sha": "def456"},
+            "head": {"sha": "def456", "ref": "feat/test"},
             "user": {"login": "testuser"},
         }
 
@@ -90,7 +90,7 @@ class TestHandleVisualCommand:
             mock_post.return_value.raise_for_status = MagicMock()
 
             handle_visual_command(
-                client, None, "ChonSong", "riptide", 42, "testuser"
+                client, 12345, "ChonSong", "riptide", 42, "testuser"
             )
 
             mock_post.assert_called_once()
