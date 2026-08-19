@@ -341,7 +341,7 @@ class TestPollerReviewDiscovery:
         pr_data = json.dumps([{
             "number": 76, "title": "feat: test", "author": {"login": "ChonSong"},
             "headRefName": "feat/system-monitor", "headRefOid": "abc123def456",
-            "createdAt": "2026-08-07T07:00:00Z", "updatedAt": "2026-08-07T08:00:00Z",
+            "createdAt": "2026-08-18T07:00:00Z", "updatedAt": "2026-08-18T08:00:00Z",
         }])
         with patch.object(poller_mod, "POLLER_REPOS", ["owner/repo"]):
             with patch("subprocess.run") as mock_run:
