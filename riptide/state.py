@@ -275,20 +275,30 @@ class StateStore:
             conn.execute("BEGIN IMMEDIATE")
             cutoff = time.time() - 7200
             escaped = f"{self._escape_like(name_prefix)}-%"
+
+            # Check if pending job exists
+            existing = conn.execute(
+                "SELECT COUNT(*) FROM jobs WHERE id LIKE ? ESCAPE '\\' AND status='pending' AND created_at > ?",
+                (escaped, cutoff),
+            ).fetchone()[0]
+
+            if existing > 0:
+                conn.execute("COMMIT")
+                return False
+
+            # Use INSERT OR IGNORE to handle race condition
             conn.execute(
-                """INSERT INTO jobs (id, pr_number, tier, status, created_at)
-                   SELECT ?, ?, ?, 'pending', ?
-                   WHERE NOT EXISTS (
-                       SELECT 1 FROM jobs WHERE id LIKE ? ESCAPE '\\' AND status='pending' AND created_at > ?
-                   )""",
-                (job_id, pr_number, tier, time.time(), escaped, cutoff),
+                "INSERT OR IGNORE INTO jobs (id, pr_number, tier, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
+                (job_id, pr_number, tier, time.time()),
             )
-            conn.commit()
-            # Use changes() to deterministically detect whether this INSERT added a row.
-            # conn.total_changes is cumulative across the connection and can give
-            # false positives; changes() returns rows modified by the last statement only.
-            row_count = conn.execute("SELECT changes()").fetchone()[0]
-            return row_count > 0
+            conn.execute("COMMIT")
+
+            # Verify our insert succeeded
+            row = conn.execute(
+                "SELECT id FROM jobs WHERE id = ? AND status = 'pending'",
+                (job_id,),
+            ).fetchone()
+            return row is not None
         except Exception:
             conn.rollback()
             raise
