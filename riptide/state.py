@@ -92,6 +92,18 @@ class StateStore:
             )"""
         )
         conn.execute(
+            """CREATE TABLE IF NOT EXISTS work_queue (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                created_at REAL,
+                completed_at REAL,
+                error TEXT,
+                traceback TEXT
+            )"""
+        )
+        conn.execute(
             """CREATE TABLE IF NOT EXISTS deliveries (
                 delivery_id TEXT PRIMARY KEY,
                 received_at REAL
@@ -292,6 +304,90 @@ class StateStore:
         except Exception:
             conn.rollback()
             raise
+
+    # ── Work queue (durable work items that survive process restarts) ──────────
+
+    def enqueue_work(self, work_id: str, kind: str, payload: dict) -> bool:
+        """Enqueue a work item for later processing. Returns True if inserted."""
+        conn = self._get_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """INSERT OR IGNORE INTO work_queue (id, kind, payload, status, created_at)
+                   VALUES (?, ?, ?, 'pending', ?)""",
+                (work_id, kind, json.dumps(payload), time.time()),
+            )
+            conn.commit()
+            return conn.execute("SELECT changes()").fetchone()[0] > 0
+        except Exception:
+            conn.rollback()
+            raise
+
+    def get_pending_work(self, kind: str) -> list[dict]:
+        """Get pending work items of a given kind."""
+        conn = self._get_conn()
+        rows = conn.execute(
+            """SELECT id, kind, payload, created_at FROM work_queue
+               WHERE kind = ? AND status = 'pending'
+               ORDER BY created_at ASC""",
+            (kind,),
+        ).fetchall()
+        return [
+            {"id": r[0], "kind": r[1], "payload": json.loads(r[2]), "created_at": r[3]}
+            for r in rows
+        ]
+
+    def complete_work(self, work_id: str, error: Optional[str] = None, traceback_str: Optional[str] = None):
+        """Mark a work item as completed or failed."""
+        conn = self._get_conn()
+        status = "failed" if error else "completed"
+        conn.execute(
+            "UPDATE work_queue SET status=?, completed_at=?, error=?, traceback=? WHERE id=?",
+            (status, time.time(), error, traceback_str, work_id),
+        )
+        conn.commit()
+
+    def cleanup_stale_work(self, max_age_seconds: int = 7200):
+        """Mark stale pending work as failed."""
+        conn = self._get_conn()
+        cutoff = time.time() - max_age_seconds
+        conn.execute(
+            "UPDATE work_queue SET status='failed', completed_at=?, error='stale' WHERE status='pending' AND created_at < ?",
+            (time.time(), cutoff),
+        )
+        conn.commit()
+
+    def recover_pending_work(self) -> list[dict]:
+        """Find pending work items for startup recovery.
+
+        Items younger than max_age_seconds are returned for re-processing.
+        Items older than max_age_seconds are marked as failed.
+        """
+        conn = self._get_conn()
+        now = time.time()
+        stale_cutoff = now - 7200  # 2 hours
+        recovery_cutoff = now - 300  # 5 minutes — items younger than this get recovered
+
+        # Mark stale items as failed
+        conn.execute(
+            "UPDATE work_queue SET status='failed', completed_at=?, error='stale' WHERE status='pending' AND created_at < ?",
+            (now, stale_cutoff),
+        )
+        conn.commit()
+
+        # Return recently-pending items for recovery
+        rows = conn.execute(
+            """SELECT id, kind, payload, created_at FROM work_queue
+               WHERE status='pending' AND created_at > ?
+               ORDER BY created_at ASC""",
+            (recovery_cutoff,),
+        ).fetchall()
+        return [
+            {"id": r[0], "kind": r[1], "payload": json.loads(r[2]), "created_at": r[3]}
+            for r in rows
+        ]
+
+
 
     def cleanup_stale_pending(self, max_age_seconds: int = 7200):
         conn = self._get_conn()

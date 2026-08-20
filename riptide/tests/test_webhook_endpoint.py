@@ -272,18 +272,49 @@ class TestFixCommandGating:
 
     def test_exact_fix_command_invokes_fixer(self, client, webhook_secret):
         """`@riptide-bot fix` must route to handle_fix_command."""
-        from unittest.mock import patch
+        import time
+        import threading
+        from unittest.mock import patch, MagicMock
 
         gh_instance = MagicMock()
+        fix_done = threading.Event()
+        ack_done = threading.Event()
+
+        def fake_fix(*args, **kwargs):
+            result = "🛠 Riptide Fix triggered"
+            fix_done.set()
+            return result
+
+        def fake_post_pr_comment(*args, **kwargs):
+            ack_done.set()
+
+        gh_instance.post_pr_comment.side_effect = fake_post_pr_comment
+
+        mock_state_class = MagicMock()
+        mock_state_instance = MagicMock()
+        mock_state_class.return_value = mock_state_instance
+
         with patch("riptide.webhook.get_companion", return_value=None), \
-             patch("riptide.fixer.handle_fix_command", return_value="🛠 Riptide Fix triggered") as fix, \
-             patch("riptide.webhook.github_client", return_value=gh_instance):
+             patch("riptide.fixer.handle_fix_command", side_effect=fake_fix) as fix, \
+             patch("riptide.webhook.github_client", return_value=gh_instance), \
+             patch("riptide.webhook.StateStore", mock_state_class):
             resp = self._post_comment(
                 client, webhook_secret,
                 "@riptide-bot fix add tests for the new endpoint",
                 "delivery-fix-exact",
             )
-        assert resp.status_code == 200
+            # Webhook returns immediately (non-blocking)
+            assert resp.status_code == 200
+
+            # Verify work was enqueued durably BEFORE returning
+            mock_state_instance.enqueue_work.assert_called_once()
+            enqueue_args = mock_state_instance.enqueue_work.call_args
+            assert enqueue_args[0][1] == "fix"
+
+            # Wait for the background thread to complete
+            assert fix_done.wait(timeout=3), "handle_fix_command was not called"
+            assert ack_done.wait(timeout=3), "post_pr_comment was not called"
+
         assert fix.call_count == 1
         args = fix.call_args
         assert args.args[1] == 4242          # installation_id
@@ -294,6 +325,8 @@ class TestFixCommandGating:
         assert args.args[6] == "add tests for the new endpoint"  # description
         # The ack comment must have been posted via the same client
         gh_instance.post_pr_comment.assert_called_once()
+        # Work should be marked complete
+        mock_state_instance.complete_work.assert_called()
 
     def test_casual_fix_mention_does_not_invoke_fixer(self, client, webhook_secret):
         """'please fix this' WITHOUT the command must NOT write code."""
@@ -313,21 +346,111 @@ class TestFixCommandGating:
 
     def test_other_bot_command_does_not_invoke_fixer(self, client, webhook_secret):
         """`@riptide-bot review` (read-only) must NOT route to the fixer."""
-        from unittest.mock import patch
+        import threading
+        from unittest.mock import patch, MagicMock
+
+        review_done = threading.Event()
+
+        def fake_review(*args, **kwargs):
+            review_done.set()
+            return None  # No ack comment for this test
+
+        mock_state_class = MagicMock()
+        mock_state_instance = MagicMock()
+        mock_state_class.return_value = mock_state_instance
 
         with patch("riptide.webhook.get_companion", return_value=None), \
              patch("riptide.fixer.handle_fix_command") as fix, \
-             patch("riptide.deepthink.handle_review_command", return_value=None) as review, \
-             patch("riptide.webhook.github_client") as gh:
+             patch("riptide.deepthink.handle_review_command", side_effect=fake_review) as review, \
+             patch("riptide.webhook.github_client", return_value=MagicMock()), \
+             patch("riptide.webhook.StateStore", mock_state_class):
             resp = self._post_comment(
                 client, webhook_secret,
                 "@riptide-bot review",
                 "delivery-fix-review",
             )
-        assert resp.status_code == 200
+            # Webhook returns immediately (non-blocking)
+            assert resp.status_code == 200
+
+            # Verify work was enqueued durably BEFORE returning
+            mock_state_instance.enqueue_work.assert_called_once()
+            enqueue_args = mock_state_instance.enqueue_work.call_args
+            assert enqueue_args[0][1] == "review"
+
+            # Wait for the background thread to complete
+            assert review_done.wait(timeout=3), "handle_review_command was not called"
+
+        # Fix should NOT have been called
         fix.assert_not_called()
-        # The read-only review command SHOULD route (proves routing works, just not fix)
+        # Review SHOULD have been called
         review.assert_called_once()
+
+    def test_work_id_uses_delivery_id_for_idempotence(self, client, webhook_secret):
+        """Work queue items use delivery_id for idempotence on webhook retries."""
+        import threading
+        from unittest.mock import patch, MagicMock
+
+        review_done = threading.Event()
+
+        def fake_review(*args, **kwargs):
+            review_done.set()
+            return None
+
+        mock_state_class = MagicMock()
+        mock_state_instance = MagicMock()
+        mock_state_class.return_value = mock_state_instance
+
+        with patch("riptide.webhook.get_companion", return_value=None), \
+             patch("riptide.deepthink.handle_review_command", side_effect=fake_review), \
+             patch("riptide.webhook.github_client", return_value=MagicMock()), \
+             patch("riptide.webhook.StateStore", mock_state_class):
+            resp = self._post_comment(
+                client, webhook_secret,
+                "@riptide-bot review",
+                "delivery-dedupe-test",
+            )
+            assert resp.status_code == 200
+
+            # Work_id must include delivery_id for deduplication
+            enqueue_args = mock_state_instance.enqueue_work.call_args
+            work_id = enqueue_args[0][0]
+            assert "delivery-dedupe-test" in work_id
+
+            assert review_done.wait(timeout=3), "handle_review_command was not called"
+
+    def test_work_queue_failure_logged(self, client, webhook_secret):
+        """Work queue failures are logged with full tracebacks."""
+        import threading
+        from unittest.mock import patch, MagicMock
+
+        review_done = threading.Event()
+
+        def fake_review_fails(*args, **kwargs):
+            review_done.set()
+            raise RuntimeError("Simulated failure")
+
+        mock_state_class = MagicMock()
+        mock_state_instance = MagicMock()
+        mock_state_class.return_value = mock_state_instance
+
+        with patch("riptide.webhook.get_companion", return_value=None), \
+             patch("riptide.deepthink.handle_review_command", side_effect=fake_review_fails), \
+             patch("riptide.webhook.github_client", return_value=MagicMock()), \
+             patch("riptide.webhook.StateStore", mock_state_class):
+            resp = self._post_comment(
+                client, webhook_secret,
+                "@riptide-bot review",
+                "delivery-failure-test",
+            )
+            assert resp.status_code == 200
+
+            # Wait for background thread
+            assert review_done.wait(timeout=3), "handle_review_command was not called"
+
+            # complete_work should be called with error
+            mock_state_instance.complete_work.assert_called()
+            call_args = mock_state_instance.complete_work.call_args
+            assert "Simulated failure" in str(call_args)
 
     def test_fix_command_by_bot_is_skipped(self, client, webhook_secret, monkeypatch):
         """Bot's own comments must never re-trigger fix (no self-loop)."""
@@ -359,3 +482,56 @@ class TestFixCommandGating:
         fix.assert_not_called()
         gh.return_value.post_pr_comment.assert_not_called()
 
+
+import time
+
+
+class TestWorkQueueRecovery:
+    """Tests for work_queue startup recovery."""
+
+    def test_recover_pending_work_marks_stale_items_failed(self, tmp_path):
+        """recover_pending_work() marks items older than 2h as stale."""
+        from riptide.state import StateStore
+
+        db_path = str(tmp_path / "test_state.db")
+        store = StateStore(db_path)
+
+        # Insert an old item (3 hours old)
+        store.enqueue_work("old-review-123", "review", {"pr_number": 1})
+        # Manually update created_at to make it old
+        conn = store._get_conn()
+        conn.execute(
+            "UPDATE work_queue SET created_at = ? WHERE id = ?",
+            (time.time() - 10800, "old-review-123"),
+        )
+        conn.commit()
+
+        # Recover should mark it as stale and return empty list
+        pending = store.recover_pending_work()
+        assert len(pending) == 0
+
+        # Verify it was marked as stale
+        conn = store._get_conn()
+        row = conn.execute(
+            "SELECT status, error FROM work_queue WHERE id = ?",
+            ("old-review-123",),
+        ).fetchone()
+        assert row[0] == "failed"
+        assert row[1] == "stale"
+
+    def test_recover_pending_work_returns_recent_items(self, tmp_path):
+        """recover_pending_work() returns items younger than 5 minutes."""
+        from riptide.state import StateStore
+
+        db_path = str(tmp_path / "test_state.db")
+        store = StateStore(db_path)
+
+        # Insert a recent item
+        store.enqueue_work("recent-review-456", "review", {"pr_number": 2})
+
+        # Recover should return it
+        pending = store.recover_pending_work()
+        assert len(pending) == 1
+        assert pending[0]["id"] == "recent-review-456"
+        assert pending[0]["kind"] == "review"
+        assert pending[0]["payload"]["pr_number"] == 2

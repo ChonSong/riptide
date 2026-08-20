@@ -1,15 +1,30 @@
 #!/usr/bin/env python3
 """
-webhook.py — FastAPI webhook receiver for Riptide.
+webhook.py - FastAPI webhook receiver for Riptide.
 
 Handles GitHub App webhook events:
-  - pull_request (opened, reopened, synchronize)  → enqueue companion TLDR
-  - pull_request (closed, merged)                → no-op (was incremental index)
-  - issue_comment (@mention)                     → companion skip/resume
-  - installation / installation_repositories    → sync repo list
+  - pull_request (opened, reopened, synchronize)  -> enqueue companion TLDR
+  - pull_request (closed, merged)                -> no-op (was incremental index)
+  - issue_comment (@mention)                     -> companion skip/resume
+  - installation / installation_repositories    -> sync repo list
+
+Durable Work Queue:
+  Review and fix commands are persisted to a SQLite work_queue table
+  BEFORE the webhook returns HTTP 200. A daemon thread processes the
+  work independently of the Hermes scheduler.
+
+  Durability contract:
+  - Work is persisted to SQLite so it survives process crashes IF the
+    DB file remains intact.
+  - Daemon threads do NOT survive process termination - they die when
+    the process exits.
+  - On startup, recover_pending_work() scans for items younger than
+    5 minutes and replays them via daemon threads. Items older than
+    2 hours are marked as stale.
+  - Work does NOT survive container evictions (Docker, VM termination).
 
 The companion posts a TL;DR comment with graphify-informed blast radius.
-Riptide Review (Bot 2) runs via cron polling in deepthink.py — not here.
+Riptide Review (Bot 2) runs via cron polling in deepthink.py - not here.
 """
 import os
 import json
@@ -441,13 +456,43 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
             )
             try:
                 client = github_client()
-                result = handle_review_command(
-                    client, installation_id, owner, repo_name, pr_number, commenter
-                )
-                if result:
-                    client.post_pr_comment(
-                        installation_id, owner, repo_name, pr_number, result
-                    )
+
+                # Persist work to durable queue BEFORE returning HTTP 200.
+                # The webhook returns immediately, and a daemon thread
+                # processes the work. Daemon threads do NOT survive process
+                # restarts — durability comes from the SQLite work_queue.
+                # A startup scan (see startup_recovery) is needed to resume
+                # pending work after a process restart.
+                state = StateStore()
+                # Use delivery_id for idempotence: webhook retries will
+                # collide on the existing pending work item.
+                work_id = f"review-{delivery_id}"
+                state.enqueue_work(work_id, "review", {
+                    "installation_id": installation_id,
+                    "owner": owner,
+                    "repo": repo_name,
+                    "pr_number": pr_number,
+                    "commenter": commenter,
+                })
+
+                def _run_review():
+                    try:
+                        result = handle_review_command(
+                            client, installation_id, owner, repo_name, pr_number, commenter
+                        )
+                        if result:
+                            client.post_pr_comment(
+                                installation_id, owner, repo_name, pr_number, result
+                            )
+                        state.complete_work(work_id)
+                        log.info(f"[{delivery_id}] Background review completed for {owner}/{repo_name}#{pr_number}")
+                    except Exception as e:
+                        log.exception(f"[{delivery_id}] Background review command failed")
+                        state.complete_work(work_id, error=str(e), traceback_str=traceback.format_exc())
+
+                thread = threading.Thread(target=_run_review, daemon=True, name=work_id)
+                thread.start()
+                log.info(f"[{delivery_id}] Background review thread started for {owner}/{repo_name}#{pr_number}")
             except Exception as e:
                 log.error(f"[{delivery_id}] Review command failed: {e}")
 
@@ -461,13 +506,44 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
             try:
                 client = github_client()
                 description = FIX_RE.search(body).group(1).strip()
-                result = handle_fix_command(
-                    client, installation_id, owner, repo_name, pr_number, commenter, description
-                )
-                if result:
-                    client.post_pr_comment(
-                        installation_id, owner, repo_name, pr_number, result
-                    )
+
+                # Persist work to durable queue BEFORE returning HTTP 200.
+                # The webhook returns immediately, and a daemon thread
+                # processes the work. Daemon threads do NOT survive process
+                # restarts — durability comes from the SQLite work_queue.
+                # A startup scan (see startup_recovery) is needed to resume
+                # pending work after a process restart.
+                state = StateStore()
+                # Use delivery_id for idempotence: webhook retries will
+                # collide on the existing pending work item.
+                work_id = f"fix-{delivery_id}"
+                state.enqueue_work(work_id, "fix", {
+                    "installation_id": installation_id,
+                    "owner": owner,
+                    "repo": repo_name,
+                    "pr_number": pr_number,
+                    "commenter": commenter,
+                    "description": description,
+                })
+
+                def _run_fix():
+                    try:
+                        result = handle_fix_command(
+                            client, installation_id, owner, repo_name, pr_number, commenter, description
+                        )
+                        if result:
+                            client.post_pr_comment(
+                                installation_id, owner, repo_name, pr_number, result
+                            )
+                        state.complete_work(work_id)
+                        log.info(f"[{delivery_id}] Background fix completed for {owner}/{repo_name}#{pr_number}")
+                    except Exception as e:
+                        log.exception(f"[{delivery_id}] Background fix command failed")
+                        state.complete_work(work_id, error=str(e), traceback_str=traceback.format_exc())
+
+                thread = threading.Thread(target=_run_fix, daemon=True, name=work_id)
+                thread.start()
+                log.info(f"[{delivery_id}] Background fix thread started for {owner}/{repo_name}#{pr_number}")
             except Exception as e:
                 log.error(f"[{delivery_id}] Fix command failed: {e}")
 
@@ -608,3 +684,91 @@ def init_db():
             )
         """)
     log.info(f"Metadata DB ready at {METADATA_DB}")
+
+
+@app.on_event("startup")
+def startup_recovery():
+    """Recover pending work from previous process instance."""
+    from riptide.deepthink import handle_review_command
+    from riptide.fixer import handle_fix_command
+
+    log.info("Starting work_queue recovery scan...")
+    try:
+        state = StateStore()
+        pending = state.recover_pending_work()
+        if not pending:
+            log.info("No pending work to recover")
+            return
+
+        log.info(f"Recovering {len(pending)} pending work items")
+        for item in pending:
+            work_id = item["id"]
+            kind = item["kind"]
+            payload = item["payload"]
+
+            try:
+                client = github_client()
+
+                if kind == "review":
+                    def _recover_review(work_id=work_id, payload=payload):
+                        try:
+                            result = handle_review_command(
+                                client,
+                                payload["installation_id"],
+                                payload["owner"],
+                                payload["repo"],
+                                payload["pr_number"],
+                                payload["commenter"],
+                            )
+                            if result:
+                                client.post_pr_comment(
+                                    payload["installation_id"],
+                                    payload["owner"],
+                                    payload["repo"],
+                                    payload["pr_number"],
+                                    result,
+                                )
+                            state.complete_work(work_id)
+                            log.info(f"Recovery: review {work_id} completed")
+                        except Exception as e:
+                            log.exception(f"Recovery: review {work_id} failed")
+                            state.complete_work(work_id, error=str(e), traceback_str=traceback.format_exc())
+
+                    thread = threading.Thread(target=_recover_review, daemon=True, name=f"recovery-{work_id}")
+                    thread.start()
+
+                elif kind == "fix":
+                    def _recover_fix(work_id=work_id, payload=payload):
+                        try:
+                            result = handle_fix_command(
+                                client,
+                                payload["installation_id"],
+                                payload["owner"],
+                                payload["repo"],
+                                payload["pr_number"],
+                                payload["commenter"],
+                                payload["description"],
+                            )
+                            if result:
+                                client.post_pr_comment(
+                                    payload["installation_id"],
+                                    payload["owner"],
+                                    payload["repo"],
+                                    payload["pr_number"],
+                                    result,
+                                )
+                            state.complete_work(work_id)
+                            log.info(f"Recovery: fix {work_id} completed")
+                        except Exception as e:
+                            log.exception(f"Recovery: fix {work_id} failed")
+                            state.complete_work(work_id, error=str(e), traceback_str=traceback.format_exc())
+
+                    thread = threading.Thread(target=_recover_fix, daemon=True, name=f"recovery-{work_id}")
+                    thread.start()
+
+            except Exception as e:
+                log.error(f"Failed to recover work {work_id}: {e}")
+                state.complete_work(work_id, error=str(e))
+
+    except Exception as e:
+        log.error(f"Work queue recovery failed: {e}")
