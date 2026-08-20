@@ -441,13 +441,39 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
             )
             try:
                 client = github_client()
-                result = handle_review_command(
-                    client, installation_id, owner, repo_name, pr_number, commenter
-                )
-                if result:
-                    client.post_pr_comment(
-                        installation_id, owner, repo_name, pr_number, result
-                    )
+                state = StateStore()
+                # Use delivery_id for idempotence: webhook retries will
+                # collide on the existing pending work item.
+                work_id = f"review-{delivery_id}"
+                enqueued = state.enqueue_work(work_id, "review", {
+                    "installation_id": installation_id,
+                    "owner": owner,
+                    "repo": repo_name,
+                    "pr_number": pr_number,
+                    "commenter": commenter,
+                })
+                if not enqueued:
+                    log.info(f"[{delivery_id}] Duplicate delivery — skipping review")
+                    return Response(status_code=200)
+
+                def _run_review():
+                    try:
+                        result = handle_review_command(
+                            client, installation_id, owner, repo_name, pr_number, commenter
+                        )
+                        if result:
+                            client.post_pr_comment(
+                                installation_id, owner, repo_name, pr_number, result
+                            )
+                        state.complete_work(work_id)
+                        log.info(f"[{delivery_id}] Background review completed for {owner}/{repo_name}#{pr_number}")
+                    except Exception:
+                        log.exception(f"[{delivery_id}] Background review command failed")
+                        state.complete_work(work_id, traceback_str=traceback.format_exc())
+
+                thread = threading.Thread(target=_run_review, daemon=True, name=work_id)
+                thread.start()
+                log.info(f"[{delivery_id}] Background review thread started for {owner}/{repo_name}#{pr_number}")
             except Exception as e:
                 log.error(f"[{delivery_id}] Review command failed: {e}")
 
@@ -461,13 +487,38 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
             try:
                 client = github_client()
                 description = FIX_RE.search(body).group(1).strip()
-                result = handle_fix_command(
-                    client, installation_id, owner, repo_name, pr_number, commenter, description
-                )
-                if result:
-                    client.post_pr_comment(
-                        installation_id, owner, repo_name, pr_number, result
-                    )
+                state = StateStore()
+                work_id = f"fix-{delivery_id}"
+                enqueued = state.enqueue_work(work_id, "fix", {
+                    "installation_id": installation_id,
+                    "owner": owner,
+                    "repo": repo_name,
+                    "pr_number": pr_number,
+                    "commenter": commenter,
+                    "description": description,
+                })
+                if not enqueued:
+                    log.info(f"[{delivery_id}] Duplicate delivery — skipping fix")
+                    return Response(status_code=200)
+
+                def _run_fix():
+                    try:
+                        result = handle_fix_command(
+                            client, installation_id, owner, repo_name, pr_number, commenter, description
+                        )
+                        if result:
+                            client.post_pr_comment(
+                                installation_id, owner, repo_name, pr_number, result
+                            )
+                        state.complete_work(work_id)
+                        log.info(f"[{delivery_id}] Background fix completed for {owner}/{repo_name}#{pr_number}")
+                    except Exception:
+                        log.exception(f"[{delivery_id}] Background fix command failed")
+                        state.complete_work(work_id, traceback_str=traceback.format_exc())
+
+                thread = threading.Thread(target=_run_fix, daemon=True, name=work_id)
+                thread.start()
+                log.info(f"[{delivery_id}] Background fix thread started for {owner}/{repo_name}#{pr_number}")
             except Exception as e:
                 log.error(f"[{delivery_id}] Fix command failed: {e}")
 
