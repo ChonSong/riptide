@@ -61,7 +61,6 @@ class TestHasPendingFix:
     def test_no_job_returns_false(self, poller_mod):
         """No job in the jobs table → no pending fix."""
         conn = sqlite3.connect(str(poller_mod.DB_PATH))
-        # Seed only processed_comments (old path) — should NOT trigger
         poller_mod._mark_processed(conn, 1, '{"result":"spawned","pr_key":"o/r#1"}')
         assert poller_mod._has_pending_fix(conn, "o/r#1") is False
         conn.close()
@@ -80,7 +79,6 @@ class TestHasPendingFix:
     def test_recently_completed_job_blocks(self, poller_mod, tmp_path):
         """A completed job within the cooldown → block (just finished)."""
         import riptide.state as state_mod
-        import time
         test_db = str(tmp_path / "test_state.db")
         store = state_mod.StateStore(db_path=test_db)
         store.create_job("riptide-fix-ChonSong-riptide-1-abc123", 1, "fix")
@@ -98,7 +96,6 @@ class TestHasPendingFix:
         store = state_mod.StateStore(db_path=test_db)
         store.create_job("riptide-fix-ChonSong-riptide-1-abc123", 1, "fix")
         store.mark_complete("riptide-fix-ChonSong-riptide-1-abc123")
-        # Set completed_at to 1 hour ago (outside 5-min cooldown)
         conn2 = store._get_conn()
         old_time = time.time() - 3600
         conn2.execute("UPDATE jobs SET completed_at = ? WHERE id LIKE '%riptide-fix%'", (old_time,))
@@ -108,10 +105,9 @@ class TestHasPendingFix:
             assert poller_mod._has_pending_fix(conn, "ChonSong/riptide#1") is False
             conn.close()
 
-    def test_failed_job_allows(self, poller_mod, tmp_path):
-        """A failed job → allow (user can retry immediately)."""
+    def test_failed_job_allows_retry(self, poller_mod, tmp_path):
+        """A failed job below retry limit → allow (auto-retry)."""
         import riptide.state as state_mod
-        import time
         test_db = str(tmp_path / "test_state.db")
         store = state_mod.StateStore(db_path=test_db)
         store.create_job("riptide-fix-ChonSong-riptide-1-abc123", 1, "fix")
@@ -119,6 +115,20 @@ class TestHasPendingFix:
         with patch.object(state_mod, "StateStore", return_value=store):
             conn = sqlite3.connect(str(poller_mod.DB_PATH))
             assert poller_mod._has_pending_fix(conn, "ChonSong/riptide#1") is False
+            conn.close()
+
+    def test_failed_jobs_exhausted_blocks(self, poller_mod, tmp_path):
+        """Failed jobs at MAX_FIX_RETRIES → block (exhausted)."""
+        import riptide.state as state_mod
+        test_db = str(tmp_path / "test_state.db")
+        store = state_mod.StateStore(db_path=test_db)
+        for i in range(3):
+            job_id = f"riptide-fix-ChonSong-riptide-1-{i:03d}abc"
+            store.create_job(job_id, 1, "fix")
+            store.mark_failed(job_id)
+        with patch.object(state_mod, "StateStore", return_value=store):
+            conn = sqlite3.connect(str(poller_mod.DB_PATH))
+            assert poller_mod._has_pending_fix(conn, "ChonSong/riptide#1") is True
             conn.close()
 
     def test_different_pr_not_blocked(self, poller_mod, tmp_path):
@@ -138,9 +148,6 @@ class TestHasPendingFix:
         with patch("riptide.state.StateStore", side_effect=Exception("DB down")):
             assert poller_mod._has_pending_fix(conn, "ChonSong/riptide#1") is False
         conn.close()
-
-
-# ── _handle_fix ──────────────────────────────────────────────────────────────
 
 
 class TestHandleFix:

@@ -58,6 +58,9 @@ POLLER_REPOS = [
 # Failed jobs are NOT blocked — user can retry immediately.
 # Pending jobs are always blocked (one is running) regardless of age.
 FIX_COOLDOWN_SECONDS = int(os.environ.get("RIPTIDE_FIX_COOLDOWN", "300"))
+# Maximum automatic retry attempts for failed fix jobs before giving up
+# and reporting the failure to the PR. Prevents infinite retry loops.
+MAX_FIX_RETRIES = int(os.environ.get("RIPTIDE_MAX_FIX_RETRIES", "3"))
 
 
 
@@ -110,14 +113,15 @@ def _get_pending_response(conn: sqlite3.Connection, comment_id: int) -> Optional
 
 
 def _has_pending_fix(conn: sqlite3.Connection, pr_key: str) -> bool:
-    """Check if a fix session is already running or recently completed for this PR.
+    """Check if a fix session is already running, recently completed, or exhausted for this PR.
 
     Deterministic rules:
     1. If there's a pending job for this PR (regardless of age), block — one is running.
     2. If there's a completed job within FIX_COOLDOWN_SECONDS, block — just finished,
        prevent rapid re-triggering.
-    3. If there's a failed job (no matter how old), allow — user can retry immediately.
-    4. If there's a completed job outside the cooldown, allow — enough time has passed.
+    3. If there are only failed jobs AND the count is below MAX_FIX_RETRIES, allow — auto-retry.
+    4. If failed jobs have reached MAX_FIX_RETRIES, block — exhausted, requires manual intervention.
+    5. If there's a completed job outside the cooldown, allow — enough time has passed.
     """
     try:
         from riptide.state import StateStore
@@ -143,7 +147,15 @@ def _has_pending_fix(conn: sqlite3.Connection, pr_key: str) -> bool:
         ).fetchone()
         if row[0] > 0:
             return True
-        # Otherwise: allow (old completed job, only failed jobs, or no jobs at all)
+        # Check 3: failed jobs below retry limit → allow (auto-retry)
+        # Check 4: failed jobs at retry limit → block (exhausted)
+        row = conn2.execute(
+            "SELECT COUNT(*) FROM jobs WHERE id LIKE ? AND status = 'failed'",
+            (f"riptide-fix-%{pr_number}-%",),
+        ).fetchone()
+        if row[0] >= MAX_FIX_RETRIES:
+            return True  # Exhausted retries, requires manual intervention
+        # Otherwise: allow (no jobs, old completed, or failed jobs below limit)
         return False
     except Exception as e:
         # Fail closed: if we can't check, assume no pending fix to avoid
@@ -256,12 +268,13 @@ def _handle_fix(client, match: dict, conn: sqlite3.Connection):
     repo = match["repo"]
     pr_number = match["pr_number"]
 
-    # PR-level dedup: skip if a fix is running or recently completed.
+    # PR-level dedup: skip if a fix is running, recently completed, or retries exhausted.
     # _has_pending_fix queries the shared jobs table (written by both webhook.py
     # and poller.py). Blocks if:
     #   - any pending job exists (one is running), or
-    #   - any completed job within FIX_COOLDOWN_SECONDS (just finished).
-    # Failed jobs are NOT blocked — user can retry immediately.
+    #   - any completed job within FIX_COOLDOWN_SECONDS (just finished), or
+    #   - failed jobs have reached MAX_FIX_RETRIES (exhausted, needs manual intervention).
+    # Failed jobs below the retry limit are NOT blocked — auto-retry on next poll.
     # Check this FIRST, before touching conn, so a missing poller DB doesn't
     # block the dedup decision.
     if _has_pending_fix(conn, pr_key):
