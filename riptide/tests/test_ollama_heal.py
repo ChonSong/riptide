@@ -1,4 +1,4 @@
-# riptide/tests/test_ollama_heal_integration.py
+# riptide/tests/test_ollama_heal.py
 """
 Tests for ollama_heal integration with Companion._generate_eli5().
 
@@ -138,3 +138,13 @@ class TestSystemdDetection:
         with patch.object(ollama_heal, "is_healthy", return_value=True):
             result = ollama_heal.heal()
             assert result == 0
+
+    def test_restart_ollama_timeout_returns_false(self):
+        """restart_ollama() returns False when subprocess.run times out."""
+        with patch.object(
+            ollama_heal.subprocess,
+            "run",
+            side_effect=ollama_heal.subprocess.TimeoutExpired(cmd="systemctl", timeout=30),
+        ):
+            result = ollama_heal.restart_ollama()
+            assert result is False

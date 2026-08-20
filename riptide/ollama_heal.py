@@ -60,11 +60,17 @@ def is_systemd_service_loaded() -> bool:
 def restart_ollama() -> bool:
     """Restart the Ollama systemd user service."""
     print(f"🛠  Restarting {SYSTEMD_SERVICE}...")
-    result = subprocess.run(
-        ["systemctl", "--user", "restart", SYSTEMD_SERVICE],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "restart", SYSTEMD_SERVICE],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"❌ Restart timed out after 30s", file=sys.stderr)
+        return False
+
     if result.returncode != 0:
         print(f"❌ Restart failed: {result.stderr.strip()}", file=sys.stderr)
         return False
