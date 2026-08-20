@@ -66,35 +66,59 @@ class TestHasPendingFix:
         assert poller_mod._has_pending_fix(conn, "o/r#1") is False
         conn.close()
 
-    def test_recent_job_returns_true(self, poller_mod, tmp_path):
-        """A recent fix job in the jobs table → pending fix detected."""
-        # Create a StateStore with a temp DB and seed a job
+    def test_pending_job_blocks(self, poller_mod, tmp_path):
+        """A pending fix job for this PR → block (one is running)."""
         import riptide.state as state_mod
         test_db = str(tmp_path / "test_state.db")
         store = state_mod.StateStore(db_path=test_db)
-        store.create_job("riptide-fix-o-r-1-abc123", 1, "fix")
-        # Now patch StateStore to use this DB
+        store.create_job("riptide-fix-ChonSong-riptide-1-abc123", 1, "fix")
         with patch.object(state_mod, "StateStore", return_value=store):
             conn = sqlite3.connect(str(poller_mod.DB_PATH))
-            assert poller_mod._has_pending_fix(conn, "o/r#1") is True
+            assert poller_mod._has_pending_fix(conn, "ChonSong/riptide#1") is True
             conn.close()
 
-    def test_old_job_outside_window_returns_false(self, poller_mod, tmp_path):
-        """A fix job older than FIX_DEDUP_WINDOW_SECONDS → not pending."""
+    def test_recently_completed_job_blocks(self, poller_mod, tmp_path):
+        """A completed job within the cooldown → block (just finished)."""
         import riptide.state as state_mod
         import time
         test_db = str(tmp_path / "test_state.db")
         store = state_mod.StateStore(db_path=test_db)
-        # Create a job with a created_at older than the window
-        store.create_job("riptide-fix-o-r-1-abc123", 1, "fix")
-        # Manually update created_at to be old
+        store.create_job("riptide-fix-ChonSong-riptide-1-abc123", 1, "fix")
+        store.mark_complete("riptide-fix-ChonSong-riptide-1-abc123")
+        with patch.object(state_mod, "StateStore", return_value=store):
+            conn = sqlite3.connect(str(poller_mod.DB_PATH))
+            assert poller_mod._has_pending_fix(conn, "ChonSong/riptide#1") is True
+            conn.close()
+
+    def test_old_completed_job_allows(self, poller_mod, tmp_path):
+        """A completed job outside the cooldown → allow (enough time passed)."""
+        import riptide.state as state_mod
+        import time
+        test_db = str(tmp_path / "test_state.db")
+        store = state_mod.StateStore(db_path=test_db)
+        store.create_job("riptide-fix-ChonSong-riptide-1-abc123", 1, "fix")
+        store.mark_complete("riptide-fix-ChonSong-riptide-1-abc123")
+        # Set completed_at to 1 hour ago (outside 5-min cooldown)
         conn2 = store._get_conn()
-        old_time = time.time() - 99999  # Way outside window
-        conn2.execute("UPDATE jobs SET created_at = ? WHERE id LIKE '%riptide-fix%'", (old_time,))
+        old_time = time.time() - 3600
+        conn2.execute("UPDATE jobs SET completed_at = ? WHERE id LIKE '%riptide-fix%'", (old_time,))
         conn2.commit()
         with patch.object(state_mod, "StateStore", return_value=store):
             conn = sqlite3.connect(str(poller_mod.DB_PATH))
-            assert poller_mod._has_pending_fix(conn, "o/r#1") is False
+            assert poller_mod._has_pending_fix(conn, "ChonSong/riptide#1") is False
+            conn.close()
+
+    def test_failed_job_allows(self, poller_mod, tmp_path):
+        """A failed job → allow (user can retry immediately)."""
+        import riptide.state as state_mod
+        import time
+        test_db = str(tmp_path / "test_state.db")
+        store = state_mod.StateStore(db_path=test_db)
+        store.create_job("riptide-fix-ChonSong-riptide-1-abc123", 1, "fix")
+        store.mark_failed("riptide-fix-ChonSong-riptide-1-abc123")
+        with patch.object(state_mod, "StateStore", return_value=store):
+            conn = sqlite3.connect(str(poller_mod.DB_PATH))
+            assert poller_mod._has_pending_fix(conn, "ChonSong/riptide#1") is False
             conn.close()
 
     def test_different_pr_not_blocked(self, poller_mod, tmp_path):
@@ -102,17 +126,17 @@ class TestHasPendingFix:
         import riptide.state as state_mod
         test_db = str(tmp_path / "test_state.db")
         store = state_mod.StateStore(db_path=test_db)
-        store.create_job("riptide-fix-o-r-1-abc123", 1, "fix")
+        store.create_job("riptide-fix-ChonSong-riptide-1-abc123", 1, "fix")
         with patch.object(state_mod, "StateStore", return_value=store):
             conn = sqlite3.connect(str(poller_mod.DB_PATH))
-            assert poller_mod._has_pending_fix(conn, "o/r#2") is False
+            assert poller_mod._has_pending_fix(conn, "ChonSong/riptide#2") is False
             conn.close()
 
     def test_db_failure_returns_false(self, poller_mod):
         """If StateStore raises, fail open (return False)."""
         conn = sqlite3.connect(str(poller_mod.DB_PATH))
         with patch("riptide.state.StateStore", side_effect=Exception("DB down")):
-            assert poller_mod._has_pending_fix(conn, "o/r#1") is False
+            assert poller_mod._has_pending_fix(conn, "ChonSong/riptide#1") is False
         conn.close()
 
 

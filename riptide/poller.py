@@ -53,11 +53,11 @@ POLLER_REPOS = [
     if r.strip()
 ]
 
-# Don't re-spawn a fix on the same PR within this window (seconds).
-# Covers webhook->poller and poller->poller dedup. 30 min is longer than
-# any single fix session should take; if it's not done in 30 min it's
-# stuck and needs human intervention, not another spawn.
-FIX_DEDUP_WINDOW_SECONDS = int(os.environ.get("RIPTIDE_FIX_DEDUP_WINDOW", "1800"))
+# Don't re-spawn a fix on the same PR within this cooldown (seconds).
+# Short window prevents rapid re-triggering right after a completed fix.
+# Failed jobs are NOT blocked — user can retry immediately.
+# Pending jobs are always blocked (one is running) regardless of age.
+FIX_COOLDOWN_SECONDS = int(os.environ.get("RIPTIDE_FIX_COOLDOWN", "300"))
 
 
 
@@ -110,12 +110,14 @@ def _get_pending_response(conn: sqlite3.Connection, comment_id: int) -> Optional
 
 
 def _has_pending_fix(conn: sqlite3.Connection, pr_key: str) -> bool:
-    """Check if any fix session for this PR ran recently (webhook or poller).
+    """Check if a fix session is already running or recently completed for this PR.
 
-    Queries the shared jobs table (written by both webhook.py and poller.py)
-    for any fix job on this PR within FIX_DEDUP_WINDOW_SECONDS. Covers both
-    pending and completed jobs — a fix that finished 5 minutes ago should
-    prevent a duplicate spawn just as surely as one still running.
+    Deterministic rules:
+    1. If there's a pending job for this PR (regardless of age), block — one is running.
+    2. If there's a completed job within FIX_COOLDOWN_SECONDS, block — just finished,
+       prevent rapid re-triggering.
+    3. If there's a failed job (no matter how old), allow — user can retry immediately.
+    4. If there's a completed job outside the cooldown, allow — enough time has passed.
     """
     try:
         from riptide.state import StateStore
@@ -126,13 +128,23 @@ def _has_pending_fix(conn: sqlite3.Connection, pr_key: str) -> bool:
             pr_number = int(pr_key.split("#")[-1])
         except (ValueError, IndexError):
             return False
-        cutoff = time.time() - FIX_DEDUP_WINDOW_SECONDS
+        # Check 1: any pending job for this PR → block
         row = conn2.execute(
-            "SELECT COUNT(*) FROM jobs "
-            "WHERE id LIKE ? AND created_at > ?",
-            (f"riptide-fix-%{pr_number}-%", cutoff),
+            "SELECT COUNT(*) FROM jobs WHERE id LIKE ? AND status = 'pending'",
+            (f"riptide-fix-%{pr_number}-%",),
         ).fetchone()
-        return row[0] > 0
+        if row[0] > 0:
+            return True
+        # Check 2: completed job within cooldown → block
+        cooldown_cutoff = time.time() - FIX_COOLDOWN_SECONDS
+        row = conn2.execute(
+            "SELECT COUNT(*) FROM jobs WHERE id LIKE ? AND status = 'complete' AND completed_at > ?",
+            (f"riptide-fix-%{pr_number}-%", cooldown_cutoff),
+        ).fetchone()
+        if row[0] > 0:
+            return True
+        # Otherwise: allow (old completed job, only failed jobs, or no jobs at all)
+        return False
     except Exception as e:
         # Fail closed: if we can't check, assume no pending fix to avoid
         # blocking legitimate fix requests when DB is unavailable.
@@ -244,11 +256,12 @@ def _handle_fix(client, match: dict, conn: sqlite3.Connection):
     repo = match["repo"]
     pr_number = match["pr_number"]
 
-    # PR-level dedup: skip if any fix session for this PR ran recently.
+    # PR-level dedup: skip if a fix is running or recently completed.
     # _has_pending_fix queries the shared jobs table (written by both webhook.py
-    # and poller.py) for any fix job within FIX_DEDUP_WINDOW_SECONDS. This covers
-    # both pending and completed jobs — a fix that finished 5 minutes ago should
-    # prevent a duplicate spawn just as surely as one still running.
+    # and poller.py). Blocks if:
+    #   - any pending job exists (one is running), or
+    #   - any completed job within FIX_COOLDOWN_SECONDS (just finished).
+    # Failed jobs are NOT blocked — user can retry immediately.
     # Check this FIRST, before touching conn, so a missing poller DB doesn't
     # block the dedup decision.
     if _has_pending_fix(conn, pr_key):
