@@ -22,6 +22,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -51,6 +52,12 @@ POLLER_REPOS = [
     for r in os.environ.get("RIPTIDE_POLLER_REPOS", "").split(",")
     if r.strip()
 ]
+
+# Don't re-spawn a fix on the same PR within this window (seconds).
+# Covers webhook->poller and poller->poller dedup. 30 min is longer than
+# any single fix session should take; if it's not done in 30 min it's
+# stuck and needs human intervention, not another spawn.
+FIX_DEDUP_WINDOW_SECONDS = int(os.environ.get("RIPTIDE_FIX_DEDUP_WINDOW", "1800"))
 
 
 
@@ -103,22 +110,34 @@ def _get_pending_response(conn: sqlite3.Connection, comment_id: int) -> Optional
 
 
 def _has_pending_fix(conn: sqlite3.Connection, pr_key: str) -> bool:
-    """Check if any comment on this PR already spawned a fix."""
-    like_pattern = f'%"spawned"%'
-    rows = conn.execute(
-        f"SELECT result FROM {PROCESSED_TABLE} WHERE result LIKE ?",
-        (like_pattern,)
-    ).fetchall()
-    for (result_str,) in rows:
+    """Check if any fix session for this PR ran recently (webhook or poller).
+
+    Queries the shared jobs table (written by both webhook.py and poller.py)
+    for any fix job on this PR within FIX_DEDUP_WINDOW_SECONDS. Covers both
+    pending and completed jobs — a fix that finished 5 minutes ago should
+    prevent a duplicate spawn just as surely as one still running.
+    """
+    try:
+        from riptide.state import StateStore
+        state = StateStore()
+        conn2 = state._get_conn()
+        # Parse pr_key "owner/repo#N" → pr_number=N
         try:
-            data = json.loads(result_str)
-            if data.get("pr_key") == pr_key:
-                return True
-        except (json.JSONDecodeError, TypeError):
-            # Legacy rows without JSON
-            if pr_key in result_str:
-                return True
-    return False
+            pr_number = int(pr_key.split("#")[-1])
+        except (ValueError, IndexError):
+            return False
+        cutoff = time.time() - FIX_DEDUP_WINDOW_SECONDS
+        row = conn2.execute(
+            "SELECT COUNT(*) FROM jobs "
+            "WHERE id LIKE ? AND created_at > ?",
+            (f"riptide-fix-%{pr_number}-%", cutoff),
+        ).fetchone()
+        return row[0] > 0
+    except Exception as e:
+        # Fail closed: if we can't check, assume no pending fix to avoid
+        # blocking legitimate fix requests when DB is unavailable.
+        log.warning(f"_has_pending_fix check failed for {pr_key}: {e}", exc_info=True)
+        return False
 
 
 def _search_fix_comments(lookback_days: int = LOOKBACK_DAYS) -> list[dict]:
@@ -225,6 +244,19 @@ def _handle_fix(client, match: dict, conn: sqlite3.Connection):
     repo = match["repo"]
     pr_number = match["pr_number"]
 
+    # PR-level dedup: skip if any fix session for this PR ran recently.
+    # _has_pending_fix queries the shared jobs table (written by both webhook.py
+    # and poller.py) for any fix job within FIX_DEDUP_WINDOW_SECONDS. This covers
+    # both pending and completed jobs — a fix that finished 5 minutes ago should
+    # prevent a duplicate spawn just as surely as one still running.
+    # Check this FIRST, before touching conn, so a missing poller DB doesn't
+    # block the dedup decision.
+    if _has_pending_fix(conn, pr_key):
+        log.info(f"Skipping {pr_key} — fix already spawned for this PR")
+        if conn:
+            _mark_processed(conn, comment_id, f'{{"result":"already-pending","pr_key":"{pr_key}"}}')
+        return
+
     # Retry path: if a previous post attempt failed, retry without re-calling handle_fix_command.
     pending_response = _get_pending_response(conn, comment_id)
     if pending_response:
@@ -272,39 +304,9 @@ def _handle_fix(client, match: dict, conn: sqlite3.Connection):
         log.info(f"Successfully posted pending response for {pr_key}")
         return
 
+    # Already-processed dedup (comment-level) — skip if this comment was already handled
     if _is_processed(conn, comment_id):
         log.info(f"Skipping already-processed comment {comment_id}")
-        return
-
-    # PR-level dedup: skip if any comment on this PR already spawned a fix
-    if _has_pending_fix(conn, pr_key):
-        log.info(f"Skipping {pr_key} — fix already spawned for this PR")
-        _mark_processed(conn, comment_id, f'{{"result":"already-pending","pr_key":"{pr_key}"}}')
-        return
-
-    # Cross-channel dedup: on installed repos the GitHub App webhook already
-    # claims fix jobs (reserving them in StateStore) and posts the confirmation.
-    # If a pending fix job exists for this PR, stay silent — calling
-    # handle_fix_command here would fail reserve_job and emit a redundant
-    # "Could not schedule" comment on top of the webhook's confirmation.
-    # (Non-installed/external repos have no webhook path, so this is a no-op
-    # for the poller's primary use case.)
-    try:
-        from riptide.state import StateStore
-        state = StateStore()
-        name_prefix = f"riptide-fix-{owner}-{repo}-{pr_number}"
-        if state.has_pending_job(name_prefix):
-            log.info(f"Skipping {pr_key} — fix already pending via webhook")
-            _mark_processed(conn, comment_id, f'{{"result":"already-pending-webhook","pr_key":"{pr_key}"}}')
-            return
-    except Exception as e:
-        # Fail closed: the cross-channel dedup guard exists to prevent the
-        # poller from double-handling a fix the webhook already claimed. If the
-        # StateStore check fails, assuming "no job" risks posting the redundant
-        # "Could not schedule" comment the guard is meant to suppress — exactly
-        # when the dedup is needed most. Mark dedup-check-failed and skip.
-        log.warning(f"Pending-job check failed for {pr_key}: {e}; failing closed", exc_info=True)
-        _mark_processed(conn, comment_id, f'{{"result":"dedup-check-failed","pr_key":"{pr_key}"}}')
         return
 
     commenter = match["commenter"]
