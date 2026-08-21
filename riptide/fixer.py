@@ -24,10 +24,12 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sqlite3
 import subprocess
 import time
 import uuid
 from datetime import datetime, timedelta
+from typing import Optional
 
 logging.basicConfig(
     level=logging.INFO,
@@ -54,6 +56,22 @@ FIX_PROVIDER = os.environ.get("RIPTIDE_FIX_PROVIDER", "longcat")
 WORKSPACE_ROOT = os.environ.get("RIPTIDE_WORKSPACE_ROOT", "/home/sc/workspace")
 
 
+def _with_db_retry(fn, max_retries=3, base_delay=0.5):
+    """Execute fn() with retry on SQLite 'database is locked' errors.
+
+    Uses exponential backoff. Returns fn()'s result or raises after max_retries.
+    """
+    for attempt in range(max_retries):
+        try:
+            return fn()
+        except sqlite3.OperationalError as e:
+            if "database is locked" not in str(e).lower() or attempt == max_retries - 1:
+                raise
+            wait_time = base_delay * (2 ** attempt)
+            log.info(f"DB locked, retrying in {wait_time}s (attempt {attempt+1}/{max_retries})")
+            time.sleep(wait_time)
+
+
 def handle_fix_command(
     client,
     installation_id: int | None,
@@ -67,10 +85,10 @@ def handle_fix_command(
 
     Called from webhook.py when a user comments @riptide-bot fix on a PR.
     Fetches PR details via the GitHub API client, checks push eligibility,
-    spawns the fix session, and returns a user-facing confirmation
-    message (or error message).
+    spawns the fix session (or queues if busy), and returns a user-facing
+    confirmation message (or error message).
 
-    description: optional free-text after `fix` (already stripped).
+    Description: optional free-text after `fix` (already stripped).
     """
     try:
         pr_details = client.get_pr_details(installation_id, owner, repo, pr_number)
@@ -116,8 +134,53 @@ def handle_fix_command(
     # Fork PRs authored by us are push-eligible (we own the head branch).
     push_eligible = _is_push_eligible(owner, repo, author) and _is_fork_push_eligible(is_fork, author)
 
+    pr_key = f"{owner}/{repo}#{pr_number}"
+
+    # Check if there's already a fix running for this PR — with retry on lock contention
+    from riptide.state import StateStore
+
+    def check_and_queue():
+        state = StateStore()
+        # Use global gate OR PR-specific queue (AND logic: must check both to avoid races)
+        if state.has_running_fix() or state.get_queue_length(pr_number, owner=owner, repo=repo) > 0:
+            queue_id = state.enqueue_fix(pr_number, pr_key, commenter, description.strip(), installation_id=installation_id, owner=owner, repo=repo)
+            position = state.get_queue_position(queue_id)
+            running_pr = state.get_running_fix_pr()
+            return queue_id, position, running_pr
+        return None, None, None
+
     try:
-        spawned = _spawn_fix(
+        result = _with_db_retry(check_and_queue)
+    except sqlite3.OperationalError:
+        log.error(f"DB locked after retries for #{pr_number}")
+        return f"⚠️ Database temporarily locked for #{pr_number}. Please retry in a few seconds."
+    
+    queue_id, position, running_pr = result
+
+    if queue_id is not None:
+        if running_pr and running_pr != pr_number:
+            # Another PR's fix is running — queue globally
+            return (
+                f"⏳ **Fix queued for #{pr_number}.**\n\n"
+                f"Another fix is currently running for PR #{running_pr}. "
+                f"Your request has been added to the queue (position: {position}).\n\n"
+                f"**Scope:** {description.strip() or 'all outstanding review findings'}\n"
+                f"**Estimated start:** after the current fix completes (~5-15 min)."
+            )
+        else:
+            # Same PR fix running or queued
+            return (
+                f"⏳ **Fix queued for #{pr_number}.**\n\n"
+                f"A fix is already in progress for this PR. "
+                f"Your request has been added to the queue (position: {position}). "
+                f"It will run automatically when the current fix completes.\n\n"
+                f"**Scope:** {description.strip() or 'all outstanding review findings'}\n"
+                f"**Estimated start:** ~5 min after current fix finishes."
+            )
+
+    # No existing fix — try to spawn immediately (with lock retry)
+    def do_spawn():
+        return _spawn_fix(
             owner=owner,
             repo=repo,
             pr_number=pr_number,
@@ -129,12 +192,33 @@ def handle_fix_command(
             description=description.strip(),
             push_eligible=push_eligible,
         )
+
+    try:
+        spawned = _with_db_retry(do_spawn)
+    except sqlite3.OperationalError:
+        log.error(f"DB locked after retries during spawn for #{pr_number}")
+        return f"⚠️ Database temporarily locked for #{pr_number}. Please retry in a few seconds."
     except Exception as e:
         log.error("Failed to spawn fix: %s", e)
         return f"⚠️ Failed to spawn fix session for #{pr_number}: {e}"
 
     if not spawned:
-        return f"⚠️ Could not schedule a fix session for #{pr_number} (one may already be pending)."
+        # Reserve failed — something else grabbed the slot. Queue this request.
+        def queue_on_race():
+            state = StateStore()
+            qid = state.enqueue_fix(pr_number, pr_key, commenter, description.strip(), installation_id=installation_id, owner=owner, repo=repo)
+            return state.get_queue_position(qid)
+        try:
+            position = _with_db_retry(queue_on_race)
+        except sqlite3.OperationalError:
+            position = "?"
+        return (
+            f"⏳ **Fix queued for #{pr_number}.**\n\n"
+            f"A fix just started for this PR (dedup race). "
+            f"Your request has been added to the queue (position: {position}). "
+            f"It will run automatically when the current fix completes.\n\n"
+            f"**Scope:** {description.strip() or 'all outstanding review findings'}"
+        )
 
     log.info(
         "On-demand fix spawned for %s/%s#%d by %s (push_eligible=%s)",
@@ -274,6 +358,75 @@ def _spawn_fix(
     state.mark_failed(job_id)
     log.error(f"All {max_retries} attempts failed for {owner}/{repo}#{pr_number}")
     return False
+
+
+def process_fix_queue(client, owner: str = "ChonSong", repo: str = "riptide") -> Optional[str]:
+    """Process the next queued fix if any.
+
+    Pops the oldest 'queued' item, marks it 'running', fetches PR details,
+    and spawns a fix session directly (bypassing handle_fix_command's busy
+    check, since we already hold the queue slot).
+
+    Returns a status message if a fix was started, None if queue is empty.
+    """
+    from riptide.state import StateStore
+    state = StateStore()
+    state.cleanup_stale_pending()
+    state.cleanup_stale_queue_items()
+
+    next_item = state.start_next_queued_fix()
+    if not next_item:
+        return None
+
+    pr_number = next_item["pr_number"]
+    description = next_item["description"]
+    installation_id = next_item.get("installation_id")
+
+    # Fetch PR details using the stored installation_id (not None)
+    try:
+        pr_details = client.get_pr_details(installation_id, owner, repo, pr_number)
+    except Exception as e:
+        log.error(f"Failed to fetch PR #{pr_number} from queue: {e}")
+        state.complete_fix_queue_item(next_item["id"], success=False)
+        return None
+
+    # Spawn directly — we already hold the queue slot, so skip handle_fix_command's
+    # busy-state check. This avoids recursive re-entry into the queue.
+    title = pr_details.get("title", f"PR #{pr_number}")
+    author = pr_details.get("user", {}).get("login", "unknown")
+    additions = pr_details.get("additions", 0)
+    deletions = pr_details.get("deletions", 0)
+    total_loc = additions + deletions
+    head_sha = pr_details.get("head", {}).get("sha", "")
+    head_ref = pr_details.get("head", {}).get("ref", "")
+    head_repo = (pr_details.get("head", {}).get("repo") or {}).get("full_name", "")
+    is_fork = head_repo.lower() != f"{owner}/{repo}".lower() if head_repo else True
+    push_eligible = _is_push_eligible(owner, repo, author) and _is_fork_push_eligible(is_fork, author)
+
+    try:
+        spawned = _spawn_fix(
+            owner=owner,
+            repo=repo,
+            pr_number=pr_number,
+            pr_title=title,
+            pr_author=author,
+            total_loc=total_loc,
+            head_sha=head_sha,
+            head_ref=head_ref,
+            description=description or "",
+            push_eligible=push_eligible,
+        )
+    except Exception as e:
+        log.error(f"Failed to spawn queued fix: {e}")
+        state.complete_fix_queue_item(next_item["id"], success=False)
+        return f"⚠️ Queued fix for #{pr_number} failed: {e}"
+
+    if spawned:
+        state.complete_fix_queue_item(next_item["id"], success=True)
+        return f"🚀 Queued fix started for PR #{pr_number}"
+    else:
+        state.complete_fix_queue_item(next_item["id"], success=False)
+        return f"⚠️ Queued fix for #{pr_number} failed to spawn"
 
 
 def _build_fix_prompt(
