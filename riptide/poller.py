@@ -22,6 +22,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -51,6 +52,15 @@ POLLER_REPOS = [
     for r in os.environ.get("RIPTIDE_POLLER_REPOS", "").split(",")
     if r.strip()
 ]
+
+# Don't re-spawn a fix on the same PR within this cooldown (seconds).
+# Short window prevents rapid re-triggering right after a completed fix.
+# Failed jobs are NOT blocked — user can retry immediately.
+# Pending jobs are always blocked (one is running) regardless of age.
+FIX_COOLDOWN_SECONDS = int(os.environ.get("RIPTIDE_FIX_COOLDOWN", "300"))
+# Maximum automatic retry attempts for failed fix jobs before giving up
+# and reporting the failure to the PR. Prevents infinite retry loops.
+MAX_FIX_RETRIES = int(os.environ.get("RIPTIDE_MAX_FIX_RETRIES", "3"))
 
 
 
@@ -103,22 +113,55 @@ def _get_pending_response(conn: sqlite3.Connection, comment_id: int) -> Optional
 
 
 def _has_pending_fix(conn: sqlite3.Connection, pr_key: str) -> bool:
-    """Check if any comment on this PR already spawned a fix."""
-    like_pattern = f'%"spawned"%'
-    rows = conn.execute(
-        f"SELECT result FROM {PROCESSED_TABLE} WHERE result LIKE ?",
-        (like_pattern,)
-    ).fetchall()
-    for (result_str,) in rows:
+    """Check if a fix session is already running, recently completed, or exhausted for this PR.
+
+    Deterministic rules:
+    1. If there's a pending job for this PR (regardless of age), block — one is running.
+    2. If there's a completed job within FIX_COOLDOWN_SECONDS, block — just finished,
+       prevent rapid re-triggering.
+    3. If there are only failed jobs AND the count is below MAX_FIX_RETRIES, allow — auto-retry.
+    4. If failed jobs have reached MAX_FIX_RETRIES, block — exhausted, requires manual intervention.
+    5. If there's a completed job outside the cooldown, allow — enough time has passed.
+    """
+    try:
+        from riptide.state import StateStore
+        state = StateStore()
+        conn2 = state._get_conn()
+        # Parse pr_key "owner/repo#N" → pr_number=N
         try:
-            data = json.loads(result_str)
-            if data.get("pr_key") == pr_key:
-                return True
-        except (json.JSONDecodeError, TypeError):
-            # Legacy rows without JSON
-            if pr_key in result_str:
-                return True
-    return False
+            pr_number = int(pr_key.split("#")[-1])
+        except (ValueError, IndexError):
+            return False
+        # Check 1: any pending job for this PR → block
+        row = conn2.execute(
+            "SELECT COUNT(*) FROM jobs WHERE id LIKE ? AND status = 'pending'",
+            (f"riptide-fix-%{pr_number}-%",),
+        ).fetchone()
+        if row[0] > 0:
+            return True
+        # Check 2: completed job within cooldown → block
+        cooldown_cutoff = time.time() - FIX_COOLDOWN_SECONDS
+        row = conn2.execute(
+            "SELECT COUNT(*) FROM jobs WHERE id LIKE ? AND status = 'complete' AND completed_at > ?",
+            (f"riptide-fix-%{pr_number}-%", cooldown_cutoff),
+        ).fetchone()
+        if row[0] > 0:
+            return True
+        # Check 3: failed jobs below retry limit → allow (auto-retry)
+        # Check 4: failed jobs at retry limit → block (exhausted)
+        row = conn2.execute(
+            "SELECT COUNT(*) FROM jobs WHERE id LIKE ? AND status = 'failed'",
+            (f"riptide-fix-%{pr_number}-%",),
+        ).fetchone()
+        if row[0] >= MAX_FIX_RETRIES:
+            return True  # Exhausted retries, requires manual intervention
+        # Otherwise: allow (no jobs, old completed, or failed jobs below limit)
+        return False
+    except Exception as e:
+        # Fail closed: if we can't check, assume no pending fix to avoid
+        # blocking legitimate fix requests when DB is unavailable.
+        log.warning(f"_has_pending_fix check failed for {pr_key}: {e}", exc_info=True)
+        return False
 
 
 def _search_fix_comments(lookback_days: int = LOOKBACK_DAYS) -> list[dict]:
@@ -225,6 +268,21 @@ def _handle_fix(client, match: dict, conn: sqlite3.Connection):
     repo = match["repo"]
     pr_number = match["pr_number"]
 
+    # PR-level dedup: skip if a fix is running, recently completed, or retries exhausted.
+    # _has_pending_fix queries the shared jobs table (written by both webhook.py
+    # and poller.py). Blocks if:
+    #   - any pending job exists (one is running), or
+    #   - any completed job within FIX_COOLDOWN_SECONDS (just finished), or
+    #   - failed jobs have reached MAX_FIX_RETRIES (exhausted, needs manual intervention).
+    # Failed jobs below the retry limit are NOT blocked — auto-retry on next poll.
+    # Check this FIRST, before touching conn, so a missing poller DB doesn't
+    # block the dedup decision.
+    if _has_pending_fix(conn, pr_key):
+        log.info(f"Skipping {pr_key} — fix already spawned for this PR")
+        if conn:
+            _mark_processed(conn, comment_id, f'{{"result":"already-pending","pr_key":"{pr_key}"}}')
+        return
+
     # Retry path: if a previous post attempt failed, retry without re-calling handle_fix_command.
     pending_response = _get_pending_response(conn, comment_id)
     if pending_response:
@@ -272,39 +330,9 @@ def _handle_fix(client, match: dict, conn: sqlite3.Connection):
         log.info(f"Successfully posted pending response for {pr_key}")
         return
 
+    # Already-processed dedup (comment-level) — skip if this comment was already handled
     if _is_processed(conn, comment_id):
         log.info(f"Skipping already-processed comment {comment_id}")
-        return
-
-    # PR-level dedup: skip if any comment on this PR already spawned a fix
-    if _has_pending_fix(conn, pr_key):
-        log.info(f"Skipping {pr_key} — fix already spawned for this PR")
-        _mark_processed(conn, comment_id, f'{{"result":"already-pending","pr_key":"{pr_key}"}}')
-        return
-
-    # Cross-channel dedup: on installed repos the GitHub App webhook already
-    # claims fix jobs (reserving them in StateStore) and posts the confirmation.
-    # If a pending fix job exists for this PR, stay silent — calling
-    # handle_fix_command here would fail reserve_job and emit a redundant
-    # "Could not schedule" comment on top of the webhook's confirmation.
-    # (Non-installed/external repos have no webhook path, so this is a no-op
-    # for the poller's primary use case.)
-    try:
-        from riptide.state import StateStore
-        state = StateStore()
-        name_prefix = f"riptide-fix-{owner}-{repo}-{pr_number}"
-        if state.has_pending_job(name_prefix):
-            log.info(f"Skipping {pr_key} — fix already pending via webhook")
-            _mark_processed(conn, comment_id, f'{{"result":"already-pending-webhook","pr_key":"{pr_key}"}}')
-            return
-    except Exception as e:
-        # Fail closed: the cross-channel dedup guard exists to prevent the
-        # poller from double-handling a fix the webhook already claimed. If the
-        # StateStore check fails, assuming "no job" risks posting the redundant
-        # "Could not schedule" comment the guard is meant to suppress — exactly
-        # when the dedup is needed most. Mark dedup-check-failed and skip.
-        log.warning(f"Pending-job check failed for {pr_key}: {e}; failing closed", exc_info=True)
-        _mark_processed(conn, comment_id, f'{{"result":"dedup-check-failed","pr_key":"{pr_key}"}}')
         return
 
     commenter = match["commenter"]
