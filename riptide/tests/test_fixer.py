@@ -665,3 +665,203 @@ class TestFixTtlConsistency:
             # This test verifies the constant is used consistently
             cutoff = time.time() - FIX_TTL_SECONDS
             assert cutoff < time.time()
+
+
+class TestProcessFixQueueSpawnFailure:
+    """Tests that spawn failures release queue items immediately."""
+
+    def test_spawn_exception_releases_item(self, tmp_path, monkeypatch):
+        """When _spawn_fix raises, queue item is marked failed immediately."""
+        from riptide.state import StateStore
+        from riptide import state as state_mod
+
+        db_path = str(tmp_path / "test.db")
+        monkeypatch.setattr(state_mod, "StateStore", lambda: StateStore(db_path=db_path))
+
+        store = StateStore(db_path=db_path)
+        store.enqueue_fix(155, "ChonSong/riptide#155", "user", "fix bug")
+
+        client = MagicMock()
+        client.get_pr_details.return_value = {
+            "title": "Test PR",
+            "user": {"login": "user"},
+            "additions": 10, "deletions": 5,
+            "head": {"sha": "abc123", "ref": "fix-branch", "repo": {"full_name": "ChonSong/riptide"}},
+        }
+
+        with patch("riptide.fixer._spawn_fix", side_effect=RuntimeError("spawn failed")):
+            from riptide.fixer import process_fix_queue
+            result = process_fix_queue(client)
+
+        assert result is not None
+        assert "failed" in result
+
+        # Verify queue item was released (not left as 'running')
+        conn = store._get_conn()
+        row = conn.execute("SELECT status FROM fix_queue WHERE pr_number = 155").fetchone()
+        assert row[0] == "failed"
+
+    def test_spawn_returns_false_releases_item(self, tmp_path, monkeypatch):
+        """When _spawn_fix returns False, queue item is marked failed."""
+        from riptide.state import StateStore
+        from riptide import state as state_mod
+
+        db_path = str(tmp_path / "test.db")
+        monkeypatch.setattr(state_mod, "StateStore", lambda: StateStore(db_path=db_path))
+
+        store = StateStore(db_path=db_path)
+        store.enqueue_fix(155, "ChonSong/riptide#155", "user", "fix bug")
+
+        client = MagicMock()
+        client.get_pr_details.return_value = {
+            "title": "Test PR",
+            "user": {"login": "user"},
+            "additions": 10, "deletions": 5,
+            "head": {"sha": "abc123", "ref": "fix-branch", "repo": {"full_name": "ChonSong/riptide"}},
+        }
+
+        with patch("riptide.fixer._spawn_fix", return_value=False):
+            from riptide.fixer import process_fix_queue
+            result = process_fix_queue(client)
+
+        assert result is not None
+        assert "failed to spawn" in result
+
+        # Verify queue item was released
+        conn = store._get_conn()
+        row = conn.execute("SELECT status FROM fix_queue WHERE pr_number = 155").fetchone()
+        assert row[0] == "failed"
+
+
+class TestQueueFifoTiebreaker:
+    """Regression tests for FIFO ordering with identical timestamps."""
+
+    def test_identical_timestamps_ordered_by_id(self, tmp_path):
+        """Items with identical timestamps are ordered by id ASC."""
+        from riptide.state import StateStore
+        import time
+
+        store = StateStore(db_path=str(tmp_path / "test.db"))
+        store.init_fix_queue()  # Create table before raw inserts
+        now = time.time()
+
+        # Insert multiple items with the same timestamp
+        conn = store._get_conn()
+        conn.execute(
+            "INSERT INTO fix_queue (pr_number, pr_key, commenter, created_at) VALUES (?, ?, ?, ?)",
+            (100, "o/r#100", "user1", now),
+        )
+        conn.execute(
+            "INSERT INTO fix_queue (pr_number, pr_key, commenter, created_at) VALUES (?, ?, ?, ?)",
+            (200, "o/r#200", "user2", now),
+        )
+        conn.execute(
+            "INSERT INTO fix_queue (pr_number, pr_key, commenter, created_at) VALUES (?, ?, ?, ?)",
+            (300, "o/r#300", "user3", now),
+        )
+        conn.commit()
+
+        # Should dequeue in id order (FIFO)
+        item1 = store.start_next_queued_fix()
+        assert item1 is not None
+        assert item1["pr_number"] == 100
+
+        item2 = store.start_next_queued_fix()
+        assert item2 is not None
+        assert item2["pr_number"] == 200
+
+        item3 = store.start_next_queued_fix()
+        assert item3 is not None
+        assert item3["pr_number"] == 300
+
+
+class TestQueueOwnerRepo:
+    """Tests for owner/repo persistence in queue."""
+
+    def test_enqueue_stores_owner_repo(self, tmp_path):
+        """enqueue_fix stores owner and repo."""
+        from riptide.state import StateStore
+
+        store = StateStore(db_path=str(tmp_path / "test.db"))
+        qid = store.enqueue_fix(155, "owner/repo#155", "user", "desc", owner="owner", repo="repo")
+
+        conn = store._get_conn()
+        row = conn.execute("SELECT owner, repo FROM fix_queue WHERE id = ?", (qid,)).fetchone()
+        assert row[0] == "owner"
+        assert row[1] == "repo"
+
+    def test_get_queue_length_filters_by_owner_repo(self, tmp_path):
+        """get_queue_length filters by owner and repo."""
+        from riptide.state import StateStore
+
+        store = StateStore(db_path=str(tmp_path / "test.db"))
+        store.enqueue_fix(155, "owner1/repo1#155", "user1", "", owner="owner1", repo="repo1")
+        store.enqueue_fix(155, "owner2/repo2#155", "user2", "", owner="owner2", repo="repo2")
+        store.enqueue_fix(156, "owner1/repo1#156", "user3", "", owner="owner1", repo="repo1")
+
+        assert store.get_queue_length(155, owner="owner1", repo="repo1") == 1
+        assert store.get_queue_length(155, owner="owner2", repo="repo2") == 1
+        assert store.get_queue_length(155) == 2  # Both when no filter
+
+    def test_start_next_queued_fix_returns_owner_repo(self, tmp_path):
+        """start_next_queued_fix returns owner and repo."""
+        from riptide.state import StateStore
+
+        store = StateStore(db_path=str(tmp_path / "test.db"))
+        store.enqueue_fix(155, "owner/repo#155", "user", "", owner="owner", repo="repo")
+
+        item = store.start_next_queued_fix()
+        assert item is not None
+        assert item["owner"] == "owner"
+        assert item["repo"] == "repo"
+
+
+class TestRunningFixCutoff:
+    """Tests for started_at cutoff in has_running_fix and get_running_fix_pr."""
+
+    def test_has_running_fix_excludes_stale_queue_items(self, tmp_path):
+        """has_running_fix excludes queue items older than cutoff."""
+        from riptide.state import StateStore
+        import time
+
+        store = StateStore(db_path=str(tmp_path / "test.db"))
+        qid = store.enqueue_fix(155, "o/r#155", "user", "")
+        store.start_next_queued_fix()
+
+        # Mark as running with old started_at (older than cutoff)
+        conn = store._get_conn()
+        old_time = time.time() - 7200 - 100  # 2h100s ago
+        conn.execute("UPDATE fix_queue SET started_at = ? WHERE id = ?", (old_time, qid))
+        conn.commit()
+
+        # Should NOT be considered running (stale)
+        assert store.has_running_fix() is False
+
+    def test_get_running_fix_pr_excludes_stale_queue_items(self, tmp_path):
+        """get_running_fix_pr excludes queue items older than cutoff."""
+        from riptide.state import StateStore
+        import time
+
+        store = StateStore(db_path=str(tmp_path / "test.db"))
+        qid = store.enqueue_fix(155, "o/r#155", "user", "")
+        store.start_next_queued_fix()
+
+        # Mark as running with old started_at
+        conn = store._get_conn()
+        old_time = time.time() - 7200 - 100
+        conn.execute("UPDATE fix_queue SET started_at = ? WHERE id = ?", (old_time, qid))
+        conn.commit()
+
+        # Should return None (stale)
+        assert store.get_running_fix_pr() is None
+
+    def test_has_running_fix_includes_recent_queue_items(self, tmp_path):
+        """has_running_fix includes recent queue items."""
+        from riptide.state import StateStore
+
+        store = StateStore(db_path=str(tmp_path / "test.db"))
+        store.enqueue_fix(155, "o/r#155", "user", "")
+        store.start_next_queued_fix()
+
+        # Should be considered running (recent)
+        assert store.has_running_fix() is True
