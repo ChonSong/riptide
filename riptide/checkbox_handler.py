@@ -136,6 +136,7 @@ def handle_checkbox_toggle(
         authorized_actions.append(action)
 
     # Dispatch authorized actions FIRST (before dedup/reset)
+    failed_actions: list[str] = []
     for action in authorized_actions:
         try:
             _dispatch_action(
@@ -151,21 +152,20 @@ def handle_checkbox_toggle(
             triggered_actions.append(action)
         except Exception as e:
             log.error(f"Failed to dispatch checkbox action '{action}': {e}")
-            # Remove from triggered list if dispatch failed
-            authorized_actions.remove(action)
+            failed_actions.append(action)
+    authorized_actions = [a for a in authorized_actions if a not in failed_actions]
 
     # Now write dedup records (only for successfully dispatched actions)
     pr_key = f"{owner}/{repo}#{pr_number}"
     for action in triggered_actions:
         # Find the label for this action
         from riptide.checkbox import ACTION_LABELS
+
         label = ACTION_LABELS.get(action, action)
         state_store.set_last_checkbox_trigger(pr_key, label, time.time())
 
     # Reset checkboxes AFTER successful dispatch
-    reset_labels = (
-        [label for label in toggled_labels if CHECKBOX_ACTIONS.get(label) is not None]
-    )
+    reset_labels = [label for label in toggled_labels if CHECKBOX_ACTIONS.get(label) is not None]
     if reset_labels:
         new_body_reset = reset_checkboxes(new_body, reset_labels)
         if new_body_reset != new_body:
@@ -182,9 +182,7 @@ def handle_checkbox_toggle(
             f"Checkbox unauthorized: {unauthorized_labels} by {commenter} on {owner}/{repo}#{pr_number}"
         )
     if deduped_labels:
-        log.info(
-            f"Checkbox deduped: {deduped_labels} on {owner}/{repo}#{pr_number}"
-        )
+        log.info(f"Checkbox deduped: {deduped_labels} on {owner}/{repo}#{pr_number}")
 
     return triggered_actions
 
@@ -219,9 +217,7 @@ def _dispatch_action(
             github_client, installation_id, owner, repo, pr_number, commenter
         )
         if result:
-            github_client.post_pr_comment(
-                installation_id, owner, repo, pr_number, result
-            )
+            github_client.post_pr_comment(installation_id, owner, repo, pr_number, result)
 
     elif action == "fix":
         from riptide.fixer import handle_fix_command
@@ -230,9 +226,7 @@ def _dispatch_action(
             github_client, installation_id, owner, repo, pr_number, commenter, ""
         )
         if result:
-            github_client.post_pr_comment(
-                installation_id, owner, repo, pr_number, result
-            )
+            github_client.post_pr_comment(installation_id, owner, repo, pr_number, result)
 
     elif action == "visual":
         from riptide.visual import handle_visual_command
@@ -241,29 +235,21 @@ def _dispatch_action(
             github_client, installation_id, owner, repo, pr_number, commenter
         )
         if result:
-            github_client.post_pr_comment(
-                installation_id, owner, repo, pr_number, result
-            )
+            github_client.post_pr_comment(installation_id, owner, repo, pr_number, result)
 
     elif action == "relabel":
         from riptide.webhook import get_labeler, _reconcile_labels
 
         labeler = get_labeler()
         if labeler:
-            pr_detail = github_client.get_pr_details(
-                installation_id, owner, repo, pr_number
-            )
-            files = github_client.get_pr_files(
-                installation_id, owner, repo, pr_number
-            )
+            pr_detail = github_client.get_pr_details(installation_id, owner, repo, pr_number)
+            files = github_client.get_pr_files(installation_id, owner, repo, pr_number)
             labels = labeler.classify_pr(pr_detail, files, f"{owner}/{repo}")
             labeler.setup_labels_on_repo(installation_id, owner, repo, github_client)
             _reconcile_labels(
                 github_client, installation_id, owner, repo, pr_number, labels, labeler
             )
-            github_client.add_labels_to_issue(
-                installation_id, owner, repo, pr_number, labels
-            )
+            github_client.add_labels_to_issue(installation_id, owner, repo, pr_number, labels)
             github_client.post_pr_comment(
                 installation_id,
                 owner,
