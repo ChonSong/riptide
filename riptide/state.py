@@ -319,6 +319,155 @@ class StateStore:
             }
         return None
 
+    # ── Fix Queue ─────────────────────────────────────────────────────────────
+
+    def init_fix_queue(self):
+        """Idempotent: create fix_queue table and index if missing."""
+        conn = self._get_conn()
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS fix_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pr_number INTEGER NOT NULL,
+                pr_key TEXT NOT NULL,
+                description TEXT,
+                commenter TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT 'queued',
+                started_at REAL,
+                completed_at REAL
+            )"""
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_fix_queue_status ON fix_queue (status, created_at)"
+        )
+        conn.commit()
+
+    def enqueue_fix(self, pr_number: int, pr_key: str, commenter: str, description: str = "") -> int:
+        """Add a fix request to the queue. Returns the queue row id."""
+        self.init_fix_queue()
+        conn = self._get_conn()
+        cur = conn.execute(
+            "INSERT INTO fix_queue (pr_number, pr_key, description, commenter, created_at) VALUES (?, ?, ?, ?, ?)",
+            (pr_number, pr_key, description, commenter, time.time()),
+        )
+        conn.commit()
+        assert cur.lastrowid is not None
+        return cur.lastrowid
+
+    def get_queue_length(self, pr_number: int) -> int:
+        """Count queued (not yet started) fix requests for this PR."""
+        self.init_fix_queue()
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT COUNT(*) FROM fix_queue WHERE pr_number = ? AND status = 'queued'",
+            (pr_number,),
+        ).fetchone()
+        return row[0]
+
+    def get_queue_position(self, queue_id: int) -> Optional[int]:
+        """Return 1-based position of this queued request, or None if not queued."""
+        self.init_fix_queue()
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT created_at FROM fix_queue WHERE id = ? AND status = 'queued'",
+            (queue_id,),
+        ).fetchone()
+        if not row:
+            return None
+        pos = conn.execute(
+            "SELECT COUNT(*) FROM fix_queue WHERE status = 'queued' AND created_at <= ?",
+            (row[0],),
+        ).fetchone()
+        return pos[0] if pos else None
+
+    def start_next_queued_fix(self) -> Optional[dict]:
+        """Pop the oldest queued fix and mark it 'running'. Returns its data or None."""
+        self.init_fix_queue()
+        conn = self._get_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT id, pr_number, pr_key, description, commenter FROM fix_queue "
+                "WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1",
+            ).fetchone()
+            if not row:
+                conn.commit()
+                return None
+            conn.execute(
+                "UPDATE fix_queue SET status = 'running', started_at = ? WHERE id = ?",
+                (time.time(), row[0]),
+            )
+            conn.commit()
+            return {
+                "id": row[0],
+                "pr_number": row[1],
+                "pr_key": row[2],
+                "description": row[3],
+                "commenter": row[4],
+            }
+        except Exception:
+            conn.rollback()
+            raise
+
+    def complete_fix_queue_item(self, queue_id: int, success: bool = True):
+        """Mark a running queue item as completed or failed."""
+        self.init_fix_queue()
+        conn = self._get_conn()
+        status = "completed" if success else "failed"
+        conn.execute(
+            "UPDATE fix_queue SET status = ?, completed_at = ? WHERE id = ?",
+            (status, time.time(), queue_id),
+        )
+        conn.commit()
+
+    def cleanup_stale_queue_items(self, max_age_seconds: int = 3600):
+        """Mark stale 'running' items as failed (crashed without cleanup)."""
+        self.init_fix_queue()
+        conn = self._get_conn()
+        cutoff = time.time() - max_age_seconds
+        conn.execute(
+            "UPDATE fix_queue SET status = 'failed', completed_at = ? "
+            "WHERE status = 'running' AND started_at < ?",
+            (time.time(), cutoff),
+        )
+        conn.commit()
+
+    # ── Global fix activity ───────────────────────────────────────────────────
+
+    def has_running_fix(self) -> bool:
+        """Check if ANY fix job is currently running (global serialization gate)."""
+        conn = self._get_conn()
+        cutoff = time.time() - 7200  # 2-hour TTL matches reserve_job
+        row = conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE id LIKE 'riptide-fix-%' AND status = 'pending' AND created_at > ?",
+            (cutoff,),
+        ).fetchone()
+        if row[0] > 0:
+            return True
+        # Also check the queue for 'running' items
+        self.init_fix_queue()
+        row = conn.execute(
+            "SELECT COUNT(*) FROM fix_queue WHERE status = 'running'",
+        ).fetchone()
+        return row[0] > 0
+
+    def get_running_fix_pr(self) -> Optional[int]:
+        """Return the PR number of the currently-running fix, or None."""
+        conn = self._get_conn()
+        cutoff = time.time() - 7200
+        row = conn.execute(
+            "SELECT pr_number FROM jobs WHERE id LIKE 'riptide-fix-%' AND status = 'pending' AND created_at > ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (cutoff,),
+        ).fetchone()
+        if row:
+            return row[0]
+        self.init_fix_queue()
+        row = conn.execute(
+            "SELECT pr_number FROM fix_queue WHERE status = 'running' ORDER BY started_at DESC LIMIT 1",
+        ).fetchone()
+        return row[0] if row else None
+
     # ── Processed comments (Poller dedup + retry) ──────────────────────────────
 
     def is_comment_processed(self, comment_id: int) -> bool:

@@ -470,6 +470,15 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
                     )
             except Exception as e:
                 log.error(f"[{delivery_id}] Fix command failed: {e}")
+                # Always try to post an error response
+                if installation_id:
+                    try:
+                        github_client().post_pr_comment(
+                            installation_id, owner, repo_name, pr_number,
+                            f"⚠️ Fix command failed: {e}. Please try again."
+                        )
+                    except Exception:
+                        pass
 
         # Route 2c: Relabel command (@riptide-bot relabel)
         if "@riptide-bot relabel" in body.lower():

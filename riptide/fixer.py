@@ -28,6 +28,7 @@ import subprocess
 import time
 import uuid
 from datetime import datetime, timedelta
+from typing import Optional
 
 logging.basicConfig(
     level=logging.INFO,
@@ -67,10 +68,10 @@ def handle_fix_command(
 
     Called from webhook.py when a user comments @riptide-bot fix on a PR.
     Fetches PR details via the GitHub API client, checks push eligibility,
-    spawns the fix session, and returns a user-facing confirmation
-    message (or error message).
+    spawns the fix session (or queues if busy), and returns a user-facing
+    confirmation message (or error message).
 
-    description: optional free-text after `fix` (already stripped).
+    Description: optional free-text after `fix` (already stripped).
     """
     try:
         pr_details = client.get_pr_details(installation_id, owner, repo, pr_number)
@@ -116,6 +117,41 @@ def handle_fix_command(
     # Fork PRs authored by us are push-eligible (we own the head branch).
     push_eligible = _is_push_eligible(owner, repo, author) and _is_fork_push_eligible(is_fork, author)
 
+    pr_key = f"{owner}/{repo}#{pr_number}"
+
+    # Check if there's already a fix running for this PR
+    from riptide.state import StateStore
+    state = StateStore()
+    state.cleanup_stale_pending()
+    state.cleanup_stale_queue_items()
+
+    # If a fix is already running OR queued for this PR, queue this request
+    if state.has_running_fix() or state.get_queue_length(pr_number) > 0:
+        queue_id = state.enqueue_fix(pr_number, pr_key, commenter, description.strip())
+        position = state.get_queue_position(queue_id)
+        running_pr = state.get_running_fix_pr()
+        
+        if running_pr and running_pr != pr_number:
+            # Another PR's fix is running — queue globally
+            return (
+                f"⏳ **Fix queued for #{pr_number}.**\n\n"
+                f"Another fix is currently running for PR #{running_pr}. "
+                f"Your request has been added to the queue (position: {position}).\n\n"
+                f"**Scope:** {description.strip() or 'all outstanding review findings'}\n"
+                f"**Estimated start:** after the current fix completes (~5-15 min)."
+            )
+        else:
+            # Same PR fix running or queued
+            return (
+                f"⏳ **Fix queued for #{pr_number}.**\n\n"
+                f"A fix is already in progress for this PR. "
+                f"Your request has been added to the queue (position: {position}). "
+                f"It will run automatically when the current fix completes.\n\n"
+                f"**Scope:** {description.strip() or 'all outstanding review findings'}\n"
+                f"**Estimated start:** ~5 min after current fix finishes."
+            )
+
+    # No existing fix — try to spawn immediately
     try:
         spawned = _spawn_fix(
             owner=owner,
@@ -134,7 +170,16 @@ def handle_fix_command(
         return f"⚠️ Failed to spawn fix session for #{pr_number}: {e}"
 
     if not spawned:
-        return f"⚠️ Could not schedule a fix session for #{pr_number} (one may already be pending)."
+        # Reserve failed — something else grabbed the slot. Queue this request.
+        queue_id = state.enqueue_fix(pr_number, pr_key, commenter, description.strip())
+        position = state.get_queue_position(queue_id)
+        return (
+            f"⏳ **Fix queued for #{pr_number}.**\n\n"
+            f"A fix just started for this PR (dedup race). "
+            f"Your request has been added to the queue (position: {position}). "
+            f"It will run automatically when the current fix completes.\n\n"
+            f"**Scope:** {description.strip() or 'all outstanding review findings'}"
+        )
 
     log.info(
         "On-demand fix spawned for %s/%s#%d by %s (push_eligible=%s)",
@@ -274,6 +319,51 @@ def _spawn_fix(
     state.mark_failed(job_id)
     log.error(f"All {max_retries} attempts failed for {owner}/{repo}#{pr_number}")
     return False
+
+
+def process_fix_queue(client) -> Optional[str]:
+    """Process the next queued fix if any.
+    
+    Called by the webhook after a fix completes, or can be polled.
+    Returns a status message if a fix was started, None if queue is empty.
+    """
+    from riptide.state import StateStore
+    state = StateStore()
+    state.cleanup_stale_pending()
+    state.cleanup_stale_queue_items()
+    
+    next_item = state.start_next_queued_fix()
+    if not next_item:
+        return None
+    
+    pr_number = next_item["pr_number"]
+    description = next_item["description"]
+    
+    # Fetch PR details
+    try:
+        pr_details = client.get_pr_details(None, "ChonSong", "riptide", pr_number)
+    except Exception as e:
+        log.error(f"Failed to fetch PR #{pr_number} from queue: {e}")
+        state.complete_fix_queue_item(next_item["id"], success=False)
+        return None
+    
+    # Re-spawn via handle_fix_command (recursive but now there's no running fix)
+    result = handle_fix_command(
+        client=client,
+        installation_id=None,
+        owner=pr_details.get("owner", "ChonSong"),
+        repo=pr_details.get("repo", "riptide"),
+        pr_number=pr_number,
+        commenter=next_item["commenter"],
+        description=description or "",
+    )
+    
+    if result and "Riptide Fix triggered" in result:
+        state.complete_fix_queue_item(next_item["id"], success=True)
+        return f"🚀 Queued fix started for PR #{pr_number}"
+    else:
+        state.complete_fix_queue_item(next_item["id"], success=False)
+        return f"⚠️ Queued fix for PR #{pr_number} failed to start: {result}"
 
 
 def _build_fix_prompt(
