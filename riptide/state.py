@@ -306,11 +306,15 @@ class StateStore:
         ]
 
     def complete_work(self, work_id: str, error: str = None, traceback_str: str = None) -> bool:
-        """Mark work as completed/failed. Returns True if row was transitioned."""
+        """Mark work as completed/failed. Returns True if row was transitioned.
+
+        Uses WHERE id=? AND status IN ('pending', 'recovering') so that items
+        being recovered can also be completed.
+        """
         conn = self._get_conn()
         status = "failed" if error else "completed"
         conn.execute(
-            "UPDATE work_queue SET status=?, completed_at=?, error=?, traceback=? WHERE id=? AND status='pending'",
+            "UPDATE work_queue SET status=?, completed_at=?, error=?, traceback=? WHERE id=? AND status IN ('pending', 'recovering')",
             (status, time.time(), error, traceback_str, work_id),
         )
         conn.commit()
@@ -362,7 +366,7 @@ class StateStore:
                 (work_id,),
             )
             conn.commit()
-            if conn.total_changes > 0:
+            if conn.execute("SELECT changes()").fetchone()[0] > 0:
                 claimed.append({
                     "id": row[0],
                     "kind": row[1],
