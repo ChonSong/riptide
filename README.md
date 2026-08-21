@@ -81,8 +81,8 @@ The session always posts a summary comment with per-finding verdicts, test resul
 | `RIPTIDE_DEPLOY_BRANCH` | `main` | Branch that triggers auto-deploy |
 | `RIPTIDE_DEEPTHINK_MODEL` | `LongCat-2.0` | Model for deep-think sessions |
 | `RIPTIDE_DEEPTHINK_PROVIDER` | `longcat` | Provider for deep-think |
-| `RIPTIDE_FIX_MODEL` | `custom:LongCat-2.0` | Model for fix sessions |
-| `RIPTIDE_FIX_PROVIDER` | `custom` | Provider for fix |
+| `RIPTIDE_FIX_MODEL` | `LongCat-2.0` | Model for fix sessions |
+| `RIPTIDE_FIX_PROVIDER` | `longcat` | Provider for fix |
 | `RIPTIDE_WORKSPACE_ROOT` | `/home/sc/workspace` | Root path inserted into spawned session PYTHONPATH |
 | `RIPTIDE_OUR_USERNAME` | `ChonSong` | GitHub username for push eligibility / auth gate |
 | `RIPTIDE_OUR_ORG` | `ChonSong` | GitHub org for ownership checks |
@@ -128,5 +128,6 @@ riptide/
 - [AGENTS.md](AGENTS.md) — Rules for AI agents editing this codebase
 - [CHANGELOG.md](CHANGELOG.md) — Recent changes
 - [SECURITY.md](SECURITY.md) — Security policy and vulnerability reporting
+
 
 
