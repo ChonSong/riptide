@@ -81,7 +81,7 @@ class TestOllamaHealIntegration:
 
         with patch("riptide.ollama_heal.heal", return_value=0) as mock_heal:
             with patch.object(companion, "_ollama_call", return_value="ELI5 text") as mock_call:
-                mock_heal.side_effect = lambda: (call_order.append("heal"), 0)[1]
+                mock_heal.side_effect = lambda **_: (call_order.append("heal"), 0)[1]
                 mock_call.side_effect = lambda p: (call_order.append("ollama_call"), "ELI5 text")[1]
 
                 companion._generate_eli5("feat: add feature", files)
@@ -148,3 +148,14 @@ class TestSystemdDetection:
         ):
             result = ollama_heal.restart_ollama()
             assert result is False
+
+    def test_is_systemd_service_loaded_timeout_returns_false(self):
+        """is_systemd_service_loaded() returns False when systemctl probe times out."""
+        with patch.object(ollama_heal, "is_systemd_available", return_value=True):
+            with patch.object(
+                ollama_heal.subprocess,
+                "run",
+                side_effect=ollama_heal.subprocess.TimeoutExpired(cmd="systemctl", timeout=5),
+            ):
+                result = ollama_heal.is_systemd_service_loaded()
+                assert result is False

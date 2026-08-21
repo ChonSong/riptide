@@ -24,15 +24,15 @@ import time
 
 import requests
 
-OLLAMA_BASE = os.environ.get("OLLAMA_BASE", "http://localhost:11434")
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 SYSTEMD_SERVICE = "ollama.service"
 DEFAULT_TIMEOUT = 10  # seconds to wait for recovery (webhook-friendly)
 
 
-def is_healthy() -> bool:
+def is_healthy(base_url: str = OLLAMA_BASE_URL) -> bool:
     """Check if Ollama API is responding."""
     try:
-        resp = requests.get(f"{OLLAMA_BASE}/api/tags", timeout=3)
+        resp = requests.get(f"{base_url}/api/tags", timeout=3)
         return resp.status_code == 200
     except Exception:
         return False
@@ -49,11 +49,16 @@ def is_systemd_service_loaded() -> bool:
     """Check if the systemd user service exists and is loaded."""
     if not is_systemd_available():
         return False
-    result = subprocess.run(
-        ["systemctl", "--user", "is-enabled", SYSTEMD_SERVICE],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "is-enabled", SYSTEMD_SERVICE],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"❌ systemd probe timed out after 5s", file=sys.stderr)
+        return False
     return result.returncode in (0, 3)  # 0=enabled, 3=static (both mean "loaded")
 
 
@@ -77,13 +82,13 @@ def restart_ollama() -> bool:
     return True
 
 
-def wait_for_recovery(timeout: int = DEFAULT_TIMEOUT) -> bool:
+def wait_for_recovery(timeout: int = DEFAULT_TIMEOUT, base_url: str = OLLAMA_BASE_URL) -> bool:
     """Poll Ollama until it responds or timeout expires."""
     deadline = time.time() + timeout
     attempt = 0
     while time.time() < deadline:
         attempt += 1
-        if is_healthy():
+        if is_healthy(base_url):
             print(f"✅ Ollama recovered after {attempt}s")
             return True
         remaining = int(deadline - time.time())
@@ -92,14 +97,14 @@ def wait_for_recovery(timeout: int = DEFAULT_TIMEOUT) -> bool:
     return False
 
 
-def heal(wait_timeout: int = DEFAULT_TIMEOUT, base_url: str = OLLAMA_BASE) -> int:
+def heal(wait_timeout: int = DEFAULT_TIMEOUT, base_url: str = OLLAMA_BASE_URL) -> int:
     """Self-heal Ollama. Returns exit code."""
     # 1. Already healthy?
-    if is_healthy():
+    if is_healthy(base_url):
         print("✅ Ollama is healthy")
         return 0
 
-    print(f"⚠️  Ollama is unreachable at {OLLAMA_BASE}")
+    print(f"⚠️  Ollama is unreachable at {base_url}")
 
     # 2. Is systemd available?
     if is_systemd_available():
@@ -120,7 +125,7 @@ def heal(wait_timeout: int = DEFAULT_TIMEOUT, base_url: str = OLLAMA_BASE) -> in
         return 1
 
     # 3. Wait for recovery
-    if wait_for_recovery(wait_timeout):
+    if wait_for_recovery(wait_timeout, base_url):
         return 0
 
     print(f"❌ Ollama did not recover within {wait_timeout}s", file=sys.stderr)

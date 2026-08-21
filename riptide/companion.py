@@ -931,7 +931,7 @@ TLDR:"""
         # If heal fails (exit 1 or 2), skip enrichment immediately (degradation).
         from riptide.ollama_heal import heal
 
-        if heal() != 0:
+        if heal(base_url=self.ollama_base) != 0:
             logger.warning("Ollama self-heal failed — skipping ELI5 enrichment")
             return None
 
