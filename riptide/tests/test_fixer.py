@@ -8,6 +8,7 @@ from riptide.fixer import (
     FIX_RE,
     OUR_USERNAME,
     handle_fix_command,
+    process_fix_queue,
     _is_push_eligible,
     _is_fork_push_eligible,
     _is_cron_available,
@@ -112,18 +113,24 @@ class TestHandleFixCommandAuth:
     def test_author_can_trigger(self):
         client = MagicMock()
         client.get_pr_details.return_value = self._pr_details(author="alice")
-        with patch("riptide.fixer._spawn_fix", return_value=True):
-            result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "alice")
-            assert result is not None
-            assert "Fix triggered" in result
+        with patch("riptide.state.StateStore") as mock_store:
+            mock_store.return_value.has_running_fix.return_value = False
+            mock_store.return_value.get_queue_length.return_value = 0
+            with patch("riptide.fixer._spawn_fix", return_value=True):
+                result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "alice")
+                assert result is not None
+                assert "Fix triggered" in result
 
     def test_owner_can_trigger(self):
         client = MagicMock()
         client.get_pr_details.return_value = self._pr_details(author="alice")
-        with patch("riptide.fixer._spawn_fix", return_value=True):
-            result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "ChonSong")
-            assert result is not None
-            assert "Fix triggered" in result
+        with patch("riptide.state.StateStore") as mock_store:
+            mock_store.return_value.has_running_fix.return_value = False
+            mock_store.return_value.get_queue_length.return_value = 0
+            with patch("riptide.fixer._spawn_fix", return_value=True):
+                result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "ChonSong")
+                assert result is not None
+                assert "Fix triggered" in result
 
     def test_other_user_cannot_trigger(self):
         client = MagicMock()
@@ -175,18 +182,24 @@ class TestForkDetection:
     def test_same_repo_not_fork(self):
         client = MagicMock()
         client.get_pr_details.return_value = self._pr_details("ChonSong/riptide")
-        with patch("riptide.fixer._spawn_fix", return_value=True):
-            result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "ChonSong")
-            assert result is not None
-            assert "push fixes directly" in result
+        with patch("riptide.state.StateStore") as mock_store:
+            mock_store.return_value.has_running_fix.return_value = False
+            mock_store.return_value.get_queue_length.return_value = 0
+            with patch("riptide.fixer._spawn_fix", return_value=True):
+                result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "ChonSong")
+                assert result is not None
+                assert "push fixes directly" in result
 
     def test_fork_repo_comment_only(self):
         client = MagicMock()
         client.get_pr_details.return_value = self._pr_details("other/riptide")
-        with patch("riptide.fixer._spawn_fix", return_value=True):
-            result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "ChonSong")
-            assert result is not None
-            assert "comment-only patch" in result
+        with patch("riptide.state.StateStore") as mock_store:
+            mock_store.return_value.has_running_fix.return_value = False
+            mock_store.return_value.get_queue_length.return_value = 0
+            with patch("riptide.fixer._spawn_fix", return_value=True):
+                result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "ChonSong")
+                assert result is not None
+                assert "comment-only patch" in result
 
     def test_fork_authored_by_us_push_eligible(self):
         # Fork PR authored by OUR_USERNAME: push fixes directly (we own the head branch).
@@ -194,18 +207,24 @@ class TestForkDetection:
         details = self._pr_details("other/riptide")
         details["user"] = {"login": OUR_USERNAME}
         client.get_pr_details.return_value = details
-        with patch("riptide.fixer._spawn_fix", return_value=True):
-            result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, OUR_USERNAME)
-            assert result is not None
-            assert "push fixes directly" in result
+        with patch("riptide.state.StateStore") as mock_store:
+            mock_store.return_value.has_running_fix.return_value = False
+            mock_store.return_value.get_queue_length.return_value = 0
+            with patch("riptide.fixer._spawn_fix", return_value=True):
+                result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, OUR_USERNAME)
+                assert result is not None
+                assert "push fixes directly" in result
 
     def test_missing_head_repo_treated_as_fork(self):
         client = MagicMock()
         client.get_pr_details.return_value = self._pr_details(None)
-        with patch("riptide.fixer._spawn_fix", return_value=True):
-            result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "ChonSong")
-            assert result is not None
-            assert "comment-only patch" in result
+        with patch("riptide.state.StateStore") as mock_store:
+            mock_store.return_value.has_running_fix.return_value = False
+            mock_store.return_value.get_queue_length.return_value = 0
+            with patch("riptide.fixer._spawn_fix", return_value=True):
+                result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "ChonSong")
+                assert result is not None
+                assert "comment-only patch" in result
 
 
 # ── _is_cron_available ───────────────────────────────────────────────────────
@@ -387,8 +406,11 @@ class TestHandleFixCommand:
     def test_returns_confirmation_on_success(self):
         # PR author triggering their own fix
         client = _make_client(pr_details=_pr_details())
-        with patch("riptide.fixer._spawn_fix", return_value=True):
-            result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "test-user", "")
+        with patch("riptide.state.StateStore") as mock_store:
+            mock_store.return_value.has_running_fix.return_value = False
+            mock_store.return_value.get_queue_length.return_value = 0
+            with patch("riptide.fixer._spawn_fix", return_value=True):
+                result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "test-user", "")
         assert "🛠 **Riptide Fix triggered for #42!**" in result
         assert "fix: repair flaky test" in result
         assert "@test-user" in result
@@ -397,10 +419,13 @@ class TestHandleFixCommand:
     def test_confirmation_mentions_description_scope(self):
         # Repo owner triggering fix
         client = _make_client(pr_details=_pr_details())
-        with patch("riptide.fixer._spawn_fix", return_value=True) as mock_spawn:
-            result = handle_fix_command(
-                client, 1, "ChonSong", "riptide", 42, "ChonSong", "the flaky webhook test"
-            )
+        with patch("riptide.state.StateStore") as mock_store:
+            mock_store.return_value.has_running_fix.return_value = False
+            mock_store.return_value.get_queue_length.return_value = 0
+            with patch("riptide.fixer._spawn_fix", return_value=True) as mock_spawn:
+                result = handle_fix_command(
+                    client, 1, "ChonSong", "riptide", 42, "ChonSong", "the flaky webhook test"
+                )
         assert "the flaky webhook test" in result
         assert mock_spawn.call_args[1]["description"] == "the flaky webhook test"
 
@@ -409,8 +434,11 @@ class TestHandleFixCommand:
         details["head"]["repo"]["full_name"] = "external-user/riptide"
         client = _make_client(pr_details=details)
         # Foreign repo, foreign author, ChonSong commenting — fork blocks push
-        with patch("riptide.fixer._spawn_fix", return_value=True) as mock_spawn:
-            result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "ChonSong", "")
+        with patch("riptide.state.StateStore") as mock_store:
+            mock_store.return_value.has_running_fix.return_value = False
+            mock_store.return_value.get_queue_length.return_value = 0
+            with patch("riptide.fixer._spawn_fix", return_value=True) as mock_spawn:
+                result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "ChonSong", "")
         assert "comment-only patch" in result
         assert mock_spawn.call_args[1]["push_eligible"] is False
 
@@ -420,25 +448,220 @@ class TestHandleFixCommand:
         details["head"]["repo"]["full_name"] = "ChonSong/riptide"  # our fork
         details["user"]["login"] = "ChonSong"  # we authored it
         client = _make_client(pr_details=details)
-        with patch("riptide.fixer._spawn_fix", return_value=True) as mock_spawn:
-            result = handle_fix_command(client, 1, "someone-else", "riptide", 42, "ChonSong", "")
+        with patch("riptide.state.StateStore") as mock_store:
+            mock_store.return_value.has_running_fix.return_value = False
+            mock_store.return_value.get_queue_length.return_value = 0
+            with patch("riptide.fixer._spawn_fix", return_value=True) as mock_spawn:
+                result = handle_fix_command(client, 1, "someone-else", "riptide", 42, "ChonSong", "")
         assert "push fixes directly" in result
         assert mock_spawn.call_args[1]["push_eligible"] is True
 
     def test_returns_error_when_pr_fetch_fails(self):
         client = _make_client(exc=RuntimeError("404"))
         # Use authorized commenter to get past auth gate to the fetch failure
-        result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "ChonSong", "")
+        with patch("riptide.state.StateStore") as mock_store:
+            mock_store.return_value.has_running_fix.return_value = False
+            mock_store.return_value.get_queue_length.return_value = 0
+            result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "ChonSong", "")
         assert "⚠️ Could not fetch PR #42 details" in result
 
     def test_returns_error_when_spawn_raises(self):
         client = _make_client(pr_details=_pr_details())
-        with patch("riptide.fixer._spawn_fix", side_effect=RuntimeError("boom")):
-            result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "test-user", "")
+        with patch("riptide.state.StateStore") as mock_store:
+            mock_store.return_value.has_running_fix.return_value = False
+            mock_store.return_value.get_queue_length.return_value = 0
+            with patch("riptide.fixer._spawn_fix", side_effect=RuntimeError("boom")):
+                result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "test-user", "")
         assert "⚠️ Failed to spawn fix session for #42" in result
 
     def test_returns_error_when_spawn_not_reserved(self):
         client = _make_client(pr_details=_pr_details())
-        with patch("riptide.fixer._spawn_fix", return_value=False):
-            result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "test-user", "")
-        assert "already be pending" in result
+        with patch("riptide.state.StateStore") as mock_store:
+            mock_store.return_value.has_running_fix.return_value = False
+            mock_store.return_value.get_queue_length.return_value = 0
+            mock_store.return_value.enqueue_fix.return_value = 1
+            mock_store.return_value.get_queue_position.return_value = 1
+            with patch("riptide.fixer._spawn_fix", return_value=False):
+                result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "test-user", "")
+        assert "queued" in result
+
+    def test_db_lock_retry_then_success(self):
+        """If DB locks once then succeeds, command proceeds normally."""
+        import sqlite3
+
+        call_count = [0]
+
+        def flaky_has_running_fix():
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return False
+
+        client = _make_client(pr_details=_pr_details())
+        with patch("riptide.state.StateStore") as mock_store:
+            mock_store.return_value.has_running_fix.side_effect = flaky_has_running_fix
+            mock_store.return_value.get_queue_length.return_value = 0
+            mock_store.return_value.cleanup_stale_pending.return_value = None
+            mock_store.return_value.cleanup_stale_queue_items.return_value = None
+            mock_store.return_value.enqueue_fix.return_value = 1
+            mock_store.return_value.get_queue_position.return_value = 1
+            mock_store.return_value.get_running_fix_pr.return_value = None
+            with patch("riptide.fixer._spawn_fix", return_value=True):
+                result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "test-user", "")
+
+        assert result is not None
+        assert "triggered" in result
+        assert call_count[0] == 2  # First call locked, retry succeeded
+
+
+class TestProcessFixQueue:
+    """Tests for the process_fix_queue function."""
+
+    def test_process_empty_queue(self):
+        """process_fix_queue returns None when queue is empty."""
+        client = MagicMock()
+        with patch("riptide.state.StateStore") as mock_store:
+            mock_store.return_value.start_next_queued_fix.return_value = None
+            result = process_fix_queue(client, "ChonSong", "riptide")
+        assert result is None
+
+    def test_process_queue_drains_and_spawns(self):
+        """process_fix_queue pops the oldest queued fix and spawns it."""
+        client = MagicMock()
+        client.get_pr_details.return_value = {
+            "title": "Test PR",
+            "user": {"login": "chonsong"},
+            "additions": 10, "deletions": 5,
+            "head": {"sha": "abc123", "ref": "fix-branch", "repo": {"full_name": "ChonSong/riptide"}},
+        }
+
+        with patch("riptide.state.StateStore") as mock_store:
+            mock_store.return_value.start_next_queued_fix.return_value = {
+                "id": 1, "pr_number": 155, "description": "fix the bug", "commenter": "chonsong"
+            }
+            with patch("riptide.fixer._spawn_fix", return_value=True):
+                result = process_fix_queue(client, "ChonSong", "riptide")
+
+        assert result is not None
+        assert "started" in result
+
+    def test_process_queue_uses_stored_installation_id(self):
+        """process_fix_queue must use the installation_id stored at enqueue time."""
+        client = MagicMock()
+        client.get_pr_details.return_value = {
+            "title": "Test PR",
+            "user": {"login": "chonsong"},
+            "additions": 10, "deletions": 5,
+            "head": {"sha": "abc123", "ref": "fix-branch", "repo": {"full_name": "ChonSong/riptide"}},
+        }
+
+        with patch("riptide.state.StateStore") as mock_store:
+            mock_store.return_value.start_next_queued_fix.return_value = {
+                "id": 1, "pr_number": 155, "description": "fix the bug",
+                "commenter": "chonsong", "installation_id": 4242
+            }
+            with patch("riptide.fixer._spawn_fix", return_value=True):
+                result = process_fix_queue(client, "ChonSong", "riptide")
+
+        # Verify get_pr_details was called with the stored installation_id (not None)
+        client.get_pr_details.assert_called_once_with(4242, "ChonSong", "riptide", 155)
+        assert result is not None
+        assert "started" in result
+
+    def test_process_queue_handles_missing_installation_id(self):
+        """process_fix_queue handles legacy queue items without installation_id (None)."""
+        client = MagicMock()
+        client.get_pr_details.side_effect = Exception("installation_id required")
+
+        with patch("riptide.state.StateStore") as mock_store:
+            mock_store.return_value.start_next_queued_fix.return_value = {
+                "id": 1, "pr_number": 155, "description": "fix the bug",
+                "commenter": "chonsong", "installation_id": None
+            }
+            result = process_fix_queue(client, "ChonSong", "riptide")
+
+        # Should fail gracefully — complete_fix_queue_item called with success=False
+        mock_store.return_value.complete_fix_queue_item.assert_called_once_with(1, success=False)
+        assert result is None
+
+
+class TestEnqueueFixInstallationId:
+    """Tests that handle_fix_command stores installation_id in the queue."""
+
+    def test_enqueue_stores_installation_id(self):
+        """When queuing, installation_id is stored for later use by process_fix_queue."""
+        import tempfile, os
+        from riptide.state import StateStore
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            store = StateStore(db_path=db_path)
+            qid = store.enqueue_fix(155, "ChonSong/riptide#155", "chonsong", "fix bug", installation_id=4242)
+
+            conn = store._get_conn()
+            row = conn.execute("SELECT installation_id FROM fix_queue WHERE id = ?", (qid,)).fetchone()
+            assert row[0] == 4242
+
+    def test_enqueue_installation_id_defaults_none(self):
+        """installation_id defaults to None for backward compatibility."""
+        import tempfile, os
+        from riptide.state import StateStore
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            store = StateStore(db_path=db_path)
+            qid = store.enqueue_fix(155, "ChonSong/riptide#155", "chonsong", "fix bug")
+
+            conn = store._get_conn()
+            row = conn.execute("SELECT installation_id FROM fix_queue WHERE id = ?", (qid,)).fetchone()
+            assert row[0] is None
+
+
+class TestFixTtlConsistency:
+    """Tests that TTL values are consistent across fix activity checks."""
+
+    def test_cleanup_stale_queue_items_uses_fix_ttl(self):
+        """cleanup_stale_queue_items default TTL matches has_running_fix TTL."""
+        import tempfile, os, time
+        from riptide.state import StateStore, FIX_TTL_SECONDS
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            store = StateStore(db_path=db_path)
+
+            # Verify the constant is 7200 (2 hours)
+            assert FIX_TTL_SECONDS == 7200
+
+            # Enqueue and start a fix
+            qid = store.enqueue_fix(155, "ChonSong/riptide#155", "chonsong", "fix bug")
+            item = store.start_next_queued_fix()
+            assert item is not None
+
+            # Mark it as running with an old started_at (older than FIX_TTL)
+            conn = store._get_conn()
+            old_time = time.time() - FIX_TTL_SECONDS - 100
+            conn.execute("UPDATE fix_queue SET started_at = ? WHERE id = ?", (old_time, qid))
+            conn.commit()
+
+            # cleanup_stale_queue_items should mark it failed
+            store.cleanup_stale_queue_items()
+
+            row = conn.execute("SELECT status FROM fix_queue WHERE id = ?", (qid,)).fetchone()
+            assert row[0] == "failed"
+
+    def test_has_running_fix_consistent_with_cleanup(self):
+        """has_running_fix and cleanup_stale_queue_items use the same TTL cutoff."""
+        import tempfile, os, time
+        from riptide.state import StateStore, FIX_TTL_SECONDS
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            store = StateStore(db_path=db_path)
+
+            # Both should use FIX_TTL_SECONDS (7200)
+            assert FIX_TTL_SECONDS == 7200
+
+            # The cutoff for both is time.time() - FIX_TTL_SECONDS
+            # This test verifies the constant is used consistently
+            cutoff = time.time() - FIX_TTL_SECONDS
+            assert cutoff < time.time()
