@@ -65,7 +65,7 @@ class TestSpawnRetry:
             assert delays == [10, 20]
 
     def test_spawn_gives_up_after_all_retries(self):
-        """All 3 attempts fail — returns False, no exception."""
+        """All 3 attempts fail — raises RuntimeError."""
         failures = [MagicMock(returncode=1, stderr="x") for _ in range(3)]
         with patch("subprocess.run", side_effect=failures) as mock_run, \
              patch("time.sleep") as mock_sleep, \
@@ -73,8 +73,8 @@ class TestSpawnRetry:
              patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
              patch("riptide.state.StateStore") as mock_state:
             mock_state.return_value.reserve_job.return_value = True
-            result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
-            assert result is False
+            with pytest.raises(RuntimeError, match="All 3 Hermes cron attempts failed"):
+                _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
             assert mock_run.call_count == 3
             assert mock_sleep.call_count == 2  # 5s then 10s (no sleep after final)
 

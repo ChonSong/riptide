@@ -3,6 +3,7 @@ import json
 import os
 import sqlite3
 import tempfile
+from datetime import datetime, timezone, timedelta
 from unittest.mock import patch, MagicMock
 from pathlib import Path
 
@@ -338,10 +339,11 @@ class TestPollerReviewDiscovery:
 
     def test_discover_prs_success(self, poller_mod):
         """Valid PRs are discovered with correct structure."""
+        recent = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
         pr_data = json.dumps([{
             "number": 76, "title": "feat: test", "author": {"login": "ChonSong"},
             "headRefName": "feat/system-monitor", "headRefOid": "abc123def456",
-            "createdAt": "2026-08-07T07:00:00Z", "updatedAt": "2026-08-07T08:00:00Z",
+            "createdAt": recent, "updatedAt": recent,
         }])
         with patch.object(poller_mod, "POLLER_REPOS", ["owner/repo"]):
             with patch("subprocess.run") as mock_run:
