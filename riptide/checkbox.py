@@ -37,12 +37,12 @@ ACTION_LABELS: dict[str, str] = {v: k for k, v in CHECKBOX_ACTIONS.items()}
 # Matches checkbox lines: "- [ ] label" or "- [x] label" or "- [X] label"
 # Group 1: checkbox state (' ', 'x', or 'X')
 # Group 2: label text (everything after "] ")
-CHECKBOX_RE = re.compile(r'^- \[([ xX])\] (.+)$', re.MULTILINE)
+CHECKBOX_RE = re.compile(r"^- \[([ xX])\] (.+)$", re.MULTILINE)
 
 # Footer separator + checkbox block
 # Matches the entire checkbox block at the end of a comment
 CHECKBOX_BLOCK_RE = re.compile(
-    r'(?P<sep>^---$\s*)?(?P<block>(?:^- \[([ xX])\] .+$\s?)+)',
+    r"(?P<sep>^---$\s*)?(?P<block>(?:^- \[([ xX])\] .+$\s?)+)",
     re.MULTILINE,
 )
 
@@ -60,7 +60,7 @@ def parse_checkbox_state(body: str) -> dict[str, bool]:
     for match in CHECKBOX_RE.finditer(body):
         checked_char = match.group(1)
         label = match.group(2).strip()
-        state[label] = checked_char in ('x', 'X')
+        state[label] = checked_char in ("x", "X")
     return state
 
 
@@ -125,8 +125,8 @@ def reset_checkboxes(body: str, labels: list[str]) -> str:
     """
     for label in labels:
         # Use line-anchored regex to match only checkbox lines, not arbitrary text
-        pattern = rf'^- \[([xX])\] {re.escape(label)}$'
-        body = re.sub(pattern, f'- [ ] {label}', body, flags=re.MULTILINE)
+        pattern = rf"^- \[([xX])\] {re.escape(label)}$"
+        body = re.sub(pattern, f"- [ ] {label}", body, flags=re.MULTILINE)
     return body
 
 
@@ -137,7 +137,7 @@ def reset_all_checkboxes(body: str) -> str:
     Used when re-rendering a comment (e.g., Tier-2 enrichment) to ensure
     all buttons start in the default unchecked state.
     """
-    return CHECKBOX_RE.sub(lambda m: f'- [ ] {m.group(2)}', body)
+    return CHECKBOX_RE.sub(lambda m: f"- [ ] {m.group(2)}", body)
 
 
 # ── Footer generation ─────────────────────────────────────────────────────────
@@ -166,7 +166,7 @@ def build_checkbox_footer(
     for action in actions:
         label = ACTION_LABELS.get(action, action)
         state = "x" if action in checked_set else " "
-        lines.append(f'- [{state}] {label}')
+        lines.append(f"- [{state}] {label}")
 
     return "\n".join(lines)
 
@@ -198,12 +198,14 @@ def strip_checkbox_footer(body: str) -> str:
     Remove the checkbox footer block from a comment body.
 
     Returns the body with the separator and checkbox block removed.
+    Uses finditer() to handle multiple checkbox blocks (e.g., from stale
+    enrichment cycles) — strips from the first match to end of body.
     """
-    # Match: separator line + checkbox block at end of body
-    match = CHECKBOX_BLOCK_RE.search(body)
-    if match:
-        # Remove from the separator/block start to end
-        start = match.start('sep') if match.group('sep') else match.start('block')
+    # Strip ALL checkbox blocks, not just the first
+    matches = list(CHECKBOX_BLOCK_RE.finditer(body))
+    if matches:
+        # Remove from the start of the first match to end of body
+        start = matches[0].start("sep") if matches[0].group("sep") else matches[0].start("block")
         body = body[:start].rstrip()
     return body
 
