@@ -202,15 +202,15 @@ class GitHubAppClient:
         resp.raise_for_status()
         return resp.json()
 
-    def get_comment(self, installation_id: int, owner: str, repo: str, comment_id: int) -> dict:
-        """Fetch a single issue/PR comment by ID."""
+    def get_comment_body(self, installation_id: int, owner: str, repo: str, comment_id: int) -> str:
+        """Fetch the current body of a PR comment. Used to preserve checkbox state during enrichment."""
         resp = requests.get(
             f"{self.base_url}/repos/{owner}/{repo}/issues/comments/{comment_id}",
             headers=self._headers(installation_id),
             timeout=15,
         )
         resp.raise_for_status()
-        return resp.json()
+        return resp.json().get("body", "")
 
     def post_inline_comment(
         self,

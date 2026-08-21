@@ -29,6 +29,12 @@ import requests
 
 from riptide.diff_analyzer import DiffAnalyzer, DiffReport
 from riptide.context_bundle import build_context_bundle, concept_summary
+from riptide.checkbox import (
+    CHECKBOX_ACTIONS,
+    parse_checkbox_state,
+    strip_checkbox_footer,
+    build_checkbox_footer,
+)
 
 logger = logging.getLogger("riptide.companion")
 
@@ -352,6 +358,10 @@ def classify_pr_mood(title: str, changed_files: list[dict] | None = None) -> str
     return "✨"
 
 
+# Module-level flag for one-time legacy skip import per process
+_legacy_skip_imported = False
+
+
 class Companion:
     def __init__(self, github_client, state_store=None):
         self.client = github_client
@@ -366,11 +376,10 @@ class Companion:
         self._skip_lock = threading.Lock()
 
         # WS-3 Stage 0: heuristics live in StateStore (single authority).
-        # Inject for tests; default to the real store. Legacy JSON skips are
-        # imported once so user skip/resume survives the migration.
-        from riptide.state import StateStore
-
-        self._state = state_store if state_store is not None else StateStore()
+        # Use the shared singleton from webhook.py to avoid creating
+        # multiple SQLite connections that lock each other under concurrency.
+        from riptide.webhook import _get_state_store
+        self._state = state_store if state_store is not None else _get_state_store()
         self._import_legacy_skip_file()
 
         self._semaphore = threading.Semaphore(1)
@@ -463,11 +472,16 @@ class Companion:
 
     def _import_legacy_skip_file(self):
         """One-time import of legacy companion_skip.json into StateStore."""
+        # Module-level flag: only attempt import once per process.
+        if _legacy_skip_imported:
+            return
         try:
             if not self._skip_file.exists():
+                _legacy_skip_imported = True
                 return
             data = self._load_data()
             if not data:
+                _legacy_skip_imported = True
                 return
             for pr_key, entry in data.items():
                 norm = self._migrate_entry(entry)
@@ -476,6 +490,7 @@ class Companion:
                 if norm.get("last_sha"):
                     self._state.set_pr_last_sha(pr_key, norm["last_sha"])
             logger.info("Imported %d legacy skip entries into StateStore", len(data))
+            _legacy_skip_imported = True
         except Exception as e:
             logger.warning("Legacy skip import failed: %s", e)
 
@@ -779,12 +794,38 @@ class Companion:
                 return
 
             # Tier 2: LLM enrichment (ELI5), then PATCH the same comment in place
-            eli5 = self._generate_eli5(title, files, is_delta=is_delta, ollama_healthy=ollama_healthy)
+            eli5 = self._generate_eli5(title, files, is_delta=is_delta)
+
+            # Preserve checkbox state from the current comment body before enriching.
+            try:
+                current_comment = active_client.get_comment_body(
+                    installation_id, owner, repo, comment_id
+                )
+                checkbox_state = parse_checkbox_state(current_comment)
+            except Exception:
+                checkbox_state = {}
+
             enriched_body = self._format_comment(emoji, author, tldr, graph_context, eli5, ui_files,
                                                  owner=owner, repo=repo, pr_number=pr_number,
                                                  title=title, files=files, is_delta=is_delta,
                                             webhook_received_at=webhook_received_at,
                                                  deterministic_report=deterministic_report, enriched=True)
+
+            # If user checked any checkboxes during enrichment, preserve their state
+            if checkbox_state:
+                from riptide.checkbox import ACTION_LABELS
+                checked_actions = []
+                for label, checked in checkbox_state.items():
+                    action = CHECKBOX_ACTIONS.get(label)
+                    if action and checked:
+                        checked_actions.append(action)
+                if checked_actions:
+                    enriched_body = strip_checkbox_footer(enriched_body)
+                    footer = build_checkbox_footer(
+                        actions=self._get_checkbox_actions(ui_files=ui_files),
+                        checked=checked_actions,
+                    )
+                    enriched_body += f"\n\n{footer}"
             try:
                 active_client.update_pr_comment(installation_id, owner, repo, comment_id, enriched_body)
                 logger.info("Enriched Tier 2 for %s#%d comment_id=%s", full_name, pr_number, comment_id)
@@ -1137,6 +1178,10 @@ ELI5:"""
 
         body = header + footer
 
+        # Checkbox footer — interactive button system
+        checkbox_actions = self._get_checkbox_actions(ui_files=ui_files)
+        parts.append(f"\n\n{self._build_checkbox_footer(checkbox_actions)}")
+
         # Timing metric: webhook received → comment posted
         if webhook_received_at:
             import time as _time
@@ -1149,11 +1194,23 @@ ELI5:"""
                 elapsed_str = f"{elapsed / 60:.1f}m"
             body += f"\n\n---\n<sub>⏱️ Review posted in {elapsed_str}</sub>"
 
-        # Append checkbox footer for interactive commands
-        from .checkbox import build_checkbox_footer
-        body += "\n\n" + build_checkbox_footer(["review", "fix", "visual", "relabel"])
+        # Checkbox footer — interactive button system
+        checkbox_actions = self._get_checkbox_actions()
+        body += f"\n\n{self._build_checkbox_footer(checkbox_actions)}"
 
         return body
+
+    def _get_checkbox_actions(self, ui_files=None):
+        """Determine which checkbox actions to show based on PR context."""
+        actions = ["review", "fix", "relabel"]
+        if ui_files:
+            actions.insert(2, "visual")
+        return actions
+
+    def _build_checkbox_footer(self, actions):
+        """Build the checkbox footer block for interactive buttons."""
+        from riptide.checkbox import build_checkbox_footer
+        return build_checkbox_footer(actions=actions)
 
     @staticmethod
     def _get_bot2_status(owner: str, repo: str, pr_number: int) -> Optional[str]:
@@ -1235,6 +1292,10 @@ ELI5:"""
             parts.append(f" · `@riptide-bot companion skip` to opt out · `@riptide-bot review` for deep-think</sub>")
         else:
             parts.append("</sub>")
+
+        # Checkbox footer — interactive button system
+        checkbox_actions = self._get_checkbox_actions(ui_files=ui_files)
+        parts.append(f"\n\n{self._build_checkbox_footer(checkbox_actions)}")
 
         # Timing metric: webhook received → comment posted
         if webhook_received_at:
