@@ -381,8 +381,13 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
 
 
 async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
-    """Handle issue_comment events — companion skip/resume and on-demand review commands."""
+    """Handle issue_comment events — companion skip/resume, on-demand commands, and checkbox toggles."""
     action = payload.get("action", "")
+
+    # Route 4: Checkbox toggle (edited comments)
+    if action == "edited":
+        return await _handle_checkbox_toggle(payload, delivery_id)
+
     if action != "created":
         return Response(status_code=200)
 
@@ -516,6 +521,78 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
     return Response(status_code=200)
 
 
+
+async def _handle_checkbox_toggle(payload: dict, delivery_id: str) -> Response:
+    """
+    Handle checkbox toggle events from issue_comment edited webhooks.
+
+    Parses which checkboxes were toggled, checks authorization, applies dedup,
+    dispatches actions, and resets checkboxes.
+    """
+    comment = payload.get("comment", {})
+    issue = payload.get("issue", {})
+    repo = payload.get("repository", {})
+    installation = payload.get("installation", {})
+
+    # Must be a PR comment
+    if "pull_request" not in issue:
+        return Response(status_code=200)
+
+    # Only process our own bot's comments — identified by checkbox pattern
+    # in the comment body (not performed_via_github_app, which indicates
+    # which app *created* the comment, not whether it contains our checkboxes)
+    body = comment.get("body", "")
+    if "- [ ] 🔍 Trigger review" not in body and "- [x] 🔍 Trigger review" not in body:
+        # Not our comment (no checkbox pattern) — skip
+        return Response(status_code=200)
+
+    installation_id = installation.get("id")
+    if not installation_id:
+        return Response(status_code=200)
+
+    owner = repo.get("full_name", "").split("/")[0] if repo.get("full_name") else ""
+    repo_name = repo.get("name", "")
+    pr_number = issue.get("number")
+    commenter = comment.get("user", {}).get("login", "unknown")
+
+    # Skip bot users (our own edits shouldn't trigger actions)
+    if comment.get("user", {}).get("type") == "Bot":
+        return Response(status_code=200)
+
+    # Get PR author for authorization checks
+    try:
+        github = github_client()
+        pr_details = github.get_pr_details(installation_id, owner, repo_name, pr_number)
+        pr_author = pr_details.get("user", {}).get("login", "unknown")
+    except Exception as e:
+        log.warning(f"[{delivery_id}] Failed to fetch PR details for checkbox: {e}")
+        return Response(status_code=200)
+
+    # Handle the checkbox toggle
+    try:
+        from riptide.checkbox_handler import handle_checkbox_toggle
+
+        triggered = handle_checkbox_toggle(
+            payload=payload,
+            github_client=github,
+            state_store=_get_state_store(),
+            installation_id=installation_id,
+            owner=owner,
+            repo=repo_name,
+            pr_number=pr_number,
+            commenter=commenter,
+            pr_author=pr_author,
+        )
+        if triggered:
+            log.info(
+                f"[{delivery_id}] Checkbox triggered {triggered} on {owner}/{repo_name}#{pr_number}"
+            )
+    except Exception as e:
+        log.error(f"[{delivery_id}] Checkbox handler failed: {e}")
+
+    return Response(status_code=200)
+
+
 async def handle_installation(payload: dict, event: str, delivery_id: str) -> Response:
     """Handle installation events — sync repo list."""
     action = payload.get("action", "")
@@ -586,6 +663,12 @@ async def handle_installation(payload: dict, event: str, delivery_id: str) -> Re
 @app.on_event("startup")
 def init_db():
     import sqlite3
+
+    # Clean up stale checkbox trigger records on startup (non-fatal)
+    try:
+        _get_state_store().cleanup_stale_checkbox_triggers(max_age_seconds=3600)
+    except Exception as e:
+        log.warning(f"Startup checkbox cleanup failed (non-critical): {e}")
 
     with sqlite3.connect(METADATA_DB) as conn:
         conn.execute("""
