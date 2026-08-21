@@ -926,6 +926,15 @@ TLDR:"""
         return self._ollama_call(prompt)
 
     def _generate_eli5(self, title, files, is_delta=False):
+        # Self-heal: probe Ollama and attempt recovery before skipping enrichment.
+        # If heal succeeds (exit 0), proceed with the Ollama call.
+        # If heal fails (exit 1 or 2), skip enrichment immediately (degradation).
+        from riptide.ollama_heal import heal
+
+        if heal(base_url=self.ollama_base) != 0:
+            logger.warning("Ollama self-heal failed — skipping ELI5 enrichment")
+            return None
+
         file_list = ", ".join(f.get("filename", "?") for f in files[:5])
         context = "new changes in this push of " if is_delta else ""
         prompt = f"""Explain {context}this PR like I'm 5. One analogy, 1-2 sentences.
