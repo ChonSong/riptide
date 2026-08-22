@@ -11,6 +11,7 @@ Handles GitHub App webhook events:
 The companion posts a TL;DR comment with graphify-informed blast radius.
 Riptide Review (Bot 2) runs via cron polling in deepthink.py — not here.
 """
+
 import os
 import json
 import shutil
@@ -94,9 +95,7 @@ def get_companion():
     return result
 
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("riptide.webhook")
 
 app = FastAPI(title="Riptide Webhook Server")
@@ -134,7 +133,9 @@ def _get_state_store():
     global _state_store
     if _state_store is None:
         _state_store = StateStore(
-            db_path=os.environ.get("RIPTIDE_STATE_DB", str(Path.home() / ".local/share/riptide/state.db"))
+            db_path=os.environ.get(
+                "RIPTIDE_STATE_DB", str(Path.home() / ".local/share/riptide/state.db")
+            )
         )
     return _state_store
 
@@ -146,6 +147,7 @@ def _get_state_store():
 async def health_check():
     """Return server health status for monitoring / tunnel-watchdog."""
     return {"status": "ok", "app": "riptide"}
+
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -206,9 +208,7 @@ async def github_webhook(request: Request) -> Response:
             log.info(f"[{delivery_id}] Unhandled event: {event}")
             return Response(status_code=200)
     except Exception as e:
-        log.error(
-            f"[{delivery_id}] Error handling {event}: {e}\n{traceback.format_exc()}"
-        )
+        log.error(f"[{delivery_id}] Error handling {event}: {e}\n{traceback.format_exc()}")
         # Return 200 to prevent GitHub retry storms on our errors
         return Response(status_code=200)
 
@@ -230,9 +230,7 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
         log.info(f"[{delivery_id}] No installation ID, skipping")
         return Response(status_code=200)
 
-    log.info(
-        f"[{delivery_id}] PR {action}: {repo_full}#{pr_number}"
-    )
+    log.info(f"[{delivery_id}] PR {action}: {repo_full}#{pr_number}")
 
     # Rate limit: skip 'synchronize' if one happened recently for this PR
     if action == "synchronize":
@@ -265,9 +263,13 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
                 # Legacy T0 dispatcher (opt-in fallback; default is companion flow)
                 total_loc = sum(f.get("additions", 0) + f.get("deletions", 0) for f in files)
                 profile = TaskClassifier().classify(
-                    pr_number, owner, repo_name,
-                    title, author,
-                    files, total_loc,
+                    pr_number,
+                    owner,
+                    repo_name,
+                    title,
+                    author,
+                    files,
+                    total_loc,
                     installation_id=installation_id,
                     head_sha=head_sha,
                 )
@@ -301,8 +303,13 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
                 def _safe_run():
                     try:
                         companion.run_for_pr(
-                            installation_id, owner, repo_name, pr_number,
-                            title, author, files,
+                            installation_id,
+                            owner,
+                            repo_name,
+                            pr_number,
+                            title,
+                            author,
+                            files,
                         )
                     except Exception as e:
                         log.error(
@@ -323,20 +330,29 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
             # Also spawn labeler thread (non-blocking)
             labeler = get_labeler()
             if labeler and github:
+
                 def _safe_label():
                     try:
                         labels = labeler.classify_pr(pr_detail, files, repo_full)
                         # Setup labels on repo first (creates missing ones)
                         labeler.setup_labels_on_repo(installation_id, owner, repo_name, github)
                         # Reconcile: remove stale bot-managed labels, preserve human labels
-                        _reconcile_labels(github, installation_id, owner, repo_name, pr_number, labels, labeler)
+                        _reconcile_labels(
+                            github, installation_id, owner, repo_name, pr_number, labels, labeler
+                        )
                         # Add labels to PR
-                        github.add_labels_to_issue(installation_id, owner, repo_name, pr_number, labels)
-                        log.info(f"[{delivery_id}] Labels applied to {repo_full}#{pr_number}: {labels}")
+                        github.add_labels_to_issue(
+                            installation_id, owner, repo_name, pr_number, labels
+                        )
+                        log.info(
+                            f"[{delivery_id}] Labels applied to {repo_full}#{pr_number}: {labels}"
+                        )
                     except Exception as e:
                         log.error(f"[{delivery_id}] Labeler failed: {e}")
 
-                label_thread = threading.Thread(target=_safe_label, daemon=True, name=f"label-{repo_name}-{pr_number}")
+                label_thread = threading.Thread(
+                    target=_safe_label, daemon=True, name=f"label-{repo_name}-{pr_number}"
+                )
                 label_thread.start()
                 log.info(f"[{delivery_id}] Labeler spawned for {repo_full}#{pr_number}")
 
@@ -347,8 +363,12 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
         default_branch = repo.get("default_branch", os.environ.get("RIPTIDE_DEPLOY_BRANCH", "main"))
         base_ref = pr.get("base", {}).get("ref", "")
         if base_ref == default_branch:
-            log.info(f"[{delivery_id}] PR #{pr_number} merged into {default_branch} — triggering auto-deploy")
-            deploy_script = os.environ.get("RIPTIDE_DEPLOY_SCRIPT", "/home/sc/workspace/riptide/scripts/deploy.sh")
+            log.info(
+                f"[{delivery_id}] PR #{pr_number} merged into {default_branch} — triggering auto-deploy"
+            )
+            deploy_script = os.environ.get(
+                "RIPTIDE_DEPLOY_SCRIPT", "/home/sc/workspace/riptide/scripts/deploy.sh"
+            )
             if not Path(deploy_script).exists():
                 log.error(
                     f"[{delivery_id}] Auto-deploy skipped — script not found: {deploy_script}"
@@ -363,8 +383,17 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
                         f"[{delivery_id}] Auto-deploy skipped — systemd-run not found in PATH. Install systemd or trigger deploy manually."
                     )
                 else:
-                    cmd = ["systemd-run", "--user", "--scope", "--property=KillMode=process", "--collect", deploy_script]
-                    log.info(f"[{delivery_id}] Auto-deploy: invoking systemd-run with script={deploy_script}")
+                    cmd = [
+                        "systemd-run",
+                        "--user",
+                        "--scope",
+                        "--property=KillMode=process",
+                        "--collect",
+                        deploy_script,
+                    ]
+                    log.info(
+                        f"[{delivery_id}] Auto-deploy: invoking systemd-run with script={deploy_script}"
+                    )
                     log.debug(f"[{delivery_id}] Auto-deploy: full command: {cmd}")
                     try:
                         proc = subprocess.Popen(
@@ -445,13 +474,17 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
                 # Use delivery_id for idempotence: webhook retries will
                 # collide on the existing pending work item.
                 work_id = f"review-{delivery_id}"
-                enqueued = state.enqueue_work(work_id, "review", {
-                    "installation_id": installation_id,
-                    "owner": owner,
-                    "repo": repo_name,
-                    "pr_number": pr_number,
-                    "commenter": commenter,
-                })
+                enqueued = state.enqueue_work(
+                    work_id,
+                    "review",
+                    {
+                        "installation_id": installation_id,
+                        "owner": owner,
+                        "repo": repo_name,
+                        "pr_number": pr_number,
+                        "commenter": commenter,
+                    },
+                )
                 if not enqueued:
                     log.info(f"[{delivery_id}] Duplicate delivery — skipping review")
                     return Response(status_code=200)
@@ -466,14 +499,22 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
                                 installation_id, owner, repo_name, pr_number, result
                             )
                         state.complete_work(work_id)
-                        log.info(f"[{delivery_id}] Background review completed for {owner}/{repo_name}#{pr_number}")
+                        log.info(
+                            f"[{delivery_id}] Background review completed for {owner}/{repo_name}#{pr_number}"
+                        )
                     except Exception:
                         log.exception(f"[{delivery_id}] Background review command failed")
-                        state.complete_work(work_id, traceback_str=traceback.format_exc())
+                        state.complete_work(
+                            work_id,
+                            error="background thread failure",
+                            traceback_str=traceback.format_exc(),
+                        )
 
                 thread = threading.Thread(target=_run_review, daemon=True, name=work_id)
                 thread.start()
-                log.info(f"[{delivery_id}] Background review thread started for {owner}/{repo_name}#{pr_number}")
+                log.info(
+                    f"[{delivery_id}] Background review thread started for {owner}/{repo_name}#{pr_number}"
+                )
             except Exception as e:
                 log.error(f"[{delivery_id}] Review command failed: {e}")
 
@@ -489,14 +530,18 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
                 description = FIX_RE.search(body).group(1).strip()
                 state = StateStore()
                 work_id = f"fix-{delivery_id}"
-                enqueued = state.enqueue_work(work_id, "fix", {
-                    "installation_id": installation_id,
-                    "owner": owner,
-                    "repo": repo_name,
-                    "pr_number": pr_number,
-                    "commenter": commenter,
-                    "description": description,
-                })
+                enqueued = state.enqueue_work(
+                    work_id,
+                    "fix",
+                    {
+                        "installation_id": installation_id,
+                        "owner": owner,
+                        "repo": repo_name,
+                        "pr_number": pr_number,
+                        "commenter": commenter,
+                        "description": description,
+                    },
+                )
                 if not enqueued:
                     log.info(f"[{delivery_id}] Duplicate delivery — skipping fix")
                     return Response(status_code=200)
@@ -504,21 +549,35 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
                 def _run_fix():
                     try:
                         result = handle_fix_command(
-                            client, installation_id, owner, repo_name, pr_number, commenter, description
+                            client,
+                            installation_id,
+                            owner,
+                            repo_name,
+                            pr_number,
+                            commenter,
+                            description,
                         )
                         if result:
                             client.post_pr_comment(
                                 installation_id, owner, repo_name, pr_number, result
                             )
                         state.complete_work(work_id)
-                        log.info(f"[{delivery_id}] Background fix completed for {owner}/{repo_name}#{pr_number}")
+                        log.info(
+                            f"[{delivery_id}] Background fix completed for {owner}/{repo_name}#{pr_number}"
+                        )
                     except Exception:
                         log.exception(f"[{delivery_id}] Background fix command failed")
-                        state.complete_work(work_id, traceback_str=traceback.format_exc())
+                        state.complete_work(
+                            work_id,
+                            error="background thread failure",
+                            traceback_str=traceback.format_exc(),
+                        )
 
                 thread = threading.Thread(target=_run_fix, daemon=True, name=work_id)
                 thread.start()
-                log.info(f"[{delivery_id}] Background fix thread started for {owner}/{repo_name}#{pr_number}")
+                log.info(
+                    f"[{delivery_id}] Background fix thread started for {owner}/{repo_name}#{pr_number}"
+                )
             except Exception as e:
                 log.error(f"[{delivery_id}] Fix command failed: {e}")
 
@@ -536,11 +595,16 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
                     labels = labeler.classify_pr(pr_detail, files, f"{owner}/{repo_name}")
                     labeler.setup_labels_on_repo(installation_id, owner, repo_name, client)
                     # Reconcile: remove stale bot-managed labels before applying new ones
-                    _reconcile_labels(client, installation_id, owner, repo_name, pr_number, labels, labeler)
+                    _reconcile_labels(
+                        client, installation_id, owner, repo_name, pr_number, labels, labeler
+                    )
                     client.add_labels_to_issue(installation_id, owner, repo_name, pr_number, labels)
                     client.post_pr_comment(
-                        installation_id, owner, repo_name, pr_number,
-                        f"🏷️ Labels re-applied: {', '.join(labels)}"
+                        installation_id,
+                        owner,
+                        repo_name,
+                        pr_number,
+                        f"🏷️ Labels re-applied: {', '.join(labels)}",
                     )
             except Exception as e:
                 log.error(f"[{delivery_id}] Relabel command failed: {e}")
@@ -558,9 +622,7 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
                     client, installation_id, owner, repo_name, pr_number, commenter
                 )
                 if result:
-                    client.post_pr_comment(
-                        installation_id, owner, repo_name, pr_number, result
-                    )
+                    client.post_pr_comment(installation_id, owner, repo_name, pr_number, result)
             except Exception as e:
                 log.error(f"[{delivery_id}] Visual command failed: {e}")
 
@@ -619,16 +681,11 @@ async def handle_installation(payload: dict, event: str, delivery_id: str) -> Re
                         installation_id,
                     ),
                 )
-        log.info(
-            f"[{delivery_id}] Synced {len(repos)} repos for installation {installation_id}"
-        )
+        log.info(f"[{delivery_id}] Synced {len(repos)} repos for installation {installation_id}")
     except Exception as e:
         log.error(f"[{delivery_id}] Installation sync failed: {e}")
 
     return Response(status_code=200)
-
-
-
 
 
 # ── Init DB on startup ─────────────────────────────────────────────────────────
@@ -659,3 +716,97 @@ def init_db():
             )
         """)
     log.info(f"Metadata DB ready at {METADATA_DB}")
+
+    # Recover pending work from a previous process lifetime.
+    # Items younger than 5 min are claimed for replay; older ones are marked stale.
+    try:
+        state = _get_state_store()
+        state.cleanup_stale_work(max_age_seconds=300)
+        recovered = state.recover_pending_work()
+        if recovered:
+            log.info(
+                f"Recovering {len(recovered)} pending work items from previous process lifetime"
+            )
+            for item in recovered:
+                kind = item.get("kind")
+                payload = item.get("payload", {})
+                work_id = item["id"]
+                log.info(f"Recovery: dispatching {kind} work item {work_id}")
+                if kind == "review":
+                    from riptide.deepthink import handle_review_command
+
+                    client = github_client()
+
+                    def _recover_review(work_id=work_id, payload=payload):
+                        try:
+                            result = handle_review_command(
+                                client,
+                                payload["installation_id"],
+                                payload["owner"],
+                                payload["repo"],
+                                payload["pr_number"],
+                                payload["commenter"],
+                            )
+                            if result:
+                                client.post_pr_comment(
+                                    payload["installation_id"],
+                                    payload["owner"],
+                                    payload["repo"],
+                                    payload["pr_number"],
+                                    result,
+                                )
+                            state.complete_work(work_id)
+                        except Exception:
+                            log.exception(f"[recovery] Review recovery failed for {work_id}")
+                            state.complete_work(
+                                work_id,
+                                error="recovery failed",
+                                traceback_str=traceback.format_exc(),
+                            )
+
+                    thread = threading.Thread(
+                        target=_recover_review, daemon=True, name=f"recovery-{work_id}"
+                    )
+                    thread.start()
+                elif kind == "fix":
+                    from riptide.fixer import handle_fix_command
+
+                    client = github_client()
+
+                    def _recover_fix(work_id=work_id, payload=payload):
+                        try:
+                            result = handle_fix_command(
+                                client,
+                                payload["installation_id"],
+                                payload["owner"],
+                                payload["repo"],
+                                payload["pr_number"],
+                                payload["commenter"],
+                                payload.get("description", ""),
+                            )
+                            if result:
+                                client.post_pr_comment(
+                                    payload["installation_id"],
+                                    payload["owner"],
+                                    payload["repo"],
+                                    payload["pr_number"],
+                                    result,
+                                )
+                            state.complete_work(work_id)
+                        except Exception:
+                            log.exception(f"[recovery] Fix recovery failed for {work_id}")
+                            state.complete_work(
+                                work_id,
+                                error="recovery failed",
+                                traceback_str=traceback.format_exc(),
+                            )
+
+                    thread = threading.Thread(
+                        target=_recover_fix, daemon=True, name=f"recovery-{work_id}"
+                    )
+                    thread.start()
+                else:
+                    log.warning(f"Recovery: unknown work kind '{kind}' for {work_id}")
+                    state.complete_work(work_id, error=f"unknown kind: {kind}")
+    except Exception as e:
+        log.error(f"Work recovery failed (non-fatal): {e}")

@@ -75,9 +75,7 @@ class StateStore:
 
     def _init_db(self):
         conn = self._get_conn()
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)"
-        )
+        conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY)")
         row = conn.execute("SELECT version FROM schema_version").fetchone()
         version = row[0] if row else 0
 
@@ -139,9 +137,7 @@ class StateStore:
         # v4: pr_key column for exact lookup of spawned fixes per PR
         if version < 4:
             try:
-                conn.execute(
-                    "ALTER TABLE processed_comments ADD COLUMN pr_key TEXT"
-                )
+                conn.execute("ALTER TABLE processed_comments ADD COLUMN pr_key TEXT")
             except sqlite3.OperationalError as e:
                 if "duplicate column name" not in str(e):
                     raise
@@ -168,14 +164,10 @@ class StateStore:
         # v5 (CREATE IF NOT EXISTS won't add the column to an existing table).
         cols = {row[1] for row in conn.execute("PRAGMA table_info(pr_heuristics)").fetchall()}
         if "tier1_comment_id" not in cols:
-            conn.execute(
-                "ALTER TABLE pr_heuristics ADD COLUMN tier1_comment_id INTEGER"
-            )
+            conn.execute("ALTER TABLE pr_heuristics ADD COLUMN tier1_comment_id INTEGER")
             log.info("pr_heuristics: added tier1_comment_id column (v6)")
 
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_jobs_pr_status ON jobs (pr_number, status)"
-        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_pr_status ON jobs (pr_number, status)")
 
         # One-time migration from poller's metadata.db (if it exists)
         # Run BEFORE schema version update so migration failures remain retryable
@@ -203,10 +195,15 @@ class StateStore:
                 if not table_check:
                     log.info(f"No poller_processed_comments table found in {POLLER_DB_PATH}")
                     return
-                
-                old_columns = {row[1] for row in src.execute("PRAGMA table_info(poller_processed_comments)").fetchall()}
+
+                old_columns = {
+                    row[1]
+                    for row in src.execute(
+                        "PRAGMA table_info(poller_processed_comments)"
+                    ).fetchall()
+                }
                 has_pending = "pending_response" in old_columns
-                
+
                 if has_pending:
                     rows = src.execute(
                         "SELECT comment_id, processed_at, result, pending_response FROM poller_processed_comments"
@@ -215,7 +212,7 @@ class StateStore:
                     rows = src.execute(
                         "SELECT comment_id, processed_at, result, '' FROM poller_processed_comments"
                     ).fetchall()
-            
+
             conn = self._get_conn()
             try:
                 conn.execute("BEGIN")
@@ -310,7 +307,7 @@ class StateStore:
         conn = self._get_conn()
         status = "failed" if error else "completed"
         conn.execute(
-            "UPDATE work_queue SET status=?, completed_at=?, error=?, traceback=? WHERE id=? AND status='pending'",
+            "UPDATE work_queue SET status=?, completed_at=?, error=?, traceback=? WHERE id=? AND status IN ('pending', 'recovering')",
             (status, time.time(), error, traceback_str, work_id),
         )
         conn.commit()
@@ -328,7 +325,7 @@ class StateStore:
 
     def recover_pending_work(self) -> list[dict]:
         """Recover pending work after process restart.
-        
+
         Atomically claims recently-pending items by transitioning to 'recovering'.
         Items older than 5 minutes are marked as stale.
         Returns items successfully claimed for recovery.
@@ -336,14 +333,14 @@ class StateStore:
         conn = self._get_conn()
         now = time.time()
         recovery_cutoff = now - 300  # 5 minutes
-        
+
         # Mark all pending items older than recovery window as stale
         conn.execute(
             "UPDATE work_queue SET status='failed', completed_at=?, error='stale' WHERE status='pending' AND created_at < ?",
             (now, recovery_cutoff),
         )
         conn.commit()
-        
+
         # Get recently-pending items
         rows = conn.execute(
             """SELECT id, kind, payload, created_at FROM work_queue
@@ -351,7 +348,7 @@ class StateStore:
                ORDER BY created_at ASC""",
             (recovery_cutoff,),
         ).fetchall()
-        
+
         # Atomically claim each item
         claimed = []
         for row in rows:
@@ -362,14 +359,16 @@ class StateStore:
                 (work_id,),
             )
             conn.commit()
-            if conn.total_changes > 0:
-                claimed.append({
-                    "id": row[0],
-                    "kind": row[1],
-                    "payload": json.loads(row[2]),
-                    "created_at": row[3],
-                })
-        
+            if conn.execute("SELECT changes()").fetchone()[0] > 0:
+                claimed.append(
+                    {
+                        "id": row[0],
+                        "kind": row[1],
+                        "payload": json.loads(row[2]),
+                        "created_at": row[3],
+                    }
+                )
+
         return claimed
 
     @staticmethod
