@@ -34,7 +34,6 @@ from .orchestrator import T0Orchestrator, TaskClassifier
 from .state import StateStore
 from .labeler import Labeler
 from .review_memory import store_review_outcome
-from .documentarian import on_merge
 
 # Companion is optional — silently unavailable if RIPTIDE_COMPANION_REPOS is unset
 _companion: "Companion | Literal[False] | None" = None
@@ -480,20 +479,23 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
                     except Exception as e:
                         log.error(f"[{delivery_id}] Failed to trigger auto-deploy: {e}")
 
-            # Trigger documentarian post-merge tasks (graphify + changelog)
-            pr_title = pr.get("title", "")
-            pr_body = pr.get("body", "") or ""
+            # Store review outcome on merge (best-effort)
             try:
-                on_merge(
+                head_sha = pr.get("head", {}).get("sha", "")
+                store_review_outcome(
                     owner=owner,
                     repo=repo_name,
-                    merged_pr_number=pr_number,
-                    pr_title=pr_title,
-                    pr_body=pr_body,
+                    pr_number=pr_number,
+                    head_sha=head_sha,
+                    findings_count=0,
+                    critical_count=0,
+                    warning_count=0,
+                    verdict="merged",
+                    metadata={"source": "webhook_merge", "delivery_id": delivery_id},
                 )
-                log.info(f"[{delivery_id}] Documentarian post-merge triggered for {repo_full}#{pr_number}")
+                log.info(f"[{delivery_id}] Review outcome stored for merged PR #{pr_number}")
             except Exception as e:
-                log.error(f"[{delivery_id}] Documentarian post-merge failed (non-fatal): {e}")
+                log.warning(f"[{delivery_id}] Failed to store review outcome (non-fatal): {e}")
 
     return Response(status_code=200)
 

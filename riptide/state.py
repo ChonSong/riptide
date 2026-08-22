@@ -200,6 +200,41 @@ class StateStore:
             )
             log.info("pr_heuristics: added tier1_comment_id column (v6)")
 
+        # v7: review_memory — persist review outcomes per PR for context injection
+        # and review_profiles — per-repo aggregate stats for common-finding patterns
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS review_memory (
+                id TEXT PRIMARY KEY,
+                pr_key TEXT NOT NULL,
+                pr_number INTEGER,
+                owner TEXT,
+                repo TEXT,
+                head_sha TEXT,
+                findings_count INTEGER,
+                critical_count INTEGER,
+                warning_count INTEGER,
+                verdict TEXT,
+                user_feedback INTEGER,
+                created_at TEXT,
+                metadata TEXT
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS review_profiles (
+                repo TEXT PRIMARY KEY,
+                total_reviews INTEGER DEFAULT 0,
+                common_findings TEXT DEFAULT '[]',
+                last_review_at TEXT,
+                updated_at TEXT
+            )"""
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_review_memory_pr_key ON review_memory (pr_key)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_review_memory_repo ON review_memory (repo)"
+        )
+
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_jobs_pr_status ON jobs (pr_number, status)"
         )
@@ -604,25 +639,135 @@ class StateStore:
         )
         conn.commit()
 
-    # ── Checkbox Trigger Dedup ────────────────────────────────────────────────
+    # ── Review Memory ──────────────────────────────────────────────────────────
 
-    def get_last_checkbox_trigger(self, trigger_key: str) -> Optional[float]:
-        """Return the epoch timestamp of the last checkbox trigger for this key."""
+    def store_review_outcome(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        head_sha: str,
+        findings_count: int,
+        critical_count: int,
+        warning_count: int,
+        verdict: str,
+        metadata: Optional[str] = None,
+    ):
+        """Store a review outcome in review_memory and update review_profiles."""
+        import uuid
+
+        conn = self._get_conn()
+        now = datetime.now(timezone.utc).isoformat()
+        pr_key = f"{owner}/{repo}#{pr_number}"
+        review_id = str(uuid.uuid4())
+
+        conn.execute(
+            """INSERT INTO review_memory
+               (id, pr_key, pr_number, owner, repo, head_sha,
+                findings_count, critical_count, warning_count,
+                verdict, user_feedback, created_at, metadata)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                review_id,
+                pr_key,
+                pr_number,
+                owner,
+                repo,
+                head_sha,
+                findings_count,
+                critical_count,
+                warning_count,
+                verdict,
+                0,  # user_feedback — default 0 (no feedback yet)
+                now,
+                json.dumps(metadata) if metadata else None,
+            ),
+        )
+
+        # Upsert review_profiles
+        conn.execute(
+            """INSERT INTO review_profiles (repo, total_reviews, last_review_at, updated_at)
+               VALUES (?, 1, ?, ?)
+               ON CONFLICT(repo) DO UPDATE SET
+                 total_reviews = total_reviews + 1,
+                 last_review_at = excluded.last_review_at,
+                 updated_at = excluded.updated_at""",
+            (repo, now, now),
+        )
+
+        conn.commit()
+
+    def get_review_profile(self, repo: str) -> Optional[dict]:
+        """Return the review profile for a repo, or None if no history."""
         conn = self._get_conn()
         row = conn.execute(
-            "SELECT triggered_at FROM checkbox_triggers WHERE trigger_key = ?",
-            (trigger_key,),
+            "SELECT repo, total_reviews, common_findings, last_review_at, updated_at "
+            "FROM review_profiles WHERE repo = ?",
+            (repo,),
         ).fetchone()
-        return row[0] if row else None
+        if row is None:
+            return None
+        return {
+            "repo": row[0],
+            "total_reviews": row[1],
+            "common_findings": json.loads(row[2]) if row[2] else [],
+            "last_review_at": row[3],
+            "updated_at": row[4],
+        }
 
-    def set_last_checkbox_trigger(self, trigger_key: str, triggered_at: float):
-        """Record a checkbox trigger event for deduplication."""
+    def get_memory_context(self, owner: str, repo: str) -> str:
+        """
+        Build a prompt injection string with common findings from past reviews.
+
+        Returns:
+            A string with historical findings, or empty string if no history.
+        """
         conn = self._get_conn()
-        conn.execute(
-            "INSERT OR REPLACE INTO checkbox_triggers (trigger_key, triggered_at) VALUES (?, ?)",
-            (trigger_key, triggered_at),
+        profile = self.get_review_profile(repo)
+        if not profile:
+            return ""
+
+        # Get the most recent reviews for this repo
+        rows = conn.execute(
+            "SELECT verdict, findings_count, critical_count, warning_count, created_at "
+            "FROM review_memory WHERE repo = ? ORDER BY created_at DESC LIMIT 10",
+            (repo,),
+        ).fetchall()
+
+        if not rows:
+            return ""
+
+        # Compute aggregate stats
+        total_reviews = profile["total_reviews"]
+        critical_rate = sum(r[2] for r in rows) / max(total_reviews, 1)
+        warning_rate = sum(r[3] for r in rows) / max(total_reviews, 1)
+
+        # Extract common findings (warnings + criticals from recent reviews)
+        common = []
+        for row in rows:
+            if row[4]:  # created_at
+                label = f"{row[0]} ({row[2]} critical, {row[3]} warning)"
+                common.append(label)
+
+        # Build context string
+        lines = [
+            "## Review History (from past reviews)",
+            "",
+            f"- Total reviews: {total_reviews}",
+            f"- Recent critical rate: {critical_rate:.1%}",
+            f"- Recent warning rate: {warning_rate:.1%}",
+            f"- Last review: {profile.get('last_review_at', 'never')}",
+            "",
+            "### Recent Review Outcomes:",
+        ]
+        for c in common[:5]:
+            lines.append(f"- {c}")
+        lines.append("")
+        lines.append(
+            "Consider these historical patterns when reviewing this PR. "
+            "Focus on catching issues that have been common in the past."
         )
-        conn.commit()
+        return "\n".join(lines)
 
 
 # Module-level convenience (poller's old DB path for migration)
