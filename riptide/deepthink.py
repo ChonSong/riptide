@@ -30,6 +30,7 @@ from typing import Optional
 
 from riptide.state import StateStore
 from riptide.depth import ReviewDepth, classify_review_depth, select_skills  # noqa: F401 (re-exported for back-compat)
+from riptide.review_memory import get_memory_context
 
 logging.basicConfig(
     level=logging.INFO,
@@ -616,6 +617,9 @@ def _build_orchestrator_prompt(
     findings + verdict are embedded so the session starts from the deterministic
     analysis instead of re-deriving it.
     """
+    # Inject historical review context
+    memory_ctx = get_memory_context(owner, repo)
+    memory_section = f"\n{memory_ctx}\n" if memory_ctx else ""
     # Format files changed
     files_str = "\n".join(
         f"  - {f.get('filename', '?')} (+{f.get('additions', 0)}/-{f.get('deletions', 0)})"
@@ -696,7 +700,7 @@ def _build_orchestrator_prompt(
 ### Graphify Analysis
 {graph_str}
 {diagram_section}
-{deterministic_section}## Your Task: Orchestrate Review
+{deterministic_section}{memory_section}## Your Task: Orchestrate Review
 
 You are a senior engineer. Delegate review tasks to subagents, then synthesize.
 

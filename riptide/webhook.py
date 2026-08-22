@@ -33,6 +33,7 @@ from .github_app import verify_webhook_signature, GitHubAppClient
 from .orchestrator import T0Orchestrator, TaskClassifier
 from .state import StateStore
 from .labeler import Labeler
+from .review_memory import store_review_outcome
 
 # Companion is optional — silently unavailable if RIPTIDE_COMPANION_REPOS is unset
 _companion: "Companion | Literal[False] | None" = None
@@ -376,6 +377,24 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
                         log.info(f"[{delivery_id}] Auto-deploy triggered (pid={proc.pid})")
                     except Exception as e:
                         log.error(f"[{delivery_id}] Failed to trigger auto-deploy: {e}")
+
+            # Store review outcome on merge (best-effort)
+            try:
+                head_sha = pr.get("head", {}).get("sha", "")
+                store_review_outcome(
+                    owner=owner,
+                    repo=repo_name,
+                    pr_number=pr_number,
+                    head_sha=head_sha,
+                    findings_count=0,
+                    critical_count=0,
+                    warning_count=0,
+                    verdict="merged",
+                    metadata={"source": "webhook_merge", "delivery_id": delivery_id},
+                )
+                log.info(f"[{delivery_id}] Review outcome stored for merged PR #{pr_number}")
+            except Exception as e:
+                log.warning(f"[{delivery_id}] Failed to store review outcome (non-fatal): {e}")
 
     return Response(status_code=200)
 
