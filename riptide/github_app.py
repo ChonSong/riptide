@@ -202,6 +202,16 @@ class GitHubAppClient:
         resp.raise_for_status()
         return resp.json()
 
+    def get_comment(self, installation_id: int, owner: str, repo: str, comment_id: int) -> dict:
+        """Fetch a single issue/PR comment by ID."""
+        resp = requests.get(
+            f"{self.base_url}/repos/{owner}/{repo}/issues/comments/{comment_id}",
+            headers=self._headers(installation_id),
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     def post_inline_comment(
         self,
         installation_id: int,

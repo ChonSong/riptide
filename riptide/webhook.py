@@ -381,8 +381,22 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
 
 
 async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
-    """Handle issue_comment events — companion skip/resume and on-demand review commands."""
+    """Handle issue_comment events — companion skip/resume, on-demand review commands, and checkbox toggles."""
     action = payload.get("action", "")
+
+    # Route 4: Checkbox toggle (edited comment on a PR)
+    if action == "edited":
+        comment = payload.get("comment", {})
+        issue = payload.get("issue", {})
+        if issue.get("pull_request") and comment.get("body"):
+            from .checkbox_handler import handle_checkbox_toggle
+
+            try:
+                comment_id = comment.get("id")
+                return handle_checkbox_toggle(payload, delivery_id, comment_id)
+            except Exception as e:
+                log.error(f"[{delivery_id}] Checkbox handler error: {e}")
+
     if action != "created":
         return Response(status_code=200)
 
