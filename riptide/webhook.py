@@ -563,89 +563,29 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
                     log.warning(f"[{delivery_id}] Could not post companion reply: {e}")
             return Response(status_code=200)
 
-    # Route 2: On-demand review command (@riptide-bot review / deepthink / full review)
+    # Route 2: Unified @riptide-bot command router
     if installation_id and body and "@riptide-bot" in body.lower():
-        from riptide.deepthink import REVIEW_RE, handle_review_command
+        from riptide.interaction_handler import handle_command
 
-        if REVIEW_RE.search(body):
-            log.info(
-                f"[{delivery_id}] Review command on {owner}/{repo_name}#{pr_number} by {commenter}"
+        try:
+            response = handle_command(
+                payload=payload,
+                delivery_id=delivery_id,
+                comment_id=comment.get("id", 0),
+                installation_id=installation_id,
+                owner=owner,
+                repo=repo_name,
+                pr_number=pr_number,
+                body=body,
+                commenter=commenter,
             )
-            try:
+            if response:
                 client = github_client()
-                result = handle_review_command(
-                    client, installation_id, owner, repo_name, pr_number, commenter,
-                    delivery_id=delivery_id,
+                client.post_pr_comment(
+                    installation_id, owner, repo_name, pr_number, response
                 )
-                if result:
-                    client.post_pr_comment(
-                        installation_id, owner, repo_name, pr_number, result
-                    )
-            except Exception as e:
-                log.error(f"[{delivery_id}] Review command failed: {e}")
-
-        # Route 2b: On-demand fix command (@riptide-bot fix [description])
-        from riptide.fixer import FIX_RE, handle_fix_command
-
-        if FIX_RE.search(body):
-            log.info(
-                f"[{delivery_id}] Fix command on {owner}/{repo_name}#{pr_number} by {commenter}"
-            )
-            try:
-                client = github_client()
-                description = FIX_RE.search(body).group(1).strip()
-                result = handle_fix_command(
-                    client, installation_id, owner, repo_name, pr_number, commenter, description,
-                    delivery_id=delivery_id,
-                )
-                if result:
-                    client.post_pr_comment(
-                        installation_id, owner, repo_name, pr_number, result
-                    )
-            except Exception as e:
-                log.error(f"[{delivery_id}] Fix command failed: {e}")
-
-        # Route 2c: Relabel command (@riptide-bot relabel)
-        if "@riptide-bot relabel" in body.lower():
-            log.info(
-                f"[{delivery_id}] Relabel command on {owner}/{repo_name}#{pr_number} by {commenter}"
-            )
-            try:
-                client = github_client()
-                labeler = get_labeler()
-                if labeler:
-                    pr_detail = client.get_pr_details(installation_id, owner, repo_name, pr_number)
-                    files = client.get_pr_files(installation_id, owner, repo_name, pr_number)
-                    labels = labeler.classify_pr(pr_detail, files, f"{owner}/{repo_name}")
-                    labeler.setup_labels_on_repo(installation_id, owner, repo_name, client)
-                    # Reconcile: remove stale bot-managed labels before applying new ones
-                    _reconcile_labels(client, installation_id, owner, repo_name, pr_number, labels, labeler)
-                    client.add_labels_to_issue(installation_id, owner, repo_name, pr_number, labels)
-                    client.post_pr_comment(
-                        installation_id, owner, repo_name, pr_number,
-                        f"🏷️ Labels re-applied: {', '.join(labels)}"
-                    )
-            except Exception as e:
-                log.error(f"[{delivery_id}] Relabel command failed: {e}")
-
-        # Route 3: Visual regression command (@riptide-bot visual)
-        from riptide.visual import VISUAL_RE, handle_visual_command
-
-        if VISUAL_RE.search(body):
-            log.info(
-                f"[{delivery_id}] Visual command on {owner}/{repo_name}#{pr_number} by {commenter}"
-            )
-            try:
-                client = github_client()
-                result = handle_visual_command(
-                    client, installation_id, owner, repo_name, pr_number, commenter
-                )
-                if result:
-                    client.post_pr_comment(
-                        installation_id, owner, repo_name, pr_number, result
-                    )
-            except Exception as e:
-                log.error(f"[{delivery_id}] Visual command failed: {e}")
+        except Exception as e:
+            log.error(f"[{delivery_id}] Command handler failed: {e}")
 
     return Response(status_code=200)
 

@@ -343,6 +343,28 @@ class GitHubAppClient:
         resp.raise_for_status()
         return resp.json()
 
+    def get_issue_comments(self, installation_id: int, owner: str, repo: str,
+                           issue_number: int) -> list[dict]:
+        """Fetch all comments on an issue/PR."""
+        comments = []
+        page = 1
+        while True:
+            resp = requests.get(
+                f"{self.base_url}/repos/{owner}/{repo}/issues/{issue_number}/comments",
+                headers=self._headers(installation_id),
+                params={"per_page": 100, "page": page},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            batch = resp.json()
+            if not batch:
+                break
+            comments.extend(batch)
+            if len(batch) < 100:
+                break
+            page += 1
+        return comments
+
     def remove_label_from_issue(self, installation_id: int, owner: str, repo: str,
                                 issue_number: int, label: str) -> dict:
         """Remove a label from an issue/PR."""
