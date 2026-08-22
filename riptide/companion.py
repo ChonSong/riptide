@@ -1124,6 +1124,10 @@ ELI5:"""
                 elapsed_str = f"{elapsed / 60:.1f}m"
             body += f"\n\n---\n<sub>⏱️ Review posted in {elapsed_str}</sub>"
 
+        # Append checkbox footer for interactive commands
+        from .checkbox import build_checkbox_footer
+        body += "\n\n" + build_checkbox_footer(["review", "fix", "visual", "relabel"])
+
         return body
 
     @staticmethod

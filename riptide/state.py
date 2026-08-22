@@ -45,7 +45,7 @@ class StateStore:
       and stable across timezones. Consumers must parse with datetime.fromisoformat().
     """
 
-    SCHEMA_VERSION = 6
+    SCHEMA_VERSION = 7
 
     def __init__(self, db_path: str = DEFAULT_DB_PATH):
         self.db_path = db_path
@@ -157,6 +157,14 @@ class StateStore:
 
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_jobs_pr_status ON jobs (pr_number, status)"
+        )
+
+        # v7: checkbox_triggers — dedup table for checkbox toggle events
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS checkbox_triggers (
+                trigger_key TEXT PRIMARY KEY,
+                triggered_at REAL NOT NULL
+            )"""
         )
 
         # One-time migration from poller's metadata.db (if it exists)
@@ -464,6 +472,26 @@ class StateStore:
             "INSERT INTO pr_heuristics (pr_key, tier1_comment_id) VALUES (?, ?) "
             "ON CONFLICT(pr_key) DO UPDATE SET tier1_comment_id = excluded.tier1_comment_id",
             (pr_key, comment_id),
+        )
+        conn.commit()
+
+    # ── Checkbox Trigger Dedup ────────────────────────────────────────────────
+
+    def get_last_checkbox_trigger(self, trigger_key: str) -> Optional[float]:
+        """Return the epoch timestamp of the last checkbox trigger for this key."""
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT triggered_at FROM checkbox_triggers WHERE trigger_key = ?",
+            (trigger_key,),
+        ).fetchone()
+        return row[0] if row else None
+
+    def set_last_checkbox_trigger(self, trigger_key: str, triggered_at: float):
+        """Record a checkbox trigger event for deduplication."""
+        conn = self._get_conn()
+        conn.execute(
+            "INSERT OR REPLACE INTO checkbox_triggers (trigger_key, triggered_at) VALUES (?, ?)",
+            (trigger_key, triggered_at),
         )
         conn.commit()
 
