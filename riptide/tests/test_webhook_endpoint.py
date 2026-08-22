@@ -271,18 +271,32 @@ class TestFixCommandGating:
         )
 
     def test_exact_fix_command_invokes_fixer(self, client, webhook_secret):
-        """`@riptide-bot fix` must route to handle_fix_command."""
-        from unittest.mock import patch
+        """`@riptide-bot fix` must route to handle_fix_command via work queue."""
+        import threading
+        from unittest.mock import patch, MagicMock
 
         gh_instance = MagicMock()
+        fix_done = threading.Event()
+
+        def fake_fix(*args, **kwargs):
+            fix_done.set()
+            return "🛠 Riptide Fix triggered"
+
+        mock_state_class = MagicMock()
+        mock_state_instance = MagicMock()
+        mock_state_class.return_value = mock_state_instance
+        mock_state_instance.enqueue_work.return_value = True
+
         with patch("riptide.webhook.get_companion", return_value=None), \
-             patch("riptide.fixer.handle_fix_command", return_value="🛠 Riptide Fix triggered") as fix, \
-             patch("riptide.webhook.github_client", return_value=gh_instance):
+             patch("riptide.fixer.handle_fix_command", side_effect=fake_fix) as fix, \
+             patch("riptide.webhook.github_client", return_value=gh_instance), \
+             patch("riptide.webhook.StateStore", mock_state_class):
             resp = self._post_comment(
                 client, webhook_secret,
                 "@riptide-bot fix add tests for the new endpoint",
                 "delivery-fix-exact",
             )
+            assert fix_done.wait(timeout=3), "handle_fix_command was not called"
         assert resp.status_code == 200
         assert fix.call_count == 1
         args = fix.call_args
@@ -292,7 +306,6 @@ class TestFixCommandGating:
         assert args.args[4] == 7             # pr_number
         assert args.args[5] == "author"      # commenter
         assert args.args[6] == "add tests for the new endpoint"  # description
-        # The ack comment must have been posted via the same client
         gh_instance.post_pr_comment.assert_called_once()
 
     def test_casual_fix_mention_does_not_invoke_fixer(self, client, webhook_secret):
@@ -313,20 +326,33 @@ class TestFixCommandGating:
 
     def test_other_bot_command_does_not_invoke_fixer(self, client, webhook_secret):
         """`@riptide-bot review` (read-only) must NOT route to the fixer."""
-        from unittest.mock import patch
+        import threading
+        from unittest.mock import patch, MagicMock
+
+        review_done = threading.Event()
+
+        def fake_review(*args, **kwargs):
+            review_done.set()
+            return None
+
+        mock_state_class = MagicMock()
+        mock_state_instance = MagicMock()
+        mock_state_class.return_value = mock_state_instance
+        mock_state_instance.enqueue_work.return_value = True
 
         with patch("riptide.webhook.get_companion", return_value=None), \
              patch("riptide.fixer.handle_fix_command") as fix, \
-             patch("riptide.deepthink.handle_review_command", return_value=None) as review, \
-             patch("riptide.webhook.github_client") as gh:
+             patch("riptide.deepthink.handle_review_command", side_effect=fake_review) as review, \
+             patch("riptide.webhook.github_client") as gh, \
+             patch("riptide.webhook.StateStore", mock_state_class):
             resp = self._post_comment(
                 client, webhook_secret,
                 "@riptide-bot review",
                 "delivery-fix-review",
             )
+            assert review_done.wait(timeout=3), "handle_review_command was not called"
         assert resp.status_code == 200
         fix.assert_not_called()
-        # The read-only review command SHOULD route (proves routing works, just not fix)
         review.assert_called_once()
 
     def test_fix_command_by_bot_is_skipped(self, client, webhook_secret, monkeypatch):
@@ -359,3 +385,122 @@ class TestFixCommandGating:
         fix.assert_not_called()
         gh.return_value.post_pr_comment.assert_not_called()
 
+
+import time
+import tempfile
+import os
+
+
+class TestWorkQueueRecovery:
+    """Tests for work_queue startup recovery."""
+
+    def test_recover_pending_work_marks_old_items_failed(self):
+        """recover_pending_work() marks items older than 5 minutes as failed."""
+        from riptide.state import StateStore
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test_state.db")
+            store = StateStore(db_path)
+
+            # Insert an old item (10 minutes old)
+            store.enqueue_work("old-review-123", "review", {"pr_number": 1})
+            conn = store._get_conn()
+            conn.execute(
+                "UPDATE work_queue SET created_at = ? WHERE id = ?",
+                (time.time() - 600, "old-review-123"),
+            )
+            conn.commit()
+
+            # Recover should mark it as stale and return empty list
+            pending = store.recover_pending_work()
+            assert len(pending) == 0
+
+            # Verify it was marked as stale
+            conn = store._get_conn()
+            row = conn.execute(
+                "SELECT status, error FROM work_queue WHERE id = ?",
+                ("old-review-123",),
+            ).fetchone()
+            assert row[0] == "failed"
+            assert row[1] == "stale"
+
+    def test_recover_pending_work_returns_recent_items(self):
+        """recover_pending_work() returns items younger than 5 minutes."""
+        from riptide.state import StateStore
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test_state.db")
+            store = StateStore(db_path)
+
+            # Insert a recent item
+            store.enqueue_work("recent-review-456", "review", {"pr_number": 2})
+
+            # Recover should return it
+            pending = store.recover_pending_work()
+            assert len(pending) == 1
+            assert pending[0]["id"] == "recent-review-456"
+            assert pending[0]["kind"] == "review"
+            assert pending[0]["payload"]["pr_number"] == 2
+
+    def test_enqueue_work_is_idempotent(self):
+        """enqueue_work() returns False for duplicate work_id."""
+        import uuid
+        from riptide.state import StateStore
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test_state.db")
+            store = StateStore(db_path)
+            
+            unique_id = f"work-{uuid.uuid4()}"
+
+            # First enqueue should succeed
+            result1 = store.enqueue_work(unique_id, "review", {"pr_number": 1})
+            assert result1 is True
+
+            # Second enqueue with same ID should return False
+            result2 = store.enqueue_work(unique_id, "review", {"pr_number": 1})
+            assert result2 is False
+
+    def test_complete_work_only_transitions_pending(self):
+        """complete_work() only transitions pending rows."""
+        import uuid
+        from riptide.state import StateStore
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test_state.db")
+            store = StateStore(db_path)
+            
+            unique_id = f"work-{uuid.uuid4()}"
+
+            store.enqueue_work(unique_id, "fix", {"pr_number": 3})
+
+            # First complete should succeed
+            result1 = store.complete_work(unique_id)
+            assert result1 is True
+
+            # Second complete should return False (already completed)
+            result2 = store.complete_work(unique_id)
+            assert result2 is False
+
+    def test_complete_work_with_error_stores_traceback(self):
+        """complete_work() with error stores both error message and traceback."""
+        from riptide.state import StateStore
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test_state.db")
+            store = StateStore(db_path)
+
+            store.enqueue_work("work-789", "review", {"pr_number": 4})
+
+            error_msg = "Something went wrong"
+            traceback_text = "Traceback (most recent call last):\n  File ..."
+            store.complete_work("work-789", error=error_msg, traceback_str=traceback_text)
+
+            conn = store._get_conn()
+            row = conn.execute(
+                "SELECT status, error, traceback FROM work_queue WHERE id = ?",
+                ("work-789",),
+            ).fetchone()
+            assert row[0] == "failed"
+            assert row[1] == error_msg
+            assert row[2] == traceback_text
