@@ -312,55 +312,33 @@ def create_pr_review_pipeline(
         pipeline=["upload"],
     )
 
-    create_workstream(
-        track_id,
-        "ws-5-scribe",
-        inputs={
-            "pr_number": pr_number,
-            "owner": owner,
-            "repo": repo,
-            "action": "post_review",
-        },
-        acceptance={"posted": True},
-        role="scribe",
-        pipeline=["assemble_review", "post_comment"],
-    )
-
     return track
 
 
+# ── Deepthink + Webhook entry points ─────────────────────────────────────────
 
-def create_fix_pipeline(
+def create_deepthink_review_pipeline(
     owner: str,
     repo: str,
     pr_number: int,
     pr_details: dict,
     files: list[dict],
-    description: str = "",
-    push_eligible: bool = True,
 ) -> dict:
-    """Create a fix pipeline with CI verification.
+    """Create a review pipeline for the deepthink cron path.
 
-    Called from ``riptide.fixer._spawn_fix()`` when a fix session is spawned.
-
-    Pipeline:
-    1. probe → gather context at PR HEAD
-    2. judge → verify findings against current code
-    3. artisan → apply targeted edits
-    4. engine → run local tests + push
-    5. ci_verifier → poll GitHub CI, classify failures
-    6. scribe → post summary comment with CI results
+    Called from ``riptide.deepthink._spawn_deepthink()`` when the cron poller
+    decides a PR needs a deep-think review.
 
     Returns the created track dict with all workstreams staged.
     """
-    track_id = f"riptide-fix-{owner}-{repo}-{pr_number}"
+    track_id = f"riptide-review-{owner}-{repo}-{pr_number}"
 
     track = get_track(track_id)
     if not track:
         track = create_track(
             track_id,
-            name=f"Riptide Fix #{pr_number}",
-            phase="Fix",
+            name=f"Riptide Review #{pr_number}",
+            phase="DeepthinkReview",
             repos={repo: {"owner": owner, "pr": pr_number}},
         )
 
@@ -374,78 +352,135 @@ def create_fix_pipeline(
             "owner": owner,
             "repo": repo,
             "files": files,
-            "head_sha": head_sha,
         },
         acceptance={"output_exists": True},
         role="probe",
-        pipeline=["fetch_diff", "context_bundle", "review_findings"],
+        pipeline=["fetch_diff", "graphify", "context_bundle"],
     )
 
     create_workstream(
         track_id,
         "ws-2-judge",
-        inputs={
-            "context_path": f"/tmp/pr-{pr_number}-context.json",
-            "description": description,
-        },
+        inputs={"context_path": f"/tmp/pr-{pr_number}-context.json"},
         acceptance={"findings_valid": True},
         role="judge",
-        pipeline=["verify_findings", "classify_valid"],
+        pipeline=["diff_analyzer", "dedup", "score"],
     )
 
     create_workstream(
         track_id,
         "ws-3-artisan",
-        inputs={
-            "findings_path": "/tmp/findings.json",
-            "files": files,
-            "push_eligible": push_eligible,
-        },
-        acceptance={"edits_applied": True},
+        inputs={"findings_path": "/tmp/findings.json"},
+        acceptance={"diagram_created": True},
         role="artisan",
-        pipeline=["edit_files", "targeted_fixes"],
+        pipeline=["excalidraw", "upload"],
     )
 
     create_workstream(
         track_id,
         "ws-4-engine",
-        inputs={
-            "command": "run_tests_and_push",
-            "push_eligible": push_eligible,
-            "head_ref": pr_details.get("head", {}).get("ref", ""),
-        },
-        acceptance={"tests_passed": True, "pushed": True},
+        inputs={"command": "upload_excalidraw /tmp/review.excalidraw"},
+        acceptance={"uploaded": True},
         role="engine",
-        pipeline=["run_tests", "push_if_green"],
+        pipeline=["upload"],
     )
 
     create_workstream(
         track_id,
-        "ws-5-ci-verifier",
+        "ws-5-scribe",
         inputs={
             "pr_number": pr_number,
             "owner": owner,
             "repo": repo,
-            "timeout": 600,
-        },
-        acceptance={"ci_complete": True},
-        role="ci_verifier",
-        pipeline=["poll_ci", "classify_failures"],
-    )
-
-    create_workstream(
-        track_id,
-        "ws-6-scribe",
-        inputs={
-            "pr_number": pr_number,
-            "owner": owner,
-            "repo": repo,
-            "action": "post_fix_summary",
+            "action": "post_review",
             "head_sha": head_sha,
         },
         acceptance={"posted": True},
         role="scribe",
-        pipeline=["format_summary", "post_comment"],
+        pipeline=["assemble_review", "post_comment"],
+    )
+
+    return track
+
+
+def create_webhook_review_pipeline(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    pr_details: dict,
+    files: list[dict],
+) -> dict:
+    """Create a review pipeline for the on-demand webhook path.
+
+    Called from ``riptide.webhook.handle_issue_comment()`` (Route 2) when a
+    user comments ``@riptide-bot review`` on a PR.
+
+    Returns the created track dict with all workstreams staged.
+    """
+    track_id = f"riptide-webhook-review-{owner}-{repo}-{pr_number}"
+
+    track = get_track(track_id)
+    if not track:
+        track = create_track(
+            track_id,
+            name=f"Webhook Review #{pr_number}",
+            phase="WebhookReview",
+            repos={repo: {"owner": owner, "pr": pr_number}},
+        )
+
+    create_workstream(
+        track_id,
+        "ws-1-probe",
+        inputs={
+            "pr_number": pr_number,
+            "owner": owner,
+            "repo": repo,
+            "files": files,
+        },
+        acceptance={"output_exists": True},
+        role="probe",
+        pipeline=["fetch_diff", "graphify", "context_bundle"],
+    )
+
+    create_workstream(
+        track_id,
+        "ws-2-judge",
+        inputs={"context_path": f"/tmp/pr-{pr_number}-context.json"},
+        acceptance={"findings_valid": True},
+        role="judge",
+        pipeline=["diff_analyzer", "dedup", "score"],
+    )
+
+    create_workstream(
+        track_id,
+        "ws-3-artisan",
+        inputs={"findings_path": "/tmp/findings.json"},
+        acceptance={"diagram_created": True},
+        role="artisan",
+        pipeline=["excalidraw", "upload"],
+    )
+
+    create_workstream(
+        track_id,
+        "ws-4-engine",
+        inputs={"command": "upload_excalidraw /tmp/review.excalidraw"},
+        acceptance={"uploaded": True},
+        role="engine",
+        pipeline=["upload"],
+    )
+
+    create_workstream(
+        track_id,
+        "ws-5-scribe",
+        inputs={
+            "pr_number": pr_number,
+            "owner": owner,
+            "repo": repo,
+            "action": "post_review",
+        },
+        acceptance={"posted": True},
+        role="scribe",
+        pipeline=["assemble_review", "post_comment"],
     )
 
     return track
