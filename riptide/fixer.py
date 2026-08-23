@@ -208,7 +208,17 @@ def _spawn_fix(
     # Cross-session awareness: clean up stale jobs, then atomically reserve
     from riptide.state import StateStore
     state = StateStore()
-    state.cleanup_stale_pending()
+    # Graceful handling of concurrent cron jobs (SQLite lock contention)
+    for _retry in range(3):
+        try:
+            state.cleanup_stale_pending()
+            break
+        except Exception as e:
+            if "locked" in str(e).lower() and _retry < 2:
+                import time as _time
+                _time.sleep(2 * (_retry + 1))
+            else:
+                raise
     job_id = f"{name}-{head_sha[:12]}-{uuid.uuid4().hex[:12]}"
     if not state.reserve_job(job_id, pr_number, "t1", name):
         log.info(f"Skipping {owner}/{repo}#{pr_number} — fix already pending")
