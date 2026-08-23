@@ -165,16 +165,18 @@ def handle_review_command(
 
     try:
         spawned = _spawn_deepthink(owner, repo, pr_number, title, author, total_loc, head_sha)
+    except RuntimeError as e:
+        if "review already pending" in str(e):
+            log.info("Skipping %s/%s#%d — review already pending", owner, repo, pr_number)
+            return (
+                f"⏭️ **Already pending.** PR #{pr_number} already has a deep-think review in progress. "
+                f"Check back in a few minutes — the review will be posted when complete."
+            )
+        log.error("Failed to spawn deep-think: %s", e)
+        return f"⚠️ Failed to spawn deep-think review for #{pr_number}: {e}"
     except Exception as e:
         log.error("Failed to spawn deep-think: %s", e)
         return f"⚠️ Failed to spawn deep-think review for #{pr_number}: {e}"
-
-    if not spawned:
-        log.info("Skipping %s/%s#%d — review already pending", owner, repo, pr_number)
-        return (
-            f"⏭️ **Already pending.** PR #{pr_number} already has a deep-think review in progress. "
-            f"Check back in a few minutes — the review will be posted when complete."
-        )
 
     log.info("On-demand review spawned for %s/%s#%d by %s", owner, repo, pr_number, commenter)
     return (
@@ -239,7 +241,7 @@ def _spawn_deepthink(
     job_id = f"{name}-{head_sha[:12]}-{uuid.uuid4().hex[:12]}"
     if not state.reserve_job(job_id, pr_number, "t1", name):
         log.info(f"Skipping {owner}/{repo}#{pr_number} — review already pending")
-        return False  # Only this path returns False — all others raise
+        raise RuntimeError(f"Skipping {owner}/{repo}#{pr_number} — review already pending")
 
     try:
         # Pre-gather data in Python (cheaper than having the agent do it)
