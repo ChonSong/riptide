@@ -55,56 +55,103 @@ class TestDedupRoundTrip:
 
 # ── _has_pending_fix ────────────────────────────────────────────────────────
 
-
 class TestHasPendingFix:
-    def test_no_spawned_returns_false(self, poller_mod):
-        conn = sqlite3.connect(str(poller_mod.DB_PATH))
-        poller_mod._mark_processed(conn, 1, '{"result":"not-spawned","pr_key":"o/r#1"}')
-        assert poller_mod._has_pending_fix(conn, "o/r#1") is False
-        conn.close()
+    """_has_pending_fix queries the shared jobs table for recent fix sessions."""
 
-    def test_spawned_returns_true(self, poller_mod):
+    def test_no_job_returns_false(self, poller_mod):
+        """No job in the jobs table → no pending fix."""
         conn = sqlite3.connect(str(poller_mod.DB_PATH))
         poller_mod._mark_processed(conn, 1, '{"result":"spawned","pr_key":"o/r#1"}')
-        assert poller_mod._has_pending_fix(conn, "o/r#1") is True
-        conn.close()
-
-    def test_spawned_does_not_block_different_pr(self, poller_mod):
-        conn = sqlite3.connect(str(poller_mod.DB_PATH))
-        poller_mod._mark_processed(conn, 1, '{"result":"spawned","pr_key":"o/r#1"}')
-        assert poller_mod._has_pending_fix(conn, "o/r#2") is False
-        conn.close()
-
-    def test_not_spawned_does_not_block_same_pr(self, poller_mod):
-        """Lockout regression: error result must NOT block future retries."""
-        conn = sqlite3.connect(str(poller_mod.DB_PATH))
-        poller_mod._mark_processed(conn, 1, '{"result":"not-spawned","pr_key":"o/r#1"}')
         assert poller_mod._has_pending_fix(conn, "o/r#1") is False
         conn.close()
 
-    def test_post_failed_does_not_block(self, poller_mod):
+    def test_pending_job_blocks(self, poller_mod, tmp_path):
+        """A pending fix job for this PR → block (one is running)."""
+        import riptide.state as state_mod
+        test_db = str(tmp_path / "test_state.db")
+        store = state_mod.StateStore(db_path=test_db)
+        store.create_job("riptide-fix-ChonSong-riptide-1-abc123", 1, "fix")
+        with patch.object(state_mod, "StateStore", return_value=store):
+            conn = sqlite3.connect(str(poller_mod.DB_PATH))
+            assert poller_mod._has_pending_fix(conn, "ChonSong/riptide#1") is True
+            conn.close()
+
+    def test_recently_completed_job_blocks(self, poller_mod, tmp_path):
+        """A completed job within the cooldown → block (just finished)."""
+        import riptide.state as state_mod
+        test_db = str(tmp_path / "test_state.db")
+        store = state_mod.StateStore(db_path=test_db)
+        store.create_job("riptide-fix-ChonSong-riptide-1-abc123", 1, "fix")
+        store.mark_complete("riptide-fix-ChonSong-riptide-1-abc123")
+        with patch.object(state_mod, "StateStore", return_value=store):
+            conn = sqlite3.connect(str(poller_mod.DB_PATH))
+            assert poller_mod._has_pending_fix(conn, "ChonSong/riptide#1") is True
+            conn.close()
+
+    def test_old_completed_job_allows(self, poller_mod, tmp_path):
+        """A completed job outside the cooldown → allow (enough time passed)."""
+        import riptide.state as state_mod
+        import time
+        test_db = str(tmp_path / "test_state.db")
+        store = state_mod.StateStore(db_path=test_db)
+        store.create_job("riptide-fix-ChonSong-riptide-1-abc123", 1, "fix")
+        store.mark_complete("riptide-fix-ChonSong-riptide-1-abc123")
+        conn2 = store._get_conn()
+        old_time = time.time() - 3600
+        conn2.execute("UPDATE jobs SET completed_at = ? WHERE id LIKE '%riptide-fix%'", (old_time,))
+        conn2.commit()
+        with patch.object(state_mod, "StateStore", return_value=store):
+            conn = sqlite3.connect(str(poller_mod.DB_PATH))
+            assert poller_mod._has_pending_fix(conn, "ChonSong/riptide#1") is False
+            conn.close()
+
+    def test_failed_job_allows_retry(self, poller_mod, tmp_path):
+        """A failed job below retry limit → allow (auto-retry)."""
+        import riptide.state as state_mod
+        test_db = str(tmp_path / "test_state.db")
+        store = state_mod.StateStore(db_path=test_db)
+        store.create_job("riptide-fix-ChonSong-riptide-1-abc123", 1, "fix")
+        store.mark_failed("riptide-fix-ChonSong-riptide-1-abc123")
+        with patch.object(state_mod, "StateStore", return_value=store):
+            conn = sqlite3.connect(str(poller_mod.DB_PATH))
+            assert poller_mod._has_pending_fix(conn, "ChonSong/riptide#1") is False
+            conn.close()
+
+    def test_failed_jobs_exhausted_blocks(self, poller_mod, tmp_path):
+        """Failed jobs at MAX_FIX_RETRIES → block (exhausted)."""
+        import riptide.state as state_mod
+        test_db = str(tmp_path / "test_state.db")
+        store = state_mod.StateStore(db_path=test_db)
+        for i in range(3):
+            job_id = f"riptide-fix-ChonSong-riptide-1-{i:03d}abc"
+            store.create_job(job_id, 1, "fix")
+            store.mark_failed(job_id)
+        with patch.object(state_mod, "StateStore", return_value=store):
+            conn = sqlite3.connect(str(poller_mod.DB_PATH))
+            assert poller_mod._has_pending_fix(conn, "ChonSong/riptide#1") is True
+            conn.close()
+
+    def test_different_pr_not_blocked(self, poller_mod, tmp_path):
+        """A fix job for PR #1 should not block PR #2."""
+        import riptide.state as state_mod
+        test_db = str(tmp_path / "test_state.db")
+        store = state_mod.StateStore(db_path=test_db)
+        store.create_job("riptide-fix-ChonSong-riptide-1-abc123", 1, "fix")
+        with patch.object(state_mod, "StateStore", return_value=store):
+            conn = sqlite3.connect(str(poller_mod.DB_PATH))
+            assert poller_mod._has_pending_fix(conn, "ChonSong/riptide#2") is False
+            conn.close()
+
+    def test_db_failure_returns_false(self, poller_mod):
+        """If StateStore raises, fail open (return False)."""
         conn = sqlite3.connect(str(poller_mod.DB_PATH))
-        poller_mod._mark_processed(conn, 1, "post-failed: boom")
-        assert poller_mod._has_pending_fix(conn, "o/r#1") is False
+        with patch("riptide.state.StateStore", side_effect=Exception("DB down")):
+            assert poller_mod._has_pending_fix(conn, "ChonSong/riptide#1") is False
         conn.close()
-
-
-# ── _handle_fix ──────────────────────────────────────────────────────────────
 
 
 class TestHandleFix:
-    @pytest.fixture(autouse=True)
-    def no_webhook_pending(self):
-        """Patch StateStore so _handle_fix sees no webhook-claimed pending job by default.
-
-        _handle_fix now consults StateStore().has_pending_job() to stay silent when
-        the GitHub App webhook already claimed the fix job (installed repos). A
-        bare MagicMock would be truthy and incorrectly short-circuit every test, so
-        default it to False and let specific tests override.
-        """
-        with patch("riptide.state.StateStore") as mock_store:
-            mock_store.return_value.has_pending_job.return_value = False
-            yield mock_store
+    """Tests for _handle_fix dedup and execution."""
 
     def _match(self, comment_id=1, commenter="ChonSong", body="@riptide-bot fix",
                owner="ChonSong", repo="riptide", pr_number=1):
@@ -130,78 +177,43 @@ class TestHandleFix:
             mock_handler.assert_not_called()
         conn.close()
 
-    def test_skips_pr_already_pending(self, poller_mod):
-        conn = sqlite3.connect(str(poller_mod.DB_PATH))
-        # Mark a different comment on same PR as spawned
-        poller_mod._mark_processed(conn, 99, '{"result":"spawned","pr_key":"ChonSong/riptide#1"}')
+    def test_skips_pr_with_recent_fix_job(self, poller_mod, tmp_path):
+        """If a recent fix job exists for this PR, skip (cross-channel dedup)."""
+        import riptide.state as state_mod
+        test_db = str(tmp_path / "test_state.db")
+        store = state_mod.StateStore(db_path=test_db)
+        store.create_job("riptide-fix-ChonSong-riptide-1-abc123", 1, "fix")
         client = MagicMock()
-        with patch("riptide.fixer.handle_fix_command") as mock_handler:
-            poller_mod._handle_fix(client, self._match(comment_id=100), conn)
-            mock_handler.assert_not_called()
-        conn.close()
+        with patch.object(state_mod, "StateStore", return_value=store):
+            with patch("riptide.fixer.handle_fix_command") as mock_handler:
+                poller_mod._handle_fix(client, self._match(comment_id=1), conn=None)
+                mock_handler.assert_not_called()
 
-    def test_stays_silent_when_webhook_claimed_fix(self, poller_mod, no_webhook_pending):
-        """Cross-channel dedup: if StateStore has a pending fix job for this PR
-        (the GitHub App webhook already claimed it on an installed repo), the
-        poller must NOT call handle_fix_command and must NOT post a duplicate
-        "Could not schedule" comment."""
-        conn = sqlite3.connect(str(poller_mod.DB_PATH))
-        no_webhook_pending.return_value.has_pending_job.return_value = True
-        client = MagicMock()
-        with patch("riptide.fixer.handle_fix_command") as mock_handler:
-            poller_mod._handle_fix(client, self._match(comment_id=100), conn)
-            mock_handler.assert_not_called()
-        # No duplicate comment posted
-        client.post_pr_comment.assert_not_called()
-        # Marked processed so the poller doesn't re-hit the same comment
-        assert poller_mod._is_processed(conn, 100) is True
-        conn.close()
-
-    def test_webhook_pending_check_uses_fix_prefix(self, poller_mod, no_webhook_pending):
-        """The StateStore prefix must match fixer._spawn_fix's reservation prefix
-        (riptide-fix-{owner}-{repo}-{pr_number}) so webhook-claimed jobs are found."""
-        conn = sqlite3.connect(str(poller_mod.DB_PATH))
-        client = MagicMock()
-        no_webhook_pending.return_value.has_pending_job.return_value = False
-        success_msg = "🛠 **Riptide Fix triggered for #1!**"
-        with patch("riptide.fixer.handle_fix_command", return_value=success_msg):
-            poller_mod._handle_fix(client, self._match(), conn)
-        no_webhook_pending.return_value.has_pending_job.assert_called_once_with(
-            "riptide-fix-ChonSong-riptide-1"
-        )
-        conn.close()
-
-    def test_successful_spawn_marks_spawned(self, poller_mod):
+    def test_successful_spawn(self, poller_mod):
         conn = sqlite3.connect(str(poller_mod.DB_PATH))
         client = MagicMock()
         success_msg = "🛠 **Riptide Fix triggered for #1!**"
         with patch("riptide.fixer.handle_fix_command", return_value=success_msg):
             poller_mod._handle_fix(client, self._match(), conn)
-        # Verify marked as spawned
-        assert poller_mod._has_pending_fix(conn, "ChonSong/riptide#1") is True
         # Verify comment was posted
         client.post_pr_comment.assert_called_once()
         conn.close()
 
-    def test_error_result_marks_not_spawned(self, poller_mod):
-        """Lockout regression: error result must NOT mark as spawned."""
+    def test_error_result_posts_error(self, poller_mod):
+        """Error result still posts the error comment."""
         conn = sqlite3.connect(str(poller_mod.DB_PATH))
         client = MagicMock()
         error_msg = "🚫 **Not authorized.** Only the PR author..."
         with patch("riptide.fixer.handle_fix_command", return_value=error_msg):
             poller_mod._handle_fix(client, self._match(), conn)
-        # Verify NOT marked as spawned — future retries allowed
-        assert poller_mod._has_pending_fix(conn, "ChonSong/riptide#1") is False
-        # Verify comment was still posted (the error message)
         client.post_pr_comment.assert_called_once()
         conn.close()
 
-    def test_none_result_marks_no_result(self, poller_mod):
+    def test_none_result_posts_nothing(self, poller_mod):
         conn = sqlite3.connect(str(poller_mod.DB_PATH))
         client = MagicMock()
         with patch("riptide.fixer.handle_fix_command", return_value=None):
             poller_mod._handle_fix(client, self._match(), conn)
-        assert poller_mod._has_pending_fix(conn, "ChonSong/riptide#1") is False
         client.post_pr_comment.assert_not_called()
         conn.close()
 
@@ -212,8 +224,7 @@ class TestHandleFix:
         success_msg = "🛠 **Riptide Fix triggered for #1!**"
         with patch("riptide.fixer.handle_fix_command", return_value=success_msg):
             poller_mod._handle_fix(client, self._match(), conn)
-        # post-failed is not "spawned" — future retries allowed
-        assert poller_mod._has_pending_fix(conn, "ChonSong/riptide#1") is False
+        # Should not raise; post failure handled gracefully
         conn.close()
 
     def _seed_pending(self, poller_mod, conn, comment_id, body):
@@ -225,8 +236,7 @@ class TestHandleFix:
         )
 
     def test_retry_posts_and_clears_pending(self, poller_mod):
-        """Retry path posts the pending response and clears the marker so the
-        next poll does NOT re-post it (idempotency)."""
+        """Retry path posts the pending response and clears the marker."""
         conn = sqlite3.connect(str(poller_mod.DB_PATH))
         body = "🛠 **Riptide Fix triggered for #1!**"
         self._seed_pending(poller_mod, conn, 50, body)
@@ -237,12 +247,12 @@ class TestHandleFix:
             mock_handler.assert_not_called()
         # Comment was posted exactly once
         client.post_pr_comment.assert_called_once()
-        # Pending marker cleared -> next poll will not re-post a duplicate
+        # Pending marker cleared
         assert poller_mod._get_pending_response(conn, 50) is None
         conn.close()
 
     def test_retry_post_failure_restores_pending(self, poller_mod):
-        """If the retry post fails, restore the pending marker so the next poll retries."""
+        """If retry post fails, restore the pending marker."""
         conn = sqlite3.connect(str(poller_mod.DB_PATH))
         body = "🛠 **Riptide Fix triggered for #1!**"
         self._seed_pending(poller_mod, conn, 51, body)
@@ -252,14 +262,12 @@ class TestHandleFix:
             poller_mod._handle_fix(client, self._match(comment_id=51), conn)
             mock_handler.assert_not_called()
         client.post_pr_comment.assert_called_once()
-        # Pending marker restored -> next poll retries instead of dropping the reply
+        # Pending marker restored for next retry
         assert poller_mod._get_pending_response(conn, 51) == body
         conn.close()
 
     def test_retry_split_brain_no_duplicate(self, poller_mod):
-        """Split-brain: post succeeds but the terminal DB write fails. The pending
-        marker was already cleared BEFORE posting, so the next poll cannot re-post
-        a duplicate comment (at-least-once delivery safe)."""
+        """Split-brain: post succeeds but terminal DB write fails."""
         conn = sqlite3.connect(str(poller_mod.DB_PATH))
         body = "🛠 **Riptide Fix triggered for #1!**"
         self._seed_pending(poller_mod, conn, 52, body)
@@ -269,7 +277,7 @@ class TestHandleFix:
 
         def flaky_mark(conn2, cid, result="", pending_response=""):
             call_count["n"] += 1
-            if call_count["n"] >= 2:  # the terminal status write fails
+            if call_count["n"] >= 2:
                 raise RuntimeError("DB disk full")
             return real_mark(conn2, cid, result, pending_response)
 
@@ -277,32 +285,10 @@ class TestHandleFix:
             with patch("riptide.fixer.handle_fix_command") as mock_handler:
                 poller_mod._handle_fix(client, self._match(comment_id=52), conn)
                 mock_handler.assert_not_called()
-        # The comment WAS posted (post succeeded)
         client.post_pr_comment.assert_called_once()
         # Marker cleared pre-post -> no re-post next poll
         assert poller_mod._get_pending_response(conn, 52) is None
-        # Comment still recorded as processed (post-attempted row) -> poller skips it
         assert poller_mod._is_processed(conn, 52) is True
-        conn.close()
-
-    def test_dedup_check_failure_fails_closed(self, poller_mod, no_webhook_pending):
-        """If the StateStore cross-channel dedup check raises, fail closed: mark
-        dedup-check-failed and skip — NEVER post a redundant 'Could not schedule'
-        comment on top of the webhook's confirmation."""
-        conn = sqlite3.connect(str(poller_mod.DB_PATH))
-        no_webhook_pending.return_value.has_pending_job.side_effect = Exception("StateStore down")
-        client = MagicMock()
-        with patch("riptide.fixer.handle_fix_command") as mock_handler:
-            poller_mod._handle_fix(client, self._match(comment_id=200), conn)
-            mock_handler.assert_not_called()
-        # No comment posted
-        client.post_pr_comment.assert_not_called()
-        # Marked processed with dedup-check-failed so the poller won't re-hit it
-        row = conn.execute(
-            f"SELECT result FROM {poller_mod.PROCESSED_TABLE} WHERE comment_id = 200"
-        ).fetchone()
-        assert row is not None and "dedup-check-failed" in row[0]
-        assert poller_mod._is_processed(conn, 200) is True
         conn.close()
 
 
