@@ -428,11 +428,22 @@ class Companion:
                 external repos where the App is not installed — GhCliClient
                 via PAT, installation_id=None).
         """
+        # Self-heal OUTSIDE the semaphore: Ollama recovery can block for up to
+        # 30s (systemd restart timeout). Holding _semaphore during that would
+        # block all other PR events. Probe here, then pass result down.
+        from riptide.ollama_heal import heal as ollama_heal
+        ollama_healthy = True  # optimistically assume healthy
+        try:
+            ollama_healthy = ollama_heal(base_url=self.ollama_base) == 0
+        except Exception as e:
+            logger.warning("Ollama self-heal probe failed (non-fatal): %s", e)
+            ollama_healthy = True  # proceed with ELI5 even if probe fails
+
         if not self._semaphore.acquire(blocking=False):
             logger.warning("Busy, skipping %s/%s#%d", owner, repo, pr_number)
             return
         try:
-            self._execute(installation_id, owner, repo, pr_number, title, author, changed_files, webhook_received_at=webhook_received_at, client=client)
+            self._execute(installation_id, owner, repo, pr_number, title, author, changed_files, webhook_received_at=webhook_received_at, client=client, ollama_healthy=ollama_healthy)
         finally:
             self._semaphore.release()
 
@@ -527,7 +538,7 @@ class Companion:
             logger.error("SHA update failed: %s", e)
             return False
 
-    def _execute(self, installation_id, owner, repo, pr_number, title, author, changed_files, webhook_received_at=None, client=None):
+    def _execute(self, installation_id, owner, repo, pr_number, title, author, changed_files, webhook_received_at=None, client=None, ollama_healthy=True):
         """Execute the companion review flow.
 
         client: optional GitHub client override. When provided, this client
@@ -672,7 +683,7 @@ class Companion:
                 # Detect UI files for ProofShot section
                 ui_extensions = {'.css', '.scss', '.less', '.html', '.jsx', '.tsx', '.vue', '.svelte', '.astro'}
                 ui_files = [f for f in files if any(f.get("filename", "").endswith(ext) for ext in ui_extensions)]
-                eli5 = self._generate_eli5(title, files, is_delta=is_delta)
+                eli5 = self._generate_eli5(title, files, is_delta=is_delta, ollama_healthy=ollama_healthy)
 
                 body = self._format_comment(emoji, author, tldr, graph_context, eli5, ui_files,
                                             owner=owner, repo=repo, pr_number=pr_number,
@@ -758,7 +769,7 @@ class Companion:
                 return
 
             # Tier 2: LLM enrichment (ELI5), then PATCH the same comment in place
-            eli5 = self._generate_eli5(title, files, is_delta=is_delta)
+            eli5 = self._generate_eli5(title, files, is_delta=is_delta, ollama_healthy=ollama_healthy)
             enriched_body = self._format_comment(emoji, author, tldr, graph_context, eli5, ui_files,
                                                  owner=owner, repo=repo, pr_number=pr_number,
                                                  title=title, files=files, is_delta=is_delta,
@@ -772,7 +783,7 @@ class Companion:
                 logger.warning("Tier 2 enrichment failed for %s#%d (Tier 1 remains): %s", full_name, pr_number, e)
         else:
             # Legacy path (LLM fallback / deterministic disabled): single POST
-            eli5 = self._generate_eli5(title, files, is_delta=is_delta) if not self.enable_deterministic else None
+            eli5 = self._generate_eli5(title, files, is_delta=is_delta, ollama_healthy=ollama_healthy) if not self.enable_deterministic else None
             body = self._format_comment(emoji, author, tldr, graph_context, eli5, ui_files,
                                         owner=owner, repo=repo, pr_number=pr_number,
                                         title=title, files=files, is_delta=is_delta,
@@ -925,13 +936,8 @@ TLDR:"""
 
         return self._ollama_call(prompt)
 
-    def _generate_eli5(self, title, files, is_delta=False):
-        # Self-heal: probe Ollama and attempt recovery before skipping enrichment.
-        # If heal succeeds (exit 0), proceed with the Ollama call.
-        # If heal fails (exit 1 or 2), skip enrichment immediately (degradation).
-        from riptide.ollama_heal import heal
-
-        if heal(base_url=self.ollama_base) != 0:
+    def _generate_eli5(self, title, files, is_delta=False, ollama_healthy: Optional[bool] = True):
+        if not ollama_healthy:
             logger.warning("Ollama self-heal failed — skipping ELI5 enrichment")
             return None
 

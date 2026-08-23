@@ -45,10 +45,17 @@ def is_systemd_available() -> bool:
     )
 
 
-def is_systemd_service_loaded() -> bool:
-    """Check if the systemd user service exists and is loaded."""
+class SystemdStatus:
+    """Distinct outcomes for systemd service probing."""
+    HEALTHY = "healthy"       # service is enabled/static
+    ABSENT = "absent"         # unit file not found (FileNotFoundError)
+    DISABLED = "disabled"     # unit exists but not enabled (rc=1)
+    PROBE_FAILED = "probe_failed"  # systemctl unavailable or timed out
+
+def is_systemd_service_loaded() -> str:
+    """Check systemd service status. Returns SystemdStatus string."""
     if not is_systemd_available():
-        return False
+        return SystemdStatus.PROBE_FAILED
     try:
         result = subprocess.run(
             ["systemctl", "--user", "is-enabled", SYSTEMD_SERVICE],
@@ -56,10 +63,31 @@ def is_systemd_service_loaded() -> bool:
             text=True,
             timeout=5,
         )
+    except FileNotFoundError:
+        print("❌ systemctl not found", file=sys.stderr)
+        return SystemdStatus.ABSENT
     except subprocess.TimeoutExpired:
         print(f"❌ systemd probe timed out after 5s", file=sys.stderr)
-        return False
-    return result.returncode in (0, 3)  # 0=enabled, 3=static (both mean "loaded")
+        return SystemdStatus.PROBE_FAILED
+
+    if result.returncode == 0:
+        return SystemdStatus.HEALTHY
+    elif result.returncode == 3:
+        return SystemdStatus.HEALTHY  # static
+    elif result.returncode == 1:
+        # Check if unit exists at all
+        try:
+            check = subprocess.run(
+                ["systemctl", "--user", "cat", SYSTEMD_SERVICE],
+                capture_output=True, text=True, timeout=5,
+            )
+            if check.returncode != 0 or "No files found" in check.stdout:
+                return SystemdStatus.ABSENT
+        except Exception:
+            pass
+        return SystemdStatus.DISABLED
+    else:
+        return SystemdStatus.PROBE_FAILED
 
 
 def restart_ollama() -> bool:
@@ -83,15 +111,17 @@ def restart_ollama() -> bool:
 
 
 def wait_for_recovery(timeout: int = DEFAULT_TIMEOUT, base_url: str = OLLAMA_BASE_URL) -> bool:
-    """Poll Ollama until it responds or timeout expires."""
-    deadline = time.time() + timeout
+    """Poll Ollama until it responds or timeout expires. Uses monotonic clock."""
+    deadline = time.monotonic() + timeout
     attempt = 0
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         attempt += 1
         if is_healthy(base_url):
             print(f"✅ Ollama recovered after {attempt}s")
             return True
-        remaining = int(deadline - time.time())
+        remaining = int(deadline - time.monotonic())
+        if remaining <= 0:
+            break
         print(f"⏳ Waiting for Ollama... ({remaining}s remaining)")
         time.sleep(min(5, remaining))
     return False
@@ -106,20 +136,30 @@ def heal(wait_timeout: int = DEFAULT_TIMEOUT, base_url: str = OLLAMA_BASE_URL) -
 
     print(f"⚠️  Ollama is unreachable at {base_url}")
 
-    # 2. Is systemd available?
-    if is_systemd_available():
-        # 2a. systemd path: check service loaded → restart → wait
-        if not is_systemd_service_loaded():
-            print(f"❌ {SYSTEMD_SERVICE} not found in systemd user units", file=sys.stderr)
-            print("   Run: systemctl --user enable --now ollama.service", file=sys.stderr)
-            return 2
+    # 2. Probe systemd directly with a bounded timeout.
+    #    is_systemd_available() checks env vars, but we probe systemctl --user
+    #    directly for a more accurate picture.
+    service_status = is_systemd_service_loaded()
 
+    if service_status == SystemdStatus.ABSENT:
+        print(f"❌ {SYSTEMD_SERVICE} not found in systemd user units", file=sys.stderr)
+        print("   Run: systemctl --user enable --now ollama.service", file=sys.stderr)
+        return 2
+    elif service_status == SystemdStatus.DISABLED:
+        print(f"⚠️  {SYSTEMD_SERVICE} is installed but not enabled", file=sys.stderr)
+        print("   Run: systemctl --user enable --now ollama.service", file=sys.stderr)
+        # Attempt restart anyway — may still work
+        if not restart_ollama():
+            return 1
+    elif service_status == SystemdStatus.HEALTHY:
+        # Service is enabled but Ollama is down — restart it
         if not restart_ollama():
             return 1
     else:
-        # 2b. Docker / non-systemd path: check if process is alive via TCP probe
+        # PROBE_FAILED — systemctl unavailable or timed out.
+        # Fall back to Docker / non-systemd path:
         #     (Ollama may be running as a container or standalone process)
-        print("⚠️  systemd not available — skipping restart (Docker/non-systemd environment)")
+        print("⚠️  systemd probe failed — skipping restart (Docker/non-systemd environment)")
         # If we reach here, Ollama is down and we can't restart it.
         # Return 1 (down, couldn't restart) rather than 2 (systemd issue)
         return 1
