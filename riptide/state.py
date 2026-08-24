@@ -15,7 +15,30 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+
 log = logging.getLogger("riptide.state")
+
+# ── Constants ────────────────────────────────────────────────────────────────
+
+# Deliveries stuck in 'processing' longer than this are considered stale
+# (crashed webhook) and become eligible for re-reservation.
+DELIVERY_STALE_TTL = 300  # 5 minutes
+# Fast path: webhook handler — low latency matters, GitHub has 10s timeout
+retry_db_fast = retry(
+    retry=retry_if_exception_type(sqlite3.OperationalError),
+    wait=wait_exponential(multiplier=0.2, min=0.2, max=1.0),
+    stop=stop_after_attempt(3),
+    reraise=True,
+)
+
+# Slow path: cron jobs / background cleanup — can afford longer waits
+retry_db_background = retry(
+    retry=retry_if_exception_type(sqlite3.OperationalError),
+    wait=wait_exponential(multiplier=1.0, min=2.0, max=10.0),
+    stop=stop_after_attempt(5),
+    reraise=True,
+)
 
 DEFAULT_DB_PATH = os.environ.get(
     "RIPTIDE_STATE_DB",
@@ -45,7 +68,7 @@ class StateStore:
       and stable across timezones. Consumers must parse with datetime.fromisoformat().
     """
 
-    SCHEMA_VERSION = 6
+    SCHEMA_VERSION = 7
 
     def __init__(self, db_path: str = DEFAULT_DB_PATH):
         self.db_path = db_path
@@ -94,7 +117,9 @@ class StateStore:
         conn.execute(
             """CREATE TABLE IF NOT EXISTS deliveries (
                 delivery_id TEXT PRIMARY KEY,
-                received_at REAL
+                received_at REAL,
+                status TEXT NOT NULL DEFAULT 'processing',
+                completed_at REAL
             )"""
         )
         # v2: replaces poller's metadata.db
@@ -144,6 +169,26 @@ class StateStore:
             )"""
         )
 
+        # v7: deliveries status — track processing/done/failed so crashed webhooks
+        # don't leave permanent tombstones that block retries forever.
+        if version < 7:
+            try:
+                conn.execute(
+                    "ALTER TABLE deliveries ADD COLUMN status TEXT NOT NULL DEFAULT 'processing'"
+                )
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e):
+                    raise
+            try:
+                conn.execute(
+                    "ALTER TABLE deliveries ADD COLUMN completed_at REAL"
+                )
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e):
+                    raise
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_deliveries_status ON deliveries (status)"
+            )
         # v6: tier1_comment_id — the canonical Tier-1 comment thread per PR so
         # re-syncs PATCH in place instead of re-POSTing, and later stages /
         # commands can find the thread. ALTER is required for DBs created at
@@ -216,21 +261,65 @@ class StateStore:
 
     # ── Deliveries (Companion dedup) ───────────────────────────────────────────
 
+    @retry_db_fast
     def reserve_delivery(self, delivery_id: str) -> bool:
-        """Try to reserve a delivery ID. Returns False if already processed."""
+        """Try to reserve a delivery ID. Returns False if already processed.
+
+        State machine: processing → done | failed
+        If a delivery is stuck in 'processing' (crashed webhook), it becomes
+        eligible for re-reservation after STALE_TTL seconds.
+        """
         conn = self._get_conn()
+        now = time.time()
         try:
             conn.execute(
-                "INSERT INTO deliveries (delivery_id, received_at) VALUES (?, ?)",
-                (delivery_id, time.time()),
+                "INSERT INTO deliveries (delivery_id, received_at, status) VALUES (?, ?, 'processing')",
+                (delivery_id, now),
             )
             conn.commit()
             return True
         except sqlite3.IntegrityError:
+            # Already exists — check if stale (crashed webhook)
+            row = conn.execute(
+                "SELECT status, received_at FROM deliveries WHERE delivery_id = ?",
+                (delivery_id,),
+            ).fetchone()
+            if row and row[0] == 'processing' and (now - row[1]) > DELIVERY_STALE_TTL:
+                # Stale — re-reserve by updating received_at
+                conn.execute(
+                    "UPDATE deliveries SET received_at = ?, status = 'processing' WHERE delivery_id = ?",
+                    (now, delivery_id),
+                )
+                conn.commit()
+                return True
             return False
+        except sqlite3.OperationalError:
+            conn.rollback()
+            raise
+
+    @retry_db_fast
+    def mark_delivery_done(self, delivery_id: str):
+        """Mark a delivery as successfully processed."""
+        conn = self._get_conn()
+        conn.execute(
+            "UPDATE deliveries SET status = 'done', completed_at = ? WHERE delivery_id = ?",
+            (time.time(), delivery_id),
+        )
+        conn.commit()
+
+    @retry_db_fast
+    def mark_delivery_failed(self, delivery_id: str):
+        """Mark a delivery as failed."""
+        conn = self._get_conn()
+        conn.execute(
+            "UPDATE deliveries SET status = 'failed', completed_at = ? WHERE delivery_id = ?",
+            (time.time(), delivery_id),
+        )
+        conn.commit()
 
     # ── Jobs (Deepthink / Fixer tracking) ─────────────────────────────────────
 
+    @retry_db_fast
     def create_job(self, job_id: str, pr_number: int, tier: str):
         conn = self._get_conn()
         conn.execute(
@@ -239,6 +328,7 @@ class StateStore:
         )
         conn.commit()
 
+    @retry_db_background
     def mark_complete(self, job_id: str):
         conn = self._get_conn()
         conn.execute(
@@ -247,6 +337,7 @@ class StateStore:
         )
         conn.commit()
 
+    @retry_db_background
     def mark_failed(self, job_id: str):
         conn = self._get_conn()
         conn.execute(
@@ -269,6 +360,7 @@ class StateStore:
         ).fetchone()
         return row[0] > 0
 
+    @retry_db_background
     def reserve_job(self, job_id: str, pr_number: int, tier: str, name_prefix: str) -> bool:
         conn = self._get_conn()
         try:
@@ -303,6 +395,24 @@ class StateStore:
             conn.execute(
                 "UPDATE jobs SET status='failed', completed_at=? WHERE status='pending' AND created_at < ?",
                 (time.time(), cutoff),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    def cleanup_old_deliveries(self, max_age_seconds: int = 86400):
+        """Remove completed/failed deliveries older than max_age_seconds.
+
+        Prevents unbounded growth of the deliveries table. Runs periodically
+        from the poller's cleanup loop.
+        """
+        conn = self._get_conn()
+        cutoff = time.time() - max_age_seconds
+        try:
+            conn.execute(
+                "DELETE FROM deliveries WHERE status != 'processing' AND received_at < ?",
+                (cutoff,),
             )
             conn.commit()
         except Exception:
