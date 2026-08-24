@@ -62,6 +62,54 @@ def pre_generate_diagram(data: dict, pr_metadata: dict) -> Optional[str]:
         ],
     }
 
+    # Build file tree from files_changed
+    files_changed = data.get("files_changed", [])
+    file_tree_lines = []
+    changed_file_names = []
+    for f in files_changed:
+        fn = f.get("filename", "?")
+        add = f.get("additions", 0)
+        del_ = f.get("deletions", 0)
+        status = f.get("status", "modified")
+        if status == "added":
+            file_tree_lines.append(f"  + {fn} ({add} LOC)")
+        elif status == "removed":
+            file_tree_lines.append(f"  - {fn} ({del_} LOC)")
+        else:
+            file_tree_lines.append(f"  M {fn} (+{add}/-{del_})")
+        changed_file_names.append(fn)
+    file_tree = "\n".join(file_tree_lines) if file_tree_lines else None
+
+    # Build repo tree string
+    repo_tree_raw = data.get("repo_tree", [])
+    repo_tree = "\n".join(repo_tree_raw) if repo_tree_raw else None
+
+    # Auto-generate human-readable narrative
+    title = pr_metadata.get("title", "")
+    total_loc = pr_metadata.get("total_loc", 0)
+    narr_parts = []
+    if title:
+        narr_parts.append(f"PR: {title}")
+    if total_loc:
+        narr_parts.append(f"Changes: {total_loc} LOC in {len(files_changed)} files.")
+    if communities:
+        narr_parts.append(
+            f"Graphify found {len(communities)} code communities "
+            f"and {len(god_nodes)} architectural hubs."
+        )
+    human_narrative = " ".join(narr_parts) if narr_parts else None
+
+    # Build distance map from graphify
+    repo_path = os.environ.get(
+        "GRAPHIFY_CWD",
+        f"/home/sc/workspace/{pr_metadata.get('repo', 'hermes-webui-extensions')}",
+    )
+    distance_map = {}
+    try:
+        distance_map = build_distance_map(repo_path, changed_file_names)
+    except Exception as e:
+        log.warning(f"Distance map failed for PR #{pr_metadata.get('number')}: {e}")
+
     # Use TemporaryDirectory so cleanup happens automatically on success/failure
     with tempfile.TemporaryDirectory(prefix=f"riptide-pr{pr_metadata.get('number')}-pre-") as tmp_dir:
         excalidraw_path = Path(tmp_dir) / "diagram.excalidraw"
@@ -70,12 +118,16 @@ def pre_generate_diagram(data: dict, pr_metadata: dict) -> Optional[str]:
             render_review(
                 pr_data={
                     "number": pr_metadata.get("number", 0),
-                    "title": pr_metadata.get("title", ""),
+                    "title": title,
                     "repo": f"{pr_metadata.get('owner')}/{pr_metadata.get('repo')}",
                     "author": pr_metadata.get("author", ""),
-                    "loc": pr_metadata.get("total_loc", 0),
+                    "loc": total_loc,
                 },
                 graph_data=graph_data,
+                file_tree=file_tree or "",
+                repo_tree=repo_tree or "",
+                human_narrative=human_narrative or "",
+                distance_map=distance_map or {},
                 output_path=str(excalidraw_path),
             )
             url = upload_excalidraw(str(excalidraw_path))
