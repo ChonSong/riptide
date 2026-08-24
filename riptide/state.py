@@ -296,11 +296,18 @@ class StateStore:
     def cleanup_stale_pending(self, max_age_seconds: int = 7200):
         conn = self._get_conn()
         cutoff = time.time() - max_age_seconds
-        conn.execute(
-            "UPDATE jobs SET status='failed', completed_at=? WHERE status='pending' AND created_at < ?",
-            (time.time(), cutoff),
-        )
-        conn.commit()
+        # Use BEGIN IMMEDIATE to acquire EXCLUSIVE lock immediately,
+        # preventing deadlock when multiple cron jobs run concurrently.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(
+                "UPDATE jobs SET status='failed', completed_at=? WHERE status='pending' AND created_at < ?",
+                (time.time(), cutoff),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
     def get_job_status(self, pr_number: int) -> Optional[dict]:
         conn = self._get_conn()
