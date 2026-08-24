@@ -37,8 +37,21 @@ from .labeler import Labeler
 # Companion is optional — silently unavailable if RIPTIDE_COMPANION_REPOS is unset
 _companion: "Companion | Literal[False] | None" = None
 
+# gh CLI client for repos without App installation (PAT-based)
+_gh_cli_client = None
+
 # Labeler is optional — silently unavailable if RIPTIDE_LABELER_ENABLED != "1"
 _labeler = None
+
+# Repos the companion should run on, even without App installation
+WATCHED_REPOS = [
+    r.strip()
+    for r in os.environ.get(
+        "RIPTIDE_WATCHED_REPOS",
+        "ChonSong/riptide,ChonSong/hermes-webui,ChonSong/hermes-webui-extensions,ChonSong/seans-reporepo,ChonSong/pr-review,ChonSong/everything-claude-code,codeovertcp/gto-wizard-clone-v2,nesquena/hermes-webui",
+    ).split(",")
+    if r.strip()
+]
 
 
 def _reconcile_labels(github, installation_id, owner, repo, pr_number, new_labels, labeler):
@@ -76,6 +89,22 @@ def get_labeler():
             log.warning("Labeler not available: %s", e)
             _labeler = False
     return _labeler if _labeler else None
+
+
+def get_gh_cli_client():
+    """Get or create a gh CLI client for PAT-based API access.
+
+    Used as a fallback when the GitHub App is not installed on a repo.
+    """
+    global _gh_cli_client
+    if _gh_cli_client is None:
+        try:
+            from .gh_cli_client import make_gh_cli_client
+            _gh_cli_client = make_gh_cli_client()
+        except Exception as e:
+            log.warning("gh CLI client not available: %s", e)
+            _gh_cli_client = False
+    return _gh_cli_client if _gh_cli_client else None
 
 
 def get_companion():
@@ -147,6 +176,41 @@ async def health_check():
     """Return server health status for monitoring / tunnel-watchdog."""
     return {"status": "ok", "app": "riptide"}
 
+
+@app.get("/metrics")
+async def metrics_endpoint():
+    """Prometheus-compatible /metrics endpoint for scraping."""
+    from riptide.metrics import get_metrics_payload, get_metrics_content_type
+    return Response(content=get_metrics_payload(), media_type=get_metrics_content_type())
+
+
+# ── Trace context (contextvars + structlog) ───────────────────────────────────
+
+import structlog
+import contextvars
+
+# Context variable for delivery_id — propagates through threads and async tasks
+_delivery_id_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("delivery_id", default=None)
+
+logger = structlog.get_logger("riptide")
+
+
+def bind_trace_context(delivery_id: str, **extra):
+    """Bind delivery_id and any extra context to the current execution context.
+
+    This propagates to all child threads and async tasks within the same
+    contextvars.Context. For cross-process jumps (Hermes cron), the
+    delivery_id is embedded in the prompt.
+    """
+    _delivery_id_var.set(delivery_id)
+    structlog.contextvars.bind_contextvars(delivery_id=delivery_id, **extra)
+
+
+def get_delivery_id() -> Optional[str]:
+    """Return the delivery_id bound to the current context, if any."""
+    return _delivery_id_var.get()
+
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 GITHUB_APP_ID = int(os.environ.get("GITHUB_APP_ID", "4262983"))
@@ -184,7 +248,8 @@ async def github_webhook(request: Request) -> Response:
     delivery_id = request.headers.get("x-github-delivery", "unknown")
 
     # Idempotency: drop duplicate deliveries before expensive processing
-    if not _get_state_store().reserve_delivery(delivery_id):
+    state = _get_state_store()
+    if not state.reserve_delivery(delivery_id):
         log.info(f"[{delivery_id}] Duplicate delivery dropped")
         return Response(status_code=200)
 
@@ -195,19 +260,27 @@ async def github_webhook(request: Request) -> Response:
     payload = json.loads(body)
     log.info(f"[{delivery_id}] {event} event received")
 
+    # ── Bind trace context for all downstream processing ──────────────────────
+    # This propagates delivery_id through structlog automatically.
+    # Worker threads spawned via contextvars.copy_context().run() inherit this.
+    bind_trace_context(delivery_id, event=event, github_event=event)
+
     try:
         if event == "pull_request":
-            return await handle_pull_request(payload, delivery_id)
+            result = await handle_pull_request(payload, delivery_id)
         elif event == "issue_comment":
-            return await handle_issue_comment(payload, delivery_id)
+            result = await handle_issue_comment(payload, delivery_id)
         elif event in ("installation", "installation_repositories"):
-            return await handle_installation(payload, event, delivery_id)
+            result = await handle_installation(payload, event, delivery_id)
         else:
             log.info(f"[{delivery_id}] Unhandled event: {event}")
-            return Response(status_code=200)
+            result = Response(status_code=200)
+        state.mark_delivery_done(delivery_id)
+        return result
     except Exception as e:
+        state.mark_delivery_failed(delivery_id)
         log.error(
-            f"[{delivery_id}] Error handling {event}: {e}\n{traceback.format_exc()}"
+            f"[{delivery_id}] Error handling {event}: {type(e).__name__}: {e}\n{traceback.format_exc()}"
         )
         # Return 200 to prevent GitHub retry storms on our errors
         return Response(status_code=200)
@@ -226,12 +299,27 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
     pr_number = pr.get("number")
     installation_id = installation.get("id")
 
+    # ── Fallback: use gh CLI client for repos without App installation ───────
+    # When the GitHub App isn't installed, installation_id is None but we can
+    # still act on watched repos via PAT-authenticated gh CLI.
+    gh_cli = None
+    using_gh_cli_fallback = False
     if not installation_id:
-        log.info(f"[{delivery_id}] No installation ID, skipping")
-        return Response(status_code=200)
+        if repo_full in WATCHED_REPOS:
+            gh_cli = get_gh_cli_client()
+            if gh_cli:
+                installation_id = None  # gh CLI ignores this param
+                using_gh_cli_fallback = True
+                log.info(f"[{delivery_id}] No installation ID for {repo_full} — using gh CLI fallback")
+            else:
+                log.info(f"[{delivery_id}] No installation ID for {repo_full} and gh CLI unavailable, skipping")
+                return Response(status_code=200)
+        else:
+            log.info(f"[{delivery_id}] No installation ID for {repo_full} (not in WATCHED_REPOS), skipping")
+            return Response(status_code=200)
 
     log.info(
-        f"[{delivery_id}] PR {action}: {repo_full}#{pr_number}"
+        f"[{delivery_id}] PR {action}: {repo_full}#{pr_number} (gh_cli_fallback={using_gh_cli_fallback})"
     )
 
     # Rate limit: skip 'synchronize' if one happened recently for this PR
@@ -244,22 +332,31 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
     if action in ("opened", "reopened", "synchronize"):
         companion = get_companion()
         github = github_client() if GITHUB_PRIVATE_KEY_PATH else None
-        if companion and companion.is_active_for(owner, repo_name):
+        # When using gh CLI fallback, bypass is_active_for() check since
+        # WATCHED_REPOS was already verified at the webhook level.
+        if companion and (using_gh_cli_fallback or companion.is_active_for(owner, repo_name)):
+            # Use gh CLI client when App is not installed (fallback mode)
+            # gh_cli is already assigned from the fallback check above
+            active_github = gh_cli if using_gh_cli_fallback else github
             from threading import Thread
 
             # Fetch PR files + head SHA (shared by companion flow and T0 fallback)
             files = []
             head_sha = ""
-            if github:
+            if active_github:
                 try:
-                    files = github.get_pr_files(installation_id, owner, repo_name, pr_number)
-                    pr_detail = github.get_pr_details(installation_id, owner, repo_name, pr_number)
+                    files = active_github.get_pr_files(installation_id, owner, repo_name, pr_number)
+                    pr_detail = active_github.get_pr_details(installation_id, owner, repo_name, pr_number)
                     head_sha = pr_detail.get("head", {}).get("sha", "")
                 except Exception as e:
                     log.warning(f"[{delivery_id}] Could not fetch PR files: {e}")
 
             title = pr.get("title", f"PR #{pr_number}")
             author = pr.get("user", {}).get("login", "unknown")
+
+            # Pass the gh_cli client to companion.run_for_pr() via client override
+            # so all API calls use the PAT-based client when App isn't installed.
+            companion_client = active_github if using_gh_cli_fallback else None
 
             if os.environ.get("RIPTIDE_T0_FALLBACK", "").lower() in ("1", "true", "yes"):
                 # Legacy T0 dispatcher (opt-in fallback; default is companion flow)
@@ -303,6 +400,7 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
                         companion.run_for_pr(
                             installation_id, owner, repo_name, pr_number,
                             title, author, files,
+                            client=gh_cli if using_gh_cli_fallback else None,
                         )
                     except Exception as e:
                         log.error(
@@ -317,7 +415,7 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
                 )
                 t.start()
                 log.info(
-                    f"[{delivery_id}] Companion deterministic flow spawned for {repo_full}#{pr_number}"
+                    f"[{delivery_id}] Companion deterministic flow spawned for {repo_full}#{pr_number} (gh_cli_fallback={using_gh_cli_fallback})"
                 )
 
             # Also spawn labeler thread (non-blocking)
@@ -442,7 +540,8 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
             try:
                 client = github_client()
                 result = handle_review_command(
-                    client, installation_id, owner, repo_name, pr_number, commenter
+                    client, installation_id, owner, repo_name, pr_number, commenter,
+                    delivery_id=delivery_id,
                 )
                 if result:
                     client.post_pr_comment(
@@ -462,7 +561,8 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
                 client = github_client()
                 description = FIX_RE.search(body).group(1).strip()
                 result = handle_fix_command(
-                    client, installation_id, owner, repo_name, pr_number, commenter, description
+                    client, installation_id, owner, repo_name, pr_number, commenter, description,
+                    delivery_id=delivery_id,
                 )
                 if result:
                     client.post_pr_comment(
