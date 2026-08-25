@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -273,16 +274,16 @@ class Probe:
                 test_files.append(fname)
             elif fname.endswith(".py") and not fname.startswith((".github/", "scripts/", "docs/")):
                 source_files.append(fname)
+        # Derive test stems by removing test prefixes/suffixes
+        test_stems = {
+            tf.replace("tests/", "").replace(".py", "").removeprefix("test_").removesuffix("_test")
+            for tf in test_files
+        }
         # Source files without test changes
         untested = []
         for src in source_files:
-            stem = src.replace("/", ".").removesuffix(".py")
-            # Check if any test file matches the source
-            has_test = any(
-                stem.split(".")[-1] in tf or tf.replace("tests/", "").replace(".py", "") in stem
-                for tf in test_files
-            )
-            if not has_test:
+            stem = src.replace("/", ".").removesuffix(".py").split(".")[-1]
+            if stem not in test_stems:
                 untested.append(src)
         return {
             "source_files": source_files,
@@ -296,7 +297,6 @@ class Probe:
         body = pr_data.get("body", "") or ""
         body_stripped = body.strip()
         # Issue references (#123, GH-123, or full URLs)
-        import re
         issue_refs = re.findall(r"(?:#|GH-|issues/)(\d+)", body_stripped)
         return {
             "has_body": len(body_stripped) > 20,
@@ -310,7 +310,6 @@ class Probe:
 
     def _check_commit_hygiene(self) -> dict:
         """Check commit messages against Conventional Commits."""
-        import re
         result = subprocess.run(
             ["gh", "pr", "view", str(self.pr), "--repo", f"{self.owner}/{self.repo}",
              "--json", "commits"],
