@@ -29,11 +29,13 @@ import time
 import uuid
 from datetime import datetime, timedelta
 
+import structlog
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
-log = logging.getLogger("riptide.fixer")
+log = structlog.get_logger("riptide.fixer")
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -62,6 +64,7 @@ def handle_fix_command(
     pr_number: int,
     commenter: str,
     description: str = "",
+    delivery_id: str = "",
 ) -> str | None:
     """Handle @riptide-bot fix command — spawn an on-demand fix session.
 
@@ -71,7 +74,20 @@ def handle_fix_command(
     message (or error message).
 
     description: optional free-text after `fix` (already stripped).
+    delivery_id: trace ID from the originating webhook event (for log correlation).
     """
+    # ── Structlog trace binding ───────────────────────────────────────────────
+    # If delivery_id is provided (from webhook), bind it so all downstream
+    # log lines automatically include it. This enables end-to-end tracing
+    # from webhook → fixer → Hermes cron → subagent.
+    if delivery_id:
+        structlog.contextvars.bind_contextvars(
+            delivery_id=delivery_id,
+            worker="fixer",
+            pr=f"{owner}/{repo}#{pr_number}",
+        )
+    log = structlog.get_logger("riptide.fixer")
+
     try:
         pr_details = client.get_pr_details(installation_id, owner, repo, pr_number)
     except Exception as e:
@@ -128,6 +144,8 @@ def handle_fix_command(
             head_ref=head_ref,
             description=description.strip(),
             push_eligible=push_eligible,
+            client=client,
+            installation_id=installation_id,
         )
     except Exception as e:
         log.error("Failed to spawn fix: %s", e)
@@ -193,6 +211,8 @@ def _spawn_fix(
     head_ref: str,
     description: str,
     push_eligible: bool,
+    client=None,
+    installation_id: int | None = None,
 ) -> bool:
     """Spawn a Hermes cron session that edits, commits, and pushes the fix.
 
@@ -208,13 +228,50 @@ def _spawn_fix(
     # Cross-session awareness: clean up stale jobs, then atomically reserve
     from riptide.state import StateStore
     state = StateStore()
-    state.cleanup_stale_pending()
+    # Graceful handling of concurrent cron jobs (SQLite lock contention)
+    for _retry in range(3):
+        try:
+            state.cleanup_stale_pending()
+            break
+        except Exception as e:
+            if "locked" in str(e).lower() and _retry < 2:
+                import time as _time
+                _time.sleep(2 * (_retry + 1))
+            else:
+                raise
     job_id = f"{name}-{head_sha[:12]}-{uuid.uuid4().hex[:12]}"
     if not state.reserve_job(job_id, pr_number, "t1", name):
         log.info(f"Skipping {owner}/{repo}#{pr_number} — fix already pending")
         return False
 
     try:
+        # Create the Conductor fix pipeline (track + workstreams)
+        from riptide.pipeline.conductor import create_fix_pipeline
+        pr_details = {
+            "title": pr_title,
+            "author": {"login": pr_author},
+            "head": {"sha": head_sha, "ref": head_ref},
+        }
+        # Fetch PR files for the pipeline
+        files = []
+        if client is not None and installation_id is not None:
+            try:
+                files = client.get_pr_files(installation_id, owner, repo, pr_number)
+            except Exception as e:
+                log.warning(f"Failed to fetch PR files for fix pipeline: {e}")
+                files = []
+
+        track = create_fix_pipeline(
+            owner=owner,
+            repo=repo,
+            pr_number=pr_number,
+            pr_details=pr_details,
+            files=files,
+            description=description,
+            push_eligible=push_eligible,
+        )
+        log.info(f"Conductor fix pipeline created for {owner}/{repo}#{pr_number}: {track.get('name', '?')}")
+
         prompt = _build_fix_prompt(
             owner=owner,
             repo=repo,
@@ -227,6 +284,7 @@ def _spawn_fix(
             description=description,
             push_eligible=push_eligible,
             job_id=job_id,
+            track_id=track.get("id", ""),
         )
     except Exception as e:
         state.mark_failed(job_id)
@@ -288,6 +346,7 @@ def _build_fix_prompt(
     description: str,
     push_eligible: bool,
     job_id: str,
+    track_id: str = "",
 ) -> str:
     """Build the orchestrator prompt for the spawned fix session.
 
@@ -307,7 +366,8 @@ def _build_fix_prompt(
 2. git commit with a Conventional Commit message (fix(scope): ...).
 3. Push to the PR branch: `git push origin HEAD:{head_ref}`
    (gh's credential helper authenticates this as ChonSong — no extra setup).
-4. NEVER force-push. NEVER rewrite pushed history."""
+4. NEVER force-push. NEVER rewrite pushed history.
+5. CI verification (see below) — do NOT mark complete until CI is green."""
         if push_eligible
         else """## Push (NOT authorized — fork or foreign repo)
 Do NOT push. Instead post a PR comment containing the full patch

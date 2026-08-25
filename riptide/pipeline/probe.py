@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -46,6 +47,9 @@ class Probe:
         # 6. Extract key facts
         key_facts = self._extract_key_facts(diff_report, bundle)
         
+        # 7. Cleanliness signals (new)
+        cleanliness = self._gather_cleanliness_signals(pr_data, files)
+        
         return {
             "pr_data": pr_data,
             "diff_report": diff_report,
@@ -54,6 +58,7 @@ class Probe:
             "already_reviewed": already_reviewed,
             "previous_findings": previous_findings,
             "key_facts": key_facts,
+            "cleanliness": cleanliness,
         }
     
     def _get_pr_data(self) -> dict:
@@ -156,4 +161,225 @@ class Probe:
             "security_findings": len([f for f in diff_report.get("findings", []) if f.get("severity") == "critical"]),
             "complexity_findings": len([f for f in diff_report.get("findings", []) if f.get("severity") == "warning"]),
             "total_loc": agg.get("total_loc", 0),
+        }
+
+    def _gather_cleanliness_signals(self, pr_data: dict, files: list[dict]) -> dict:
+        """Gather cleanliness signals: merge conflicts, related PRs, test coverage, description quality.
+
+        All signals are gathered via `gh` CLI for deterministic, structured output.
+        """
+        # Merge conflict status
+        mergeable = self._get_mergeable_status()
+
+        # Related open PRs touching same files
+        related_prs = self._get_related_prs(files)
+
+        # Test coverage: source files changed vs test files changed
+        test_coverage = self._check_test_coverage(files)
+
+        # PR description quality
+        description_quality = self._check_description_quality(pr_data)
+
+        # Commit hygiene
+        commit_hygiene = self._check_commit_hygiene()
+
+        # PR staleness
+        staleness = self._check_staleness(pr_data)
+
+        # CI pre-check
+        ci_precheck = self._get_ci_precheck()
+
+        return {
+            "mergeable": mergeable,
+            "related_prs": related_prs,
+            "test_coverage": test_coverage,
+            "description_quality": description_quality,
+            "commit_hygiene": commit_hygiene,
+            "staleness": staleness,
+            "ci_precheck": ci_precheck,
+        }
+
+    def _get_mergeable_status(self) -> dict:
+        """Check if PR has merge conflicts."""
+        result = subprocess.run(
+            ["gh", "pr", "view", str(self.pr), "--repo", f"{self.owner}/{self.repo}",
+             "--json", "mergeable,mergeStateStatus"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            return {"mergeable": "unknown", "status": "unknown"}
+        data = json.loads(result.stdout)
+        return {
+            "mergeable": data.get("mergeable", "unknown"),
+            "status": data.get("mergeStateStatus", "unknown"),
+        }
+
+    def _get_related_prs(self, files: list[dict]) -> list[dict]:
+        """Find other open PRs touching the same files."""
+        if not files:
+            return []
+        # Get filenames for matching
+        filenames = [f.get("filename", "") for f in files if f.get("filename")]
+        if not filenames:
+            return []
+        # List open PRs (excluding this one) — gh pr list doesn't support --json files
+        result = subprocess.run(
+            ["gh", "pr", "list", "--state", "open", "--repo", f"{self.owner}/{self.repo}",
+             "--json", "number,title,author"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            return []
+        try:
+            all_prs = json.loads(result.stdout)
+        except (json.JSONDecodeError, ValueError):
+            return []
+        related = []
+        for pr in all_prs:
+            pr_number = pr.get("number", 0)
+            if pr_number == self.pr:
+                continue
+            # Fetch files for each PR individually
+            pr_files_result = subprocess.run(
+                ["gh", "pr", "view", str(pr_number), "--repo", f"{self.owner}/{self.repo}",
+                 "--json", "files"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if pr_files_result.returncode != 0:
+                continue
+            try:
+                pr_files_data = json.loads(pr_files_result.stdout)
+                pr_files = [f.get("filename", "") for f in pr_files_data.get("files", [])]
+            except (json.JSONDecodeError, ValueError):
+                continue
+            overlap = set(filenames) & set(pr_files)
+            if overlap:
+                related.append({
+                    "number": pr_number,
+                    "title": pr.get("title", ""),
+                    "author": pr.get("author", {}).get("login", ""),
+                    "overlap_files": sorted(overlap),
+                })
+        return related
+
+    def _check_test_coverage(self, files: list[dict]) -> dict:
+        """Check if changed source files have corresponding test changes."""
+        source_files = []
+        test_files = []
+        for f in files:
+            fname = f.get("filename", "")
+            if not fname:
+                continue
+            if fname.startswith("tests/") or fname.startswith("test_"):
+                test_files.append(fname)
+            elif fname.endswith(".py") and not fname.startswith((".github/", "scripts/", "docs/")):
+                source_files.append(fname)
+        # Derive test stems by removing test prefixes/suffixes
+        test_stems = {
+            tf.replace("tests/", "").replace(".py", "").removeprefix("test_").removesuffix("_test")
+            for tf in test_files
+        }
+        # Source files without test changes
+        untested = []
+        for src in source_files:
+            stem = src.replace("/", ".").removesuffix(".py").split(".")[-1]
+            if stem not in test_stems:
+                untested.append(src)
+        return {
+            "source_files": source_files,
+            "test_files": test_files,
+            "untested_source": untested,
+            "has_test_coverage": len(untested) == 0 and len(source_files) > 0,
+        }
+
+    def _check_description_quality(self, pr_data: dict) -> dict:
+        """Check PR description quality: length, issue links, body presence."""
+        body = pr_data.get("body", "") or ""
+        body_stripped = body.strip()
+        # Issue references (#123, GH-123, or full URLs)
+        issue_refs = re.findall(r"(?:#|GH-|issues/)(\d+)", body_stripped)
+        return {
+            "has_body": len(body_stripped) > 20,
+            "body_length": len(body_stripped),
+            "issue_refs": issue_refs,
+            "has_issue_link": len(issue_refs) > 0,
+            "quality": "good" if len(body_stripped) > 50 and issue_refs else (
+                "minimal" if len(body_stripped) > 20 else "missing"
+            ),
+        }
+
+    def _check_commit_hygiene(self) -> dict:
+        """Check commit messages against Conventional Commits."""
+        result = subprocess.run(
+            ["gh", "pr", "view", str(self.pr), "--repo", f"{self.owner}/{self.repo}",
+             "--json", "commits"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            return {"commits": [], "conventional_count": 0, "total": 0, "all_conventional": False}
+        try:
+            data = json.loads(result.stdout)
+            # gh pr view --json commits returns a list directly
+            if isinstance(data, list):
+                commits = data
+            else:
+                commits = data.get("commits", [])
+        except (json.JSONDecodeError, ValueError):
+            return {"commits": [], "conventional_count": 0, "total": 0, "all_conventional": False}
+        conventional_pattern = re.compile(
+            r"^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)"
+            r"(\([^)]+\))?(!)?: .+"
+        )
+        conventional_count = 0
+        commit_summaries = []
+        for commit in commits:
+            msg = commit.get("message", "").split("\n")[0]  # First line only
+            commit_summaries.append(msg)
+            if conventional_pattern.match(msg):
+                conventional_count += 1
+        return {
+            "commits": commit_summaries,
+            "conventional_count": conventional_count,
+            "total": len(commits),
+            "all_conventional": conventional_count == len(commits) and len(commits) > 0,
+        }
+
+    def _check_staleness(self, pr_data: dict) -> dict:
+        """Check PR staleness: age, last update, base branch divergence."""
+        from datetime import datetime, timezone
+        created = pr_data.get("createdAt", "")
+        updated = pr_data.get("updatedAt", "")
+        # Calculate age in days
+        age_days = None
+        if created:
+            try:
+                created_dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                age_days = (datetime.now(timezone.utc) - created_dt).days
+            except (ValueError, TypeError):
+                pass
+        return {
+            "created_at": created,
+            "updated_at": updated,
+            "age_days": age_days,
+            "is_stale": age_days is not None and age_days > 30,
+        }
+
+    def _get_ci_precheck(self) -> dict:
+        """Check current CI status before reviewing."""
+        result = subprocess.run(
+            ["gh", "pr", "checks", str(self.pr), "--repo", f"{self.owner}/{self.repo}",
+             "--json", "name,state"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            return {"checks": [], "failing": [], "status": "unknown"}
+        try:
+            checks = json.loads(result.stdout)
+        except (json.JSONDecodeError, ValueError):
+            return {"checks": [], "failing": [], "status": "unknown"}
+        failing = [c for c in checks if c.get("state") == "failure"]
+        return {
+            "checks": checks,
+            "failing": failing,
+            "status": "failing" if failing else ("passing" if checks else "none"),
         }

@@ -28,6 +28,8 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
+import structlog
+
 from riptide.state import StateStore
 from riptide.depth import ReviewDepth, classify_review_depth, select_skills  # noqa: F401 (re-exported for back-compat)
 
@@ -35,7 +37,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
-log = logging.getLogger("riptide.deepthink")
+log = structlog.get_logger("riptide.deepthink")
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -111,13 +113,23 @@ def handle_review_command(
     repo: str,
     pr_number: int,
     commenter: str,
+    delivery_id: str = "",
 ) -> str | None:
     """Handle @riptide-bot review command — spawn an on-demand deep-think review.
 
     Called from webhook.py when a user comments @riptide-bot review on a PR.
     Fetches PR details via GitHub API client, spawns the deep-think session,
     and returns a user-facing confirmation message (or error message).
+
+    delivery_id: trace ID from the originating webhook event (for log correlation).
     """
+    # ── Structlog trace binding ───────────────────────────────────────────────
+    if delivery_id:
+        structlog.contextvars.bind_contextvars(
+            delivery_id=delivery_id,
+            worker="deepthink",
+            pr=f"{owner}/{repo}#{pr_number}",
+        )
     try:
         pr_details = client.get_pr_details(installation_id, owner, repo, pr_number)
     except Exception as e:
@@ -213,7 +225,17 @@ def _spawn_deepthink(
     # Cross-session awareness: clean up stale jobs, then atomically reserve
     from riptide.state import StateStore
     state = StateStore()
-    state.cleanup_stale_pending()
+    # Graceful handling of concurrent cron jobs (SQLite lock contention)
+    for _retry in range(3):
+        try:
+            state.cleanup_stale_pending()
+            break  # Success — proceed to reserve
+        except Exception as e:
+            if "locked" in str(e).lower() and _retry < 2:
+                import time as _time
+                _time.sleep(2 * (_retry + 1))  # 2s, 4s backoff
+            else:
+                raise  # Non-lock error or retries exhausted
     job_id = f"{name}-{head_sha[:12]}-{uuid.uuid4().hex[:12]}"
     if not state.reserve_job(job_id, pr_number, "t1", name):
         log.info(f"Skipping {owner}/{repo}#{pr_number} — review already pending")
