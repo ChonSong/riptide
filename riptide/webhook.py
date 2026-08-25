@@ -34,7 +34,6 @@ from .orchestrator import T0Orchestrator, TaskClassifier
 from .state import StateStore
 from .labeler import Labeler
 from .review_memory import store_review_outcome
-from .documentarian import on_merge
 
 # Companion is optional — silently unavailable if RIPTIDE_COMPANION_REPOS is unset
 _companion: "Companion | Literal[False] | None" = None
@@ -480,20 +479,23 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
                     except Exception as e:
                         log.error(f"[{delivery_id}] Failed to trigger auto-deploy: {e}")
 
-            # Trigger documentarian post-merge tasks (graphify + changelog)
-            pr_title = pr.get("title", "")
-            pr_body = pr.get("body", "") or ""
+            # Store review outcome on merge (best-effort)
             try:
-                on_merge(
+                head_sha = pr.get("head", {}).get("sha", "")
+                store_review_outcome(
                     owner=owner,
                     repo=repo_name,
-                    merged_pr_number=pr_number,
-                    pr_title=pr_title,
-                    pr_body=pr_body,
+                    pr_number=pr_number,
+                    head_sha=head_sha,
+                    findings_count=0,
+                    critical_count=0,
+                    warning_count=0,
+                    verdict="merged",
+                    metadata={"source": "webhook_merge", "delivery_id": delivery_id},
                 )
-                log.info(f"[{delivery_id}] Documentarian post-merge triggered for {repo_full}#{pr_number}")
+                log.info(f"[{delivery_id}] Review outcome stored for merged PR #{pr_number}")
             except Exception as e:
-                log.error(f"[{delivery_id}] Documentarian post-merge failed (non-fatal): {e}")
+                log.warning(f"[{delivery_id}] Failed to store review outcome (non-fatal): {e}")
 
     return Response(status_code=200)
 
@@ -563,138 +565,29 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
                     log.warning(f"[{delivery_id}] Could not post companion reply: {e}")
             return Response(status_code=200)
 
-    # Route 2: On-demand review command (@riptide-bot review / deepthink / full review)
+    # Route 2: Unified @riptide-bot command router
     if installation_id and body and "@riptide-bot" in body.lower():
-        from riptide.deepthink import REVIEW_RE, handle_review_command
+        from riptide.interaction_handler import handle_command
 
-        if REVIEW_RE.search(body):
-            log.info(
-                f"[{delivery_id}] Review command on {owner}/{repo_name}#{pr_number} by {commenter}"
+        try:
+            response = handle_command(
+                payload=payload,
+                delivery_id=delivery_id,
+                comment_id=comment.get("id", 0),
+                installation_id=installation_id,
+                owner=owner,
+                repo=repo_name,
+                pr_number=pr_number,
+                body=body,
+                commenter=commenter,
             )
-            try:
+            if response:
                 client = github_client()
-                state = StateStore()
-                # Use delivery_id for idempotence: webhook retries will
-                # collide on the existing pending work item.
-                work_id = f"review-{delivery_id}"
-                enqueued = state.enqueue_work(work_id, "review", {
-                    "installation_id": installation_id,
-                    "owner": owner,
-                    "repo": repo_name,
-                    "pr_number": pr_number,
-                    "commenter": commenter,
-                })
-                if not enqueued:
-                    log.info(f"[{delivery_id}] Duplicate delivery — skipping review")
-                    return Response(status_code=200)
-
-                def _run_review():
-                    try:
-                        result = handle_review_command(
-                            client, installation_id, owner, repo_name, pr_number, commenter
-                        )
-                        if result:
-                            client.post_pr_comment(
-                                installation_id, owner, repo_name, pr_number, result
-                            )
-                        state.complete_work(work_id)
-                        log.info(f"[{delivery_id}] Background review completed for {owner}/{repo_name}#{pr_number}")
-                    except Exception:
-                        log.exception(f"[{delivery_id}] Background review command failed")
-                        state.complete_work(work_id, traceback_str=traceback.format_exc())
-
-                thread = threading.Thread(target=_run_review, daemon=True, name=work_id)
-                thread.start()
-                log.info(f"[{delivery_id}] Background review thread started for {owner}/{repo_name}#{pr_number}")
-            except Exception as e:
-                log.error(f"[{delivery_id}] Review command failed: {e}")
-
-        # Route 2b: On-demand fix command (@riptide-bot fix [description])
-        from riptide.fixer import FIX_RE, handle_fix_command
-
-        if FIX_RE.search(body):
-            log.info(
-                f"[{delivery_id}] Fix command on {owner}/{repo_name}#{pr_number} by {commenter}"
-            )
-            try:
-                client = github_client()
-                description = FIX_RE.search(body).group(1).strip()
-                state = StateStore()
-                work_id = f"fix-{delivery_id}"
-                enqueued = state.enqueue_work(work_id, "fix", {
-                    "installation_id": installation_id,
-                    "owner": owner,
-                    "repo": repo_name,
-                    "pr_number": pr_number,
-                    "commenter": commenter,
-                    "description": description,
-                })
-                if not enqueued:
-                    log.info(f"[{delivery_id}] Duplicate delivery — skipping fix")
-                    return Response(status_code=200)
-
-                def _run_fix():
-                    try:
-                        result = handle_fix_command(
-                            client, installation_id, owner, repo_name, pr_number, commenter, description
-                        )
-                        if result:
-                            client.post_pr_comment(
-                                installation_id, owner, repo_name, pr_number, result
-                            )
-                        state.complete_work(work_id)
-                        log.info(f"[{delivery_id}] Background fix completed for {owner}/{repo_name}#{pr_number}")
-                    except Exception:
-                        log.exception(f"[{delivery_id}] Background fix command failed")
-                        state.complete_work(work_id, traceback_str=traceback.format_exc())
-
-                thread = threading.Thread(target=_run_fix, daemon=True, name=work_id)
-                thread.start()
-                log.info(f"[{delivery_id}] Background fix thread started for {owner}/{repo_name}#{pr_number}")
-            except Exception as e:
-                log.error(f"[{delivery_id}] Fix command failed: {e}")
-
-        # Route 2c: Relabel command (@riptide-bot relabel)
-        if "@riptide-bot relabel" in body.lower():
-            log.info(
-                f"[{delivery_id}] Relabel command on {owner}/{repo_name}#{pr_number} by {commenter}"
-            )
-            try:
-                client = github_client()
-                labeler = get_labeler()
-                if labeler:
-                    pr_detail = client.get_pr_details(installation_id, owner, repo_name, pr_number)
-                    files = client.get_pr_files(installation_id, owner, repo_name, pr_number)
-                    labels = labeler.classify_pr(pr_detail, files, f"{owner}/{repo_name}")
-                    labeler.setup_labels_on_repo(installation_id, owner, repo_name, client)
-                    # Reconcile: remove stale bot-managed labels before applying new ones
-                    _reconcile_labels(client, installation_id, owner, repo_name, pr_number, labels, labeler)
-                    client.add_labels_to_issue(installation_id, owner, repo_name, pr_number, labels)
-                    client.post_pr_comment(
-                        installation_id, owner, repo_name, pr_number,
-                        f"🏷️ Labels re-applied: {', '.join(labels)}"
-                    )
-            except Exception as e:
-                log.error(f"[{delivery_id}] Relabel command failed: {e}")
-
-        # Route 3: Visual regression command (@riptide-bot visual)
-        from riptide.visual import VISUAL_RE, handle_visual_command
-
-        if VISUAL_RE.search(body):
-            log.info(
-                f"[{delivery_id}] Visual command on {owner}/{repo_name}#{pr_number} by {commenter}"
-            )
-            try:
-                client = github_client()
-                result = handle_visual_command(
-                    client, installation_id, owner, repo_name, pr_number, commenter
+                client.post_pr_comment(
+                    installation_id, owner, repo_name, pr_number, response
                 )
-                if result:
-                    client.post_pr_comment(
-                        installation_id, owner, repo_name, pr_number, result
-                    )
-            except Exception as e:
-                log.error(f"[{delivery_id}] Visual command failed: {e}")
+        except Exception as e:
+            log.error(f"[{delivery_id}] Command handler failed: {e}")
 
     return Response(status_code=200)
 

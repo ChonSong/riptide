@@ -45,6 +45,9 @@ DEFAULT_DB_PATH = os.environ.get(
     str(Path.home() / ".local/share/riptide/state.db"),
 )
 
+# Shared TTL for fix activity (has_running_fix, cleanup_stale_queue_items, jobs cutoff)
+FIX_TTL_SECONDS = 7200  # 2 hours
+
 
 class StateStore:
     """
@@ -217,6 +220,41 @@ class StateStore:
                 "ALTER TABLE pr_heuristics ADD COLUMN tier1_comment_id INTEGER"
             )
             log.info("pr_heuristics: added tier1_comment_id column (v6)")
+
+        # v7: review_memory — persist review outcomes per PR for context injection
+        # and review_profiles — per-repo aggregate stats for common-finding patterns
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS review_memory (
+                id TEXT PRIMARY KEY,
+                pr_key TEXT NOT NULL,
+                pr_number INTEGER,
+                owner TEXT,
+                repo TEXT,
+                head_sha TEXT,
+                findings_count INTEGER,
+                critical_count INTEGER,
+                warning_count INTEGER,
+                verdict TEXT,
+                user_feedback INTEGER,
+                created_at TEXT,
+                metadata TEXT
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS review_profiles (
+                repo TEXT PRIMARY KEY,
+                total_reviews INTEGER DEFAULT 0,
+                common_findings TEXT DEFAULT '[]',
+                last_review_at TEXT,
+                updated_at TEXT
+            )"""
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_review_memory_pr_key ON review_memory (pr_key)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_review_memory_repo ON review_memory (repo)"
+        )
 
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_jobs_pr_status ON jobs (pr_number, status)"
@@ -493,7 +531,7 @@ class StateStore:
 
     def has_pending_job(self, name_prefix: str) -> bool:
         conn = self._get_conn()
-        cutoff = time.time() - 7200  # 2-hour TTL
+        cutoff = time.time() - FIX_TTL_SECONDS
         escaped = f"{self._escape_like(name_prefix)}-%"
         row = conn.execute(
             "SELECT COUNT(*) FROM jobs WHERE id LIKE ? ESCAPE '\\' AND status='pending' AND created_at > ?",
@@ -506,7 +544,7 @@ class StateStore:
         conn = self._get_conn()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            cutoff = time.time() - 7200
+            cutoff = time.time() - FIX_TTL_SECONDS
             escaped = f"{self._escape_like(name_prefix)}-%"
             conn.execute(
                 """INSERT INTO jobs (id, pr_number, tier, status, created_at)
@@ -558,6 +596,180 @@ class StateStore:
                 "completed_at": row[4],
             }
         return None
+
+    # ── Fix Queue ─────────────────────────────────────────────────────────────
+
+    def init_fix_queue(self):
+        """Idempotent: create fix_queue table and index if missing."""
+        conn = self._get_conn()
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS fix_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pr_number INTEGER NOT NULL,
+                pr_key TEXT NOT NULL,
+                description TEXT,
+                commenter TEXT NOT NULL,
+                installation_id INTEGER,
+                owner TEXT,
+                repo TEXT,
+                created_at REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT 'queued',
+                started_at REAL,
+                completed_at REAL
+            )"""
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_fix_queue_status ON fix_queue (status, created_at)"
+        )
+        # Migration: add missing columns if upgrading from older schema
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(fix_queue)").fetchall()]
+        if "owner" not in cols:
+            conn.execute("ALTER TABLE fix_queue ADD COLUMN owner TEXT")
+        if "repo" not in cols:
+            conn.execute("ALTER TABLE fix_queue ADD COLUMN repo TEXT")
+        conn.commit()
+
+    def enqueue_fix(self, pr_number: int, pr_key: str, commenter: str, description: str = "", installation_id: int | None = None, owner: str = "", repo: str = "") -> int:
+        """Add a fix request to the queue. Returns the queue row id."""
+        self.init_fix_queue()
+        conn = self._get_conn()
+        cur = conn.execute(
+            "INSERT INTO fix_queue (pr_number, pr_key, description, commenter, installation_id, owner, repo, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (pr_number, pr_key, description, commenter, installation_id, owner, repo, time.time()),
+        )
+        conn.commit()
+        assert cur.lastrowid is not None
+        return cur.lastrowid
+
+    def get_queue_length(self, pr_number: int, owner: str = "", repo: str = "") -> int:
+        """Count queued (not yet started) fix requests for this PR."""
+        self.init_fix_queue()
+        conn = self._get_conn()
+        query = "SELECT COUNT(*) FROM fix_queue WHERE pr_number = ? AND status = 'queued'"
+        params: list = [pr_number]
+        if owner:
+            query += " AND owner = ?"
+            params.append(owner)
+        if repo:
+            query += " AND repo = ?"
+            params.append(repo)
+        row = conn.execute(query, params).fetchone()
+        return row[0]
+
+    def get_queue_position(self, queue_id: int) -> Optional[int]:
+        """Return 1-based position of this queued request, or None if not queued.
+
+        Tie-breaking: items with the same created_at are ordered by id (FIFO).
+        """
+        self.init_fix_queue()
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT created_at FROM fix_queue WHERE id = ? AND status = 'queued'",
+            (queue_id,),
+        ).fetchone()
+        if not row:
+            return None
+        pos = conn.execute(
+            "SELECT COUNT(*) FROM fix_queue WHERE status = 'queued' AND (created_at < ? OR (created_at = ? AND id <= ?))",
+            (row[0], row[0], queue_id),
+        ).fetchone()
+        return pos[0] if pos else None
+
+    def start_next_queued_fix(self) -> Optional[dict]:
+        """Pop the oldest queued fix and mark it 'running'. Returns its data or None."""
+        self.init_fix_queue()
+        conn = self._get_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT id, pr_number, pr_key, description, commenter, installation_id, owner, repo FROM fix_queue "
+                "WHERE status = 'queued' ORDER BY created_at ASC, id ASC LIMIT 1",
+            ).fetchone()
+            if not row:
+                conn.commit()
+                return None
+            conn.execute(
+                "UPDATE fix_queue SET status = 'running', started_at = ? WHERE id = ?",
+                (time.time(), row[0]),
+            )
+            conn.commit()
+            return {
+                "id": row[0],
+                "pr_number": row[1],
+                "pr_key": row[2],
+                "description": row[3],
+                "commenter": row[4],
+                "installation_id": row[5],
+                "owner": row[6],
+                "repo": row[7],
+            }
+        except Exception:
+            conn.rollback()
+            raise
+
+    def complete_fix_queue_item(self, queue_id: int, success: bool = True):
+        """Mark a running queue item as completed or failed."""
+        self.init_fix_queue()
+        conn = self._get_conn()
+        status = "completed" if success else "failed"
+        conn.execute(
+            "UPDATE fix_queue SET status = ?, completed_at = ? WHERE id = ?",
+            (status, time.time(), queue_id),
+        )
+        conn.commit()
+
+    def cleanup_stale_queue_items(self, max_age_seconds: int = FIX_TTL_SECONDS):
+        """Mark stale 'running' items as failed (crashed without cleanup)."""
+        self.init_fix_queue()
+        conn = self._get_conn()
+        cutoff = time.time() - max_age_seconds
+        conn.execute(
+            "UPDATE fix_queue SET status = 'failed', completed_at = ? "
+            "WHERE status = 'running' AND started_at < ?",
+            (time.time(), cutoff),
+        )
+        conn.commit()
+
+    # ── Global fix activity ───────────────────────────────────────────────────
+
+    def has_running_fix(self) -> bool:
+        """Check if ANY fix job is currently running (global serialization gate)."""
+        conn = self._get_conn()
+        cutoff = time.time() - FIX_TTL_SECONDS
+        # Escape wildcards in case job_id contains % or _
+        pattern = self._escape_like("riptide-fix-") + "%"
+        row = conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE id LIKE ? ESCAPE '\\' AND status = 'pending' AND created_at > ?",
+            (pattern, cutoff),
+        ).fetchone()
+        if row[0] > 0:
+            return True
+        # Also check the queue for 'running' items (with cutoff)
+        self.init_fix_queue()
+        row = conn.execute(
+            "SELECT COUNT(*) FROM fix_queue WHERE status = 'running' AND started_at > ?",
+            (cutoff,),
+        ).fetchone()
+        return row[0] > 0
+
+    def get_running_fix_pr(self) -> Optional[int]:
+        """Return the PR number of the currently-running fix, or None."""
+        conn = self._get_conn()
+        cutoff = time.time() - FIX_TTL_SECONDS
+        pattern = self._escape_like("riptide-fix-") + "%"
+        row = conn.execute(
+            "SELECT pr_number FROM jobs WHERE id LIKE ? ESCAPE '\\' AND status = 'pending' AND created_at > ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (pattern, cutoff),
+        ).fetchone()
+        if row:
+            return row[0]
+        self.init_fix_queue()
+        row = conn.execute(
+            "SELECT pr_number FROM fix_queue WHERE status = 'running' AND started_at > ? ORDER BY started_at DESC LIMIT 1",
+            (cutoff,),
+        ).fetchone()
+        return row[0] if row else None
 
     # ── Processed comments (Poller dedup + retry) ──────────────────────────────
 
@@ -707,25 +919,135 @@ class StateStore:
         )
         conn.commit()
 
-    # ── Checkbox Trigger Dedup ────────────────────────────────────────────────
+    # ── Review Memory ──────────────────────────────────────────────────────────
 
-    def get_last_checkbox_trigger(self, trigger_key: str) -> Optional[float]:
-        """Return the epoch timestamp of the last checkbox trigger for this key."""
+    def store_review_outcome(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        head_sha: str,
+        findings_count: int,
+        critical_count: int,
+        warning_count: int,
+        verdict: str,
+        metadata: Optional[str] = None,
+    ):
+        """Store a review outcome in review_memory and update review_profiles."""
+        import uuid
+
+        conn = self._get_conn()
+        now = datetime.now(timezone.utc).isoformat()
+        pr_key = f"{owner}/{repo}#{pr_number}"
+        review_id = str(uuid.uuid4())
+
+        conn.execute(
+            """INSERT INTO review_memory
+               (id, pr_key, pr_number, owner, repo, head_sha,
+                findings_count, critical_count, warning_count,
+                verdict, user_feedback, created_at, metadata)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                review_id,
+                pr_key,
+                pr_number,
+                owner,
+                repo,
+                head_sha,
+                findings_count,
+                critical_count,
+                warning_count,
+                verdict,
+                0,  # user_feedback — default 0 (no feedback yet)
+                now,
+                json.dumps(metadata) if metadata else None,
+            ),
+        )
+
+        # Upsert review_profiles
+        conn.execute(
+            """INSERT INTO review_profiles (repo, total_reviews, last_review_at, updated_at)
+               VALUES (?, 1, ?, ?)
+               ON CONFLICT(repo) DO UPDATE SET
+                 total_reviews = total_reviews + 1,
+                 last_review_at = excluded.last_review_at,
+                 updated_at = excluded.updated_at""",
+            (repo, now, now),
+        )
+
+        conn.commit()
+
+    def get_review_profile(self, repo: str) -> Optional[dict]:
+        """Return the review profile for a repo, or None if no history."""
         conn = self._get_conn()
         row = conn.execute(
-            "SELECT triggered_at FROM checkbox_triggers WHERE trigger_key = ?",
-            (trigger_key,),
+            "SELECT repo, total_reviews, common_findings, last_review_at, updated_at "
+            "FROM review_profiles WHERE repo = ?",
+            (repo,),
         ).fetchone()
-        return row[0] if row else None
+        if row is None:
+            return None
+        return {
+            "repo": row[0],
+            "total_reviews": row[1],
+            "common_findings": json.loads(row[2]) if row[2] else [],
+            "last_review_at": row[3],
+            "updated_at": row[4],
+        }
 
-    def set_last_checkbox_trigger(self, trigger_key: str, triggered_at: float):
-        """Record a checkbox trigger event for deduplication."""
+    def get_memory_context(self, owner: str, repo: str) -> str:
+        """
+        Build a prompt injection string with common findings from past reviews.
+
+        Returns:
+            A string with historical findings, or empty string if no history.
+        """
         conn = self._get_conn()
-        conn.execute(
-            "INSERT OR REPLACE INTO checkbox_triggers (trigger_key, triggered_at) VALUES (?, ?)",
-            (trigger_key, triggered_at),
+        profile = self.get_review_profile(repo)
+        if not profile:
+            return ""
+
+        # Get the most recent reviews for this repo
+        rows = conn.execute(
+            "SELECT verdict, findings_count, critical_count, warning_count, created_at "
+            "FROM review_memory WHERE repo = ? ORDER BY created_at DESC LIMIT 10",
+            (repo,),
+        ).fetchall()
+
+        if not rows:
+            return ""
+
+        # Compute aggregate stats
+        total_reviews = profile["total_reviews"]
+        critical_rate = sum(r[2] for r in rows) / max(total_reviews, 1)
+        warning_rate = sum(r[3] for r in rows) / max(total_reviews, 1)
+
+        # Extract common findings (warnings + criticals from recent reviews)
+        common = []
+        for row in rows:
+            if row[4]:  # created_at
+                label = f"{row[0]} ({row[2]} critical, {row[3]} warning)"
+                common.append(label)
+
+        # Build context string
+        lines = [
+            "## Review History (from past reviews)",
+            "",
+            f"- Total reviews: {total_reviews}",
+            f"- Recent critical rate: {critical_rate:.1%}",
+            f"- Recent warning rate: {warning_rate:.1%}",
+            f"- Last review: {profile.get('last_review_at', 'never')}",
+            "",
+            "### Recent Review Outcomes:",
+        ]
+        for c in common[:5]:
+            lines.append(f"- {c}")
+        lines.append("")
+        lines.append(
+            "Consider these historical patterns when reviewing this PR. "
+            "Focus on catching issues that have been common in the past."
         )
-        conn.commit()
+        return "\n".join(lines)
 
 
 # Module-level convenience (poller's old DB path for migration)

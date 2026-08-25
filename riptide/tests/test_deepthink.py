@@ -239,8 +239,8 @@ class TestSpawnDeepthink:
     def test_skips_when_review_already_pending(self):
         with patch("riptide.state.StateStore") as mock_state:
             mock_state.return_value.reserve_job.return_value = False
-            result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
-            assert result is False
+            with pytest.raises(RuntimeError, match="review already pending"):
+                _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
 
 
 # ── Classification Integration Tests ────────────────────────────────────────
@@ -730,7 +730,7 @@ class TestHandleReviewCommand:
 
     def test_returns_already_pending_message_when_reservation_fails(self):
         from riptide.deepthink import handle_review_command
-        with patch("riptide.deepthink._spawn_deepthink", return_value=False):
+        with patch("riptide.deepthink._spawn_deepthink", side_effect=RuntimeError("review already pending")):
             result = handle_review_command(
                 client=self._mock_client(),
                 installation_id=123,
