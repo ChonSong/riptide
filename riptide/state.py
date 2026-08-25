@@ -45,6 +45,9 @@ DEFAULT_DB_PATH = os.environ.get(
     str(Path.home() / ".local/share/riptide/state.db"),
 )
 
+# Shared TTL for fix activity (has_running_fix, cleanup_stale_queue_items, jobs cutoff)
+FIX_TTL_SECONDS = 7200  # 2 hours
+
 
 class StateStore:
     """
@@ -372,7 +375,7 @@ class StateStore:
 
     def has_pending_job(self, name_prefix: str) -> bool:
         conn = self._get_conn()
-        cutoff = time.time() - 7200  # 2-hour TTL
+        cutoff = time.time() - FIX_TTL_SECONDS
         escaped = f"{self._escape_like(name_prefix)}-%"
         row = conn.execute(
             "SELECT COUNT(*) FROM jobs WHERE id LIKE ? ESCAPE '\\' AND status='pending' AND created_at > ?",
@@ -385,7 +388,7 @@ class StateStore:
         conn = self._get_conn()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            cutoff = time.time() - 7200
+            cutoff = time.time() - FIX_TTL_SECONDS
             escaped = f"{self._escape_like(name_prefix)}-%"
             conn.execute(
                 """INSERT INTO jobs (id, pr_number, tier, status, created_at)
@@ -455,6 +458,180 @@ class StateStore:
                 "completed_at": row[4],
             }
         return None
+
+    # ── Fix Queue ─────────────────────────────────────────────────────────────
+
+    def init_fix_queue(self):
+        """Idempotent: create fix_queue table and index if missing."""
+        conn = self._get_conn()
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS fix_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pr_number INTEGER NOT NULL,
+                pr_key TEXT NOT NULL,
+                description TEXT,
+                commenter TEXT NOT NULL,
+                installation_id INTEGER,
+                owner TEXT,
+                repo TEXT,
+                created_at REAL NOT NULL,
+                status TEXT NOT NULL DEFAULT 'queued',
+                started_at REAL,
+                completed_at REAL
+            )"""
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_fix_queue_status ON fix_queue (status, created_at)"
+        )
+        # Migration: add missing columns if upgrading from older schema
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(fix_queue)").fetchall()]
+        if "owner" not in cols:
+            conn.execute("ALTER TABLE fix_queue ADD COLUMN owner TEXT")
+        if "repo" not in cols:
+            conn.execute("ALTER TABLE fix_queue ADD COLUMN repo TEXT")
+        conn.commit()
+
+    def enqueue_fix(self, pr_number: int, pr_key: str, commenter: str, description: str = "", installation_id: int | None = None, owner: str = "", repo: str = "") -> int:
+        """Add a fix request to the queue. Returns the queue row id."""
+        self.init_fix_queue()
+        conn = self._get_conn()
+        cur = conn.execute(
+            "INSERT INTO fix_queue (pr_number, pr_key, description, commenter, installation_id, owner, repo, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (pr_number, pr_key, description, commenter, installation_id, owner, repo, time.time()),
+        )
+        conn.commit()
+        assert cur.lastrowid is not None
+        return cur.lastrowid
+
+    def get_queue_length(self, pr_number: int, owner: str = "", repo: str = "") -> int:
+        """Count queued (not yet started) fix requests for this PR."""
+        self.init_fix_queue()
+        conn = self._get_conn()
+        query = "SELECT COUNT(*) FROM fix_queue WHERE pr_number = ? AND status = 'queued'"
+        params: list = [pr_number]
+        if owner:
+            query += " AND owner = ?"
+            params.append(owner)
+        if repo:
+            query += " AND repo = ?"
+            params.append(repo)
+        row = conn.execute(query, params).fetchone()
+        return row[0]
+
+    def get_queue_position(self, queue_id: int) -> Optional[int]:
+        """Return 1-based position of this queued request, or None if not queued.
+
+        Tie-breaking: items with the same created_at are ordered by id (FIFO).
+        """
+        self.init_fix_queue()
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT created_at FROM fix_queue WHERE id = ? AND status = 'queued'",
+            (queue_id,),
+        ).fetchone()
+        if not row:
+            return None
+        pos = conn.execute(
+            "SELECT COUNT(*) FROM fix_queue WHERE status = 'queued' AND (created_at < ? OR (created_at = ? AND id <= ?))",
+            (row[0], row[0], queue_id),
+        ).fetchone()
+        return pos[0] if pos else None
+
+    def start_next_queued_fix(self) -> Optional[dict]:
+        """Pop the oldest queued fix and mark it 'running'. Returns its data or None."""
+        self.init_fix_queue()
+        conn = self._get_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT id, pr_number, pr_key, description, commenter, installation_id, owner, repo FROM fix_queue "
+                "WHERE status = 'queued' ORDER BY created_at ASC, id ASC LIMIT 1",
+            ).fetchone()
+            if not row:
+                conn.commit()
+                return None
+            conn.execute(
+                "UPDATE fix_queue SET status = 'running', started_at = ? WHERE id = ?",
+                (time.time(), row[0]),
+            )
+            conn.commit()
+            return {
+                "id": row[0],
+                "pr_number": row[1],
+                "pr_key": row[2],
+                "description": row[3],
+                "commenter": row[4],
+                "installation_id": row[5],
+                "owner": row[6],
+                "repo": row[7],
+            }
+        except Exception:
+            conn.rollback()
+            raise
+
+    def complete_fix_queue_item(self, queue_id: int, success: bool = True):
+        """Mark a running queue item as completed or failed."""
+        self.init_fix_queue()
+        conn = self._get_conn()
+        status = "completed" if success else "failed"
+        conn.execute(
+            "UPDATE fix_queue SET status = ?, completed_at = ? WHERE id = ?",
+            (status, time.time(), queue_id),
+        )
+        conn.commit()
+
+    def cleanup_stale_queue_items(self, max_age_seconds: int = FIX_TTL_SECONDS):
+        """Mark stale 'running' items as failed (crashed without cleanup)."""
+        self.init_fix_queue()
+        conn = self._get_conn()
+        cutoff = time.time() - max_age_seconds
+        conn.execute(
+            "UPDATE fix_queue SET status = 'failed', completed_at = ? "
+            "WHERE status = 'running' AND started_at < ?",
+            (time.time(), cutoff),
+        )
+        conn.commit()
+
+    # ── Global fix activity ───────────────────────────────────────────────────
+
+    def has_running_fix(self) -> bool:
+        """Check if ANY fix job is currently running (global serialization gate)."""
+        conn = self._get_conn()
+        cutoff = time.time() - FIX_TTL_SECONDS
+        # Escape wildcards in case job_id contains % or _
+        pattern = self._escape_like("riptide-fix-") + "%"
+        row = conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE id LIKE ? ESCAPE '\\' AND status = 'pending' AND created_at > ?",
+            (pattern, cutoff),
+        ).fetchone()
+        if row[0] > 0:
+            return True
+        # Also check the queue for 'running' items (with cutoff)
+        self.init_fix_queue()
+        row = conn.execute(
+            "SELECT COUNT(*) FROM fix_queue WHERE status = 'running' AND started_at > ?",
+            (cutoff,),
+        ).fetchone()
+        return row[0] > 0
+
+    def get_running_fix_pr(self) -> Optional[int]:
+        """Return the PR number of the currently-running fix, or None."""
+        conn = self._get_conn()
+        cutoff = time.time() - FIX_TTL_SECONDS
+        pattern = self._escape_like("riptide-fix-") + "%"
+        row = conn.execute(
+            "SELECT pr_number FROM jobs WHERE id LIKE ? ESCAPE '\\' AND status = 'pending' AND created_at > ? "
+            "ORDER BY created_at DESC LIMIT 1",
+            (pattern, cutoff),
+        ).fetchone()
+        if row:
+            return row[0]
+        self.init_fix_queue()
+        row = conn.execute(
+            "SELECT pr_number FROM fix_queue WHERE status = 'running' AND started_at > ? ORDER BY started_at DESC LIMIT 1",
+            (cutoff,),
+        ).fetchone()
+        return row[0] if row else None
 
     # ── Processed comments (Poller dedup + retry) ──────────────────────────────
 
