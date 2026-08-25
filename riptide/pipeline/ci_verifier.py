@@ -11,16 +11,18 @@ Non-fixable failures (CodeRabbit, review-required, GitGuardian): escalate to hum
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import time
 from typing import Any
 
+log = logging.getLogger(__name__)
 
 # CI check categories — which failures the fixer can auto-retry vs escalate.
 FIXABLE_CHECKS = {
     "test-required",       # pytest failures — deterministic, code-addressable
     "agentlint",           # lint failures — deterministic, code-addressable
-    "continous-integration",  # generic CI group name
+    "continuous-integration",  # generic CI group name
 }
 
 NON_FIXABLE_CHECKS = {
@@ -145,6 +147,7 @@ class CIVerifier:
                 timeout=30,
             )
             if result.returncode != 0:
+                log.warning("gh pr checks failed (rc=%d): %s", result.returncode, result.stderr.strip())
                 return None
             return json.loads(result.stdout)
         except (subprocess.TimeoutExpired, json.JSONDecodeError):

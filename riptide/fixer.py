@@ -404,24 +404,6 @@ SURFACE → EXPLORE (graphify) → CHALLENGE → SYNTHESIZE → VALIDATE
 3. Test + validate → run repo tests; iterate until green.
 {push_instructions}
 
-## CI verification (run AFTER pushing — mandatory before completion)
-After pushing, you MUST verify GitHub CI passes before declaring success:
-1. Poll CI every 30 seconds: `gh pr checks {pr_number} --repo {owner}/{repo}`
-2. Wait for all checks to complete (timeout: 10 minutes)
-3. If ALL checks pass:
-   - Edit your summary comment to add: "✅ All CI checks passed"
-   - Mark job complete
-4. If ANY check fails:
-   - Identify which checks failed
-   - Classify each failure:
-     - FIXABLE: test-required, agentlint, lint failures (code/test addressable)
-     - NON-FIXABLE: CodeRabbit, riptide-review-required, GitGuardian (needs human)
-   - If FIXABLE AND you haven't retried yet:
-     - Fix the issue, commit, push (ONE retry only), re-poll CI
-   - If NON-FIXABLE or retry exhausted:
-     - Edit summary comment: "⚠️ CI still failing: [check names]. Manual intervention required."
-     - Mark job as failed
-
 ## Summary comment (always posted when done)
 Post a PR comment listing per-finding verdict + one-line reason, files
 touched, test results, and the commit SHA (or the patch if push was not
