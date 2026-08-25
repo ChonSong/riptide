@@ -118,6 +118,24 @@ class StateStore:
             )"""
         )
         conn.execute(
+            """CREATE TABLE IF NOT EXISTS work_queue (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                created_at REAL,
+                completed_at REAL,
+                error TEXT,
+                traceback TEXT
+            )"""
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_work_queue_kind_status ON work_queue (kind, status)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_work_queue_status_created_at ON work_queue (status, created_at)"
+        )
+        conn.execute(
             """CREATE TABLE IF NOT EXISTS deliveries (
                 delivery_id TEXT PRIMARY KEY,
                 received_at REAL,
@@ -404,6 +422,109 @@ class StateStore:
         )
         conn.commit()
 
+    # ── Work Queue (durable work items) ──────────────────────────────────────
+
+    def enqueue_work(self, work_id: str, kind: str, payload: dict) -> bool:
+        """Enqueue a work item. Returns True if inserted, False if duplicate."""
+        conn = self._get_conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """INSERT OR IGNORE INTO work_queue (id, kind, payload, status, created_at)
+                   VALUES (?, ?, ?, 'pending', ?)""",
+                (work_id, kind, json.dumps(payload), time.time()),
+            )
+            conn.commit()
+            return conn.execute("SELECT changes()").fetchone()[0] > 0
+        except Exception:
+            conn.rollback()
+            raise
+
+    def get_pending_work(self, kind: str) -> list[dict]:
+        """Get pending work items of a given kind."""
+        conn = self._get_conn()
+        rows = conn.execute(
+            """SELECT id, kind, payload, created_at FROM work_queue
+               WHERE kind = ? AND status = 'pending'
+               ORDER BY created_at ASC""",
+            (kind,),
+        ).fetchall()
+        return [
+            {"id": r[0], "kind": r[1], "payload": json.loads(r[2]), "created_at": r[3]}
+            for r in rows
+        ]
+
+    def complete_work(self, work_id: str, error: str = None, traceback_str: str = None) -> bool:
+        """Mark work as completed/failed. Returns True if row was transitioned.
+
+        Uses WHERE id=? AND status IN ('pending', 'recovering') so that items
+        being recovered can also be completed.
+        """
+        conn = self._get_conn()
+        status = "failed" if error else "completed"
+        conn.execute(
+            "UPDATE work_queue SET status=?, completed_at=?, error=?, traceback=? WHERE id=? AND status IN ('pending', 'recovering')",
+            (status, time.time(), error, traceback_str, work_id),
+        )
+        conn.commit()
+        return conn.execute("SELECT changes()").fetchone()[0] > 0
+
+    def cleanup_stale_work(self, max_age_seconds: int = 7200):
+        """Mark stale pending work as failed."""
+        conn = self._get_conn()
+        cutoff = time.time() - max_age_seconds
+        conn.execute(
+            "UPDATE work_queue SET status='failed', completed_at=?, error='stale' WHERE status='pending' AND created_at < ?",
+            (time.time(), cutoff),
+        )
+        conn.commit()
+
+    def recover_pending_work(self) -> list[dict]:
+        """Recover pending work after process restart.
+        
+        Atomically claims recently-pending items by transitioning to 'recovering'.
+        Items older than 5 minutes are marked as stale.
+        Returns items successfully claimed for recovery.
+        """
+        conn = self._get_conn()
+        now = time.time()
+        recovery_cutoff = now - 300  # 5 minutes
+        
+        # Mark all pending items older than recovery window as stale
+        conn.execute(
+            "UPDATE work_queue SET status='failed', completed_at=?, error='stale' WHERE status='pending' AND created_at < ?",
+            (now, recovery_cutoff),
+        )
+        conn.commit()
+        
+        # Get recently-pending items
+        rows = conn.execute(
+            """SELECT id, kind, payload, created_at FROM work_queue
+               WHERE status='pending' AND created_at > ?
+               ORDER BY created_at ASC""",
+            (recovery_cutoff,),
+        ).fetchall()
+        
+        # Atomically claim each item
+        claimed = []
+        for row in rows:
+            work_id = row[0]
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "UPDATE work_queue SET status='recovering' WHERE id=? AND status='pending'",
+                (work_id,),
+            )
+            conn.commit()
+            if conn.execute("SELECT changes()").fetchone()[0] > 0:
+                claimed.append({
+                    "id": row[0],
+                    "kind": row[1],
+                    "payload": json.loads(row[2]),
+                    "created_at": row[3],
+                })
+        
+        return claimed
+
     @staticmethod
     def _escape_like(pattern: str) -> str:
         return pattern.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -453,24 +574,6 @@ class StateStore:
             conn.execute(
                 "UPDATE jobs SET status='failed', completed_at=? WHERE status='pending' AND created_at < ?",
                 (time.time(), cutoff),
-            )
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-
-    def cleanup_old_deliveries(self, max_age_seconds: int = 86400):
-        """Remove completed/failed deliveries older than max_age_seconds.
-
-        Prevents unbounded growth of the deliveries table. Runs periodically
-        from the poller's cleanup loop.
-        """
-        conn = self._get_conn()
-        cutoff = time.time() - max_age_seconds
-        try:
-            conn.execute(
-                "DELETE FROM deliveries WHERE status != 'processing' AND received_at < ?",
-                (cutoff,),
             )
             conn.commit()
         except Exception:

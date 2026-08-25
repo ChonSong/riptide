@@ -684,3 +684,13 @@ def init_db():
             )
         """)
     log.info(f"Metadata DB ready at {METADATA_DB}")
+
+    # Recover any pending work from a previous process
+    try:
+        from riptide.state import StateStore
+        state = StateStore()
+        pending = state.recover_pending_work()
+        if pending:
+            log.info(f"Recovered {len(pending)} pending work items from previous process")
+    except Exception as e:
+        log.warning(f"Work recovery failed (non-fatal): {e}")
