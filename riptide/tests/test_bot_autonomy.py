@@ -106,11 +106,11 @@ class TestSpawnRetry:
             assert mock_run.call_count == 3
 
     def test_skips_when_review_already_pending(self):
-        """If a review is already pending, don't spawn another."""
+        """If a review is already pending, raise RuntimeError."""
         with patch("riptide.state.StateStore") as mock_state:
             mock_state.return_value.reserve_job.return_value = False
-            result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
-            assert result is False
+            with pytest.raises(RuntimeError, match="review already pending"):
+                _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
 
 # ── Companion Bot 2 status footer ─────────────────────────────────────────────
 
