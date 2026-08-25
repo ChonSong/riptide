@@ -29,6 +29,7 @@ from .engine import Engine
 from .warden import Warden
 from .scribe import Scribe
 from .ci_verifier import CIVerifier
+from .cleanliness import Cleanliness
 
 
 class Conductor:
@@ -124,6 +125,8 @@ class Conductor:
             return self._run_scribe(brief)
         elif role == "ci_verifier":
             return self._run_ci_verifier(brief)
+        elif role == "cleanliness":
+            return self._run_cleanliness(brief)
         else:
             raise ValueError(f"Unknown role: {role}")
     
@@ -247,6 +250,26 @@ class Conductor:
             "non_fixable_count": len(result.get("non_fixable", [])),
         }
 
+    def _run_cleanliness(self, brief: WorkerBrief) -> dict:
+        """Run Cleanliness worker — evaluate PR cleanliness signals."""
+        context_path = brief.inputs.get("context_path", "")
+        with open(context_path) as f:
+            probe_output = json.load(f)
+
+        cleanliness = Cleanliness(probe_output)
+        result = cleanliness.evaluate()
+
+        output_path = brief.output_protocol.get("path", "/tmp/cleanliness.json")
+        with open(output_path, "w") as f:
+            json.dump(result, f, indent=2, default=str)
+
+        return {
+            "cleanliness_path": output_path,
+            "score": result.get("score", 0),
+            "findings_count": len(result.get("findings", [])),
+            "summary": result.get("summary", ""),
+        }
+
 
 # ── Pipeline builder ─────────────────────────────────────────────────────────
 
@@ -322,6 +345,15 @@ def create_pr_review_pipeline(
         acceptance={"posted": True},
         role="scribe",
         pipeline=["assemble_review", "post_comment"],
+    )
+
+    create_workstream(
+        track_id,
+        "ws-6-cleanliness",
+        inputs={"context_path": f"/tmp/pr-{pr_number}-context.json"},
+        acceptance={"cleanliness_checked": True},
+        role="cleanliness",
+        pipeline=["merge_conflicts", "related_prs", "test_coverage", "description"],
     )
 
     return track
