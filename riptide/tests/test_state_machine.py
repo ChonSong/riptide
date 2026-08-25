@@ -10,6 +10,7 @@ Verifies that:
 import tempfile
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -123,6 +124,49 @@ class TestCleanupStalePending:
         conn = store._get_conn()
         row = conn.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
         assert row[0] == "complete"
+
+    def test_cleanup_retries_on_lock_contention(self, store):
+        """cleanup_stale_pending retries up to 3 times on SQLite lock contention."""
+        # Create a stale job so cleanup has work to do
+        job_id = "test-prefix-lock-retry"
+        assert store.reserve_job(job_id, 42, "t1", "test-prefix")
+        assert store.has_pending_job("test-prefix")
+
+        # Mock _get_conn to return a connection that raises lock errors
+        # on the first 2 calls, then succeeds on the 3rd.
+        call_count = 0
+        original_get_conn = store._get_conn
+
+        def mock_get_conn():
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 2:
+                import sqlite3
+                raise sqlite3.OperationalError("database is locked")
+            return original_get_conn()
+
+        with patch.object(store, "_get_conn", side_effect=mock_get_conn):
+            with patch("time.sleep"):  # Skip actual sleep in retries
+                store.cleanup_stale_pending(max_age_seconds=0)
+
+        # After retries, the stale job should be cleaned up
+        assert not store.has_pending_job("test-prefix")
+        assert call_count == 3  # 2 failures + 1 success
+
+    def test_cleanup_raises_after_max_lock_retries(self, store):
+        """cleanup_stale_pending raises after 3 consecutive lock failures."""
+        job_id = "test-prefix-lock-fail"
+        assert store.reserve_job(job_id, 42, "t1", "test-prefix")
+
+        # Mock _get_conn to always raise lock error
+        def mock_get_conn():
+            import sqlite3
+            raise sqlite3.OperationalError("database is locked")
+
+        with patch.object(store, "_get_conn", side_effect=mock_get_conn):
+            with patch("time.sleep"):
+                with pytest.raises(Exception):
+                    store.cleanup_stale_pending(max_age_seconds=0)
 
 
 class TestDeliveryStateMachine:
