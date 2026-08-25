@@ -128,6 +128,8 @@ def handle_fix_command(
             head_ref=head_ref,
             description=description.strip(),
             push_eligible=push_eligible,
+            client=client,
+            installation_id=installation_id,
         )
     except Exception as e:
         log.error("Failed to spawn fix: %s", e)
@@ -193,6 +195,8 @@ def _spawn_fix(
     head_ref: str,
     description: str,
     push_eligible: bool,
+    client=None,
+    installation_id: int | None = None,
 ) -> bool:
     """Spawn a Hermes cron session that edits, commits, and pushes the fix.
 
@@ -225,6 +229,33 @@ def _spawn_fix(
         return False
 
     try:
+        # Create the Conductor fix pipeline (track + workstreams)
+        from riptide.pipeline.conductor import create_fix_pipeline
+        pr_details = {
+            "title": pr_title,
+            "author": {"login": pr_author},
+            "head": {"sha": head_sha, "ref": head_ref},
+        }
+        # Fetch PR files for the pipeline
+        files = []
+        if client is not None and installation_id is not None:
+            try:
+                files = client.get_pr_files(installation_id, owner, repo, pr_number)
+            except Exception as e:
+                log.warning(f"Failed to fetch PR files for fix pipeline: {e}")
+                files = []
+
+        track = create_fix_pipeline(
+            owner=owner,
+            repo=repo,
+            pr_number=pr_number,
+            pr_details=pr_details,
+            files=files,
+            description=description,
+            push_eligible=push_eligible,
+        )
+        log.info(f"Conductor fix pipeline created for {owner}/{repo}#{pr_number}: {track.get('name', '?')}")
+
         prompt = _build_fix_prompt(
             owner=owner,
             repo=repo,
@@ -237,6 +268,7 @@ def _spawn_fix(
             description=description,
             push_eligible=push_eligible,
             job_id=job_id,
+            track_id=track.get("id", ""),
         )
     except Exception as e:
         state.mark_failed(job_id)
@@ -298,6 +330,7 @@ def _build_fix_prompt(
     description: str,
     push_eligible: bool,
     job_id: str,
+    track_id: str = "",
 ) -> str:
     """Build the orchestrator prompt for the spawned fix session.
 
@@ -317,7 +350,8 @@ def _build_fix_prompt(
 2. git commit with a Conventional Commit message (fix(scope): ...).
 3. Push to the PR branch: `git push origin HEAD:{head_ref}`
    (gh's credential helper authenticates this as ChonSong — no extra setup).
-4. NEVER force-push. NEVER rewrite pushed history."""
+4. NEVER force-push. NEVER rewrite pushed history.
+5. CI verification (see below) — do NOT mark complete until CI is green."""
         if push_eligible
         else """## Push (NOT authorized — fork or foreign repo)
 Do NOT push. Instead post a PR comment containing the full patch
@@ -369,6 +403,24 @@ SURFACE → EXPLORE (graphify) → CHALLENGE → SYNTHESIZE → VALIDATE
 2. Implementation subagent → minimal, targeted edits for `valid` findings only.
 3. Test + validate → run repo tests; iterate until green.
 {push_instructions}
+
+## CI verification (run AFTER pushing — mandatory before completion)
+After pushing, you MUST verify GitHub CI passes before declaring success:
+1. Poll CI every 30 seconds: `gh pr checks {pr_number} --repo {owner}/{repo}`
+2. Wait for all checks to complete (timeout: 10 minutes)
+3. If ALL checks pass:
+   - Edit your summary comment to add: "✅ All CI checks passed"
+   - Mark job complete
+4. If ANY check fails:
+   - Identify which checks failed
+   - Classify each failure:
+     - FIXABLE: test-required, agentlint, lint failures (code/test addressable)
+     - NON-FIXABLE: CodeRabbit, riptide-review-required, GitGuardian (needs human)
+   - If FIXABLE AND you haven't retried yet:
+     - Fix the issue, commit, push (ONE retry only), re-poll CI
+   - If NON-FIXABLE or retry exhausted:
+     - Edit summary comment: "⚠️ CI still failing: [check names]. Manual intervention required."
+     - Mark job as failed
 
 ## Summary comment (always posted when done)
 Post a PR comment listing per-finding verdict + one-line reason, files

@@ -45,6 +45,12 @@ ROLES = {
         "output_format": "json",
         "output_path_key": "record_path",
     },
+    "ci_verifier": {
+        "description": "Polls GitHub CI checks, classifies failures, returns verdict",
+        "tools": ["terminal"],
+        "output_format": "json",
+        "output_path_key": "ci_result_path",
+    },
 }
 
 # ── Worker brief schema ────────────────────────────────────────────────────
