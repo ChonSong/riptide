@@ -221,10 +221,10 @@ class Probe:
         filenames = [f.get("filename", "") for f in files if f.get("filename")]
         if not filenames:
             return []
-        # List open PRs (excluding this one)
+        # List open PRs (excluding this one) — gh pr list doesn't support --json files
         result = subprocess.run(
             ["gh", "pr", "list", "--state", "open", "--repo", f"{self.owner}/{self.repo}",
-             "--json", "number,title,files,author"],
+             "--json", "number,title,author"],
             capture_output=True, text=True, timeout=30,
         )
         if result.returncode != 0:
@@ -238,7 +238,19 @@ class Probe:
             pr_number = pr.get("number", 0)
             if pr_number == self.pr:
                 continue
-            pr_files = [f.get("filename", "") for f in pr.get("files", [])]
+            # Fetch files for each PR individually
+            pr_files_result = subprocess.run(
+                ["gh", "pr", "view", str(pr_number), "--repo", f"{self.owner}/{self.repo}",
+                 "--json", "files"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if pr_files_result.returncode != 0:
+                continue
+            try:
+                pr_files_data = json.loads(pr_files_result.stdout)
+                pr_files = [f.get("filename", "") for f in pr_files_data.get("files", [])]
+            except (json.JSONDecodeError, ValueError):
+                continue
             overlap = set(filenames) & set(pr_files)
             if overlap:
                 related.append({

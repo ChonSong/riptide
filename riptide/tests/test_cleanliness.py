@@ -269,8 +269,9 @@ class TestProbeCleanlinessSignals:
         mock_gh_responses = {
             "mergeable": '{"mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"}',
             "pr_list": json.dumps([
-                {"number": 99, "title": "Other PR", "author": {"login": "bob"}, "files": [{"filename": "foo.py"}]},
+                {"number": 99, "title": "Other PR", "author": {"login": "bob"}},
             ]),
+            "pr_view": json.dumps({"files": [{"filename": "foo.py"}]}),
             "commits": json.dumps([{"oid": "abc", "message": "fix: something"}]),
             "checks": json.dumps([{"name": "test-required", "state": "success"}]),
         }
@@ -283,6 +284,8 @@ class TestProbeCleanlinessSignals:
                 result.stdout = mock_gh_responses["mergeable"]
             elif "pr list" in cmd_str:
                 result.stdout = mock_gh_responses["pr_list"]
+            elif "pr view" in cmd_str and "files" in cmd_str:
+                result.stdout = mock_gh_responses["pr_view"]
             elif "commits" in cmd_str:
                 result.stdout = mock_gh_responses["commits"]
             elif "checks" in cmd_str:

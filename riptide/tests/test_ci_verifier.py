@@ -41,8 +41,8 @@ class TestIsFixable:
     def test_fixable_agentlint(self):
         assert self.verifier._is_fixable({"name": "agentlint"}) is True
 
-    def test_fixable_continous_integration(self):
-        assert self.verifier._is_fixable({"name": "continous-integration"}) is True
+    def test_fixable_continuous_integration(self):
+        assert self.verifier._is_fixable({"name": "continuous-integration"}) is True
 
     def test_non_fixable_coderabbit(self):
         assert self.verifier._is_fixable({"name": "CodeRabbit"}) is False
