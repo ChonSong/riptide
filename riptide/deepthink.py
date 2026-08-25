@@ -118,7 +118,8 @@ def handle_review_command(
     """Handle @riptide-bot review command — spawn an on-demand deep-think review.
 
     Called from webhook.py when a user comments @riptide-bot review on a PR.
-    Fetches PR details via GitHub API client, spawns the deep-think session,
+    Fetches PR details via GitHub API client, builds the context bundle,
+    creates a Conductor review pipeline, spawns the deep-think session,
     and returns a user-facing confirmation message (or error message).
 
     delivery_id: trace ID from the originating webhook event (for log correlation).
@@ -164,6 +165,31 @@ def handle_review_command(
     # The cron poller has its own dedup logic in poll().
 
     try:
+        # Fetch files for the Conductor pipeline
+        files = []
+        try:
+            files = client.get_pr_files(installation_id, owner, repo, pr_number)
+        except Exception as e:
+            log.warning("Failed to fetch PR files for Conductor: %s", e)
+            files = []
+
+        # Create the Conductor review pipeline
+        from riptide.pipeline.conductor import create_webhook_review_pipeline
+        track = create_webhook_review_pipeline(
+            owner=owner,
+            repo=repo,
+            pr_number=pr_number,
+            pr_details=pr_details,
+            files=files,
+        )
+        log.info(
+            "Conductor webhook review pipeline created for %s/%s#%d: %s (phase=%s, workstreams=%d)",
+            owner, repo, pr_number,
+            track.get("name", "?"),
+            track.get("phase", "?"),
+            len(track.get("workstreams", {})),
+        )
+
         spawned = _spawn_deepthink(owner, repo, pr_number, title, author, total_loc, head_sha)
     except RuntimeError as e:
         if "review already pending" in str(e):
@@ -210,8 +236,9 @@ def _spawn_deepthink(
 ) -> bool:
     """Spawn a Hermes cron session for deep-think review on this PR.
 
-    Uses pre-gathered data and a small orchestrator prompt that delegates
-    to subagents for inline review and Excalidraw diagram generation.
+    Uses the Conductor pipeline to orchestrate the review:
+    1. Creates a Conductor track with workstreams (probe → judge → artisan → engine → scribe)
+    2. Spawns a Hermes cron session that runs the Conductor
 
     Retries up to 3 times with exponential backoff (5s/15s/30s).
     Reserves a pending job before spawning the review; marks the job as
@@ -252,10 +279,7 @@ def _spawn_deepthink(
         skills = select_skills(depth)
         log.info(f"{owner}/{repo}#{pr_number} classified as {depth.value}, skills={skills}")
 
-        # Deterministic core (WS-3 Stage 1): build the context bundle ONCE from the
-        # gathered data and feed its DiffReport findings into the orchestrator prompt.
-        # The spawned session starts from the deterministic analysis instead of
-        # re-deriving everything from the raw diff. Non-fatal on failure.
+        # Build context bundle for the Conductor pipeline
         bundle = None
         try:
             from riptide.context_bundle import build_context_bundle
@@ -293,7 +317,31 @@ def _spawn_deepthink(
             except Exception as e:
                 log.warning(f"Pre-generate diagram failed (non-fatal): {e}")
 
-        prompt = _build_orchestrator_prompt(
+        # ── Conductor integration: create the review pipeline ──────────────
+        from riptide.pipeline.conductor import create_deepthink_review_pipeline
+        pr_details = {
+            "title": pr_title,
+            "author": pr_author,
+            "head": {"sha": head_sha},
+        }
+        files_changed = data.get("files_changed", [])
+        track = create_deepthink_review_pipeline(
+            owner=owner,
+            repo=repo,
+            pr_number=pr_number,
+            pr_details=pr_details,
+            files=files_changed,
+        )
+        log.info(
+            "Conductor track created for %s/%s#%d: %s (phase=%s, workstreams=%d)",
+            owner, repo, pr_number,
+            track.get("name", "?"),
+            track.get("phase", "?"),
+            len(track.get("workstreams", {})),
+        )
+
+        # Build the prompt: tell the Hermes session to run the Conductor
+        prompt = _build_conductor_prompt(
             owner=owner,
             repo=repo,
             pr_number=pr_number,
@@ -301,7 +349,6 @@ def _spawn_deepthink(
             pr_author=pr_author,
             total_loc=total_loc,
             head_sha=head_sha,
-            data=data,
             diagram_url=diagram_url,
             deterministic=bundle,
             pr_created_at=data.get("pr_created_at"),
@@ -616,7 +663,7 @@ def _gather_review_data(
     return data
 
 
-def _build_orchestrator_prompt(
+def _build_conductor_prompt(
     owner: str,
     repo: str,
     pr_number: int,
@@ -624,139 +671,49 @@ def _build_orchestrator_prompt(
     pr_author: str,
     total_loc: int,
     head_sha: str,
-    data: dict,
     diagram_url: Optional[str] = None,
     deterministic: Optional[dict] = None,
     pr_created_at: Optional[str] = None,
     triggered_at: Optional[str] = None,
 ) -> str:
     """
-    Build a small orchestrator prompt that delegates to subagents.
+    Build a prompt that instructs the Hermes session to run the Conductor pipeline.
 
-    The prompt is ~40 lines instead of ~280 lines.
-    All data is pre-gathered in Python and passed as structured context.
-    If diagram_url is provided, the LLM references it instead of generating.
-    If deterministic is provided (WS-3 Stage 1 context bundle), its DiffReport
-    findings + verdict are embedded so the session starts from the deterministic
-    analysis instead of re-deriving it.
+    The Conductor (riptide/pipeline/conductor.py) orchestrates:
+      Probe → Judge → Artisan → Engine → Scribe
+    to produce and post the review.
     """
-    # Format files changed
-    files_str = "\n".join(
-        f"  - {f.get('filename', '?')} (+{f.get('additions', 0)}/-{f.get('deletions', 0)})"
-        for f in data["files_changed"][:20]
-    )
-
-    # Format diff summary (first 12k chars)
-    diff_summary = data["diff_raw"][:12000]
-    if len(data["diff_raw"]) > 12000:
-        diff_summary += f"\n  ... ({len(data['diff_raw'])} chars total)"
-
-    # Format graphify context
-    graph_str = ""
-    if data["god_nodes"]:
-        graph_str += "God Nodes:\n"
-        for node in data["god_nodes"][:5]:
-            graph_str += f"  - {node['name']} ({node['edges']} edges)\n"
-    if data["communities"]:
-        graph_str += "Communities:\n"
-        for comm in data["communities"][:5]:
-            graph_str += f"  - {comm['name']}\n"
-    if not graph_str:
-        graph_str = "(No graphify analysis available)"
-
-    diagram_section = f"\n## Pre-generated Architecture Diagram\n[View Diagram]({diagram_url})\n" if diagram_url else ""
-    diagram_step = "\n### Step 4: Architecture Diagram\nThe architecture diagram is pre-generated and embedded above. Reference it in your Code Analysis section.\n" if diagram_url else ""
-
-    # Deterministic analysis section (WS-3 Stage 1): pre-computed DiffReport findings
-    deterministic_section = ""
+    diagram_line = f"--diagram-url '{diagram_url}'" if diagram_url else ""
+    deterministic_hint = ""
     if deterministic:
         verdict = deterministic.get("verdict", "pass")
         findings = deterministic.get("findings", [])
-        stats = deterministic.get("stats", {})
-        concepts = deterministic.get("aggregate", {}).get("concepts", [])
-        lines = ["## Deterministic Analysis (pre-computed)", ""]
-        lines.append(f"Verdict: **{verdict}** — {len(findings)} finding(s), "
-                     f"{stats.get('total_add', 0)}+/"
-                     f"{stats.get('total_del', 0)}- across "
-                     f"{stats.get('file_count', 0)} file(s).")
-        if concepts:
-            lines.append(f"Concepts touched: {', '.join(concepts)}")
-        if findings:
-            lines.append("")
-            lines.append("Findings (verify against the diff, do NOT re-derive from scratch):")
-            for f in findings[:10]:
-                lines.append(
-                    f"- [{f.get('severity', 'info')}] {f.get('category', '?')}: "
-                    f"{f.get('message', '')}"
-                    + (f" — {f.get('file', '')}" if f.get('file') else "")
-                )
-            if len(findings) > 10:
-                lines.append(f"  … and {len(findings) - 10} more")
-        lines.append("")
-        lines.append("Your subagent review must reference these findings — confirm, refute, or extend them. "
-                     "Do not duplicate the analysis; add value on top of it.")
-        deterministic_section = "\n".join(lines) + "\n\n"
+        deterministic_hint = (
+            f"\n## Pre-computed Analysis\n"
+            f"Verdict: {verdict} — {len(findings)} finding(s). "
+            f"Confirm, refute, or extend these in your review."
+        )
 
-    return f"""PR #{pr_number} in {owner}/{repo} — {total_loc} LOC changed.
+    return f"""Run the Riptide Conductor pipeline to review PR #{pr_number} in {owner}/{repo}.
 
-## Context (pre-gathered)
+## PR Context
 - Title: {pr_title}
 - Author: {pr_author}
 - HEAD SHA: {head_sha[:12]}
+- Total LOC changed: {total_loc}
+{deterministic_hint}
 
-### Files Changed
-{files_str}
+## Task
+1. Import and instantiate the Conductor for track "riptide-review-{owner}-{repo}-{pr_number}":
+   ```python
+   from riptide.pipeline.conductor import Conductor
+   conductor = Conductor("riptide-review-{owner}-{repo}-{pr_number}")
+   result = conductor.run()
+   ```
+2. The Conductor will dispatch workers: Probe → Judge → Artisan → Engine → Scribe.
+3. The Scribe posts the final review to the PR.
 
-### Repository Tree
-```
-{format_repo_tree(data.get("repo_tree", []))}
-```
-
-### Diff Summary
-````
-{diff_summary}
-````
-
-### Graphify Analysis
-{graph_str}
-{diagram_section}
-{deterministic_section}## Your Task: Orchestrate Review
-
-You are a senior engineer. Delegate review tasks to subagents, then synthesize.
-
-### Step 1: Delegate Inline Review
-Spawn a subagent with:
-- Role: Code reviewer
-- Task: Call `skill_view('deep-think')` first, then analyze the PR diff, post 1-3 inline review comments with GitHub suggestion blocks
-- Output: JSON list of findings [{{file, line, severity, title, detail}}]
-Severity must be one of: critical, warning, suggestion, info, approved.
-
-### Step 2: Write Findings JSON
-After the inline review subagent finishes, write its findings to /tmp/findings.json as JSON:
-[{{severity, title, detail, file, line}}]
-
-### Step 3: Assemble + Post Review (deterministic)
-Run the assembly script — it validates, formats, and posts. Do NOT hand-format the review.
-
-```
-python -m riptide.assemble_review \
-  --findings /tmp/findings.json \
-  --owner {owner} --repo {repo} --pr {pr_number} \
-  --diagram-url "{diagram_url}" \
-  --model "{DEEPTHINK_MODEL}" --provider "{DEEPTHINK_PROVIDER}" \
-  --pr-created-at "{pr_created_at}" \
-  --triggered-at "{triggered_at}"
-```
-
-The script appends the model/provider to the sign-off deterministically.
-
-### Rules
-- Max 3 inline comments, real issues only
-- Do not invent problems or pad the review
-- Reference inline comments in the summary
-- The Code Analysis and Explanation sections are REQUIRED — never omit them
-- If a section has nothing to report, say so explicitly ("No significant findings") rather than omitting it
-{diagram_step}
+{diagram_line}
 REPO PATH: ~/workspace/{repo}/
 """
 
@@ -880,3 +837,151 @@ def run():
 
 if __name__ == "__main__":
     run()
+
+
+# ── Backward compat ──────────────────────────────────────────────────────────
+
+# _build_orchestrator_prompt is retained for backward compatibility with
+# existing tests. The _spawn_deepthink path now uses _build_conductor_prompt
+# which instructs the Hermes session to run the Conductor pipeline.
+# See create_deepthink_review_pipeline() in riptide.pipeline.conductor.
+def _build_orchestrator_prompt(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    pr_title: str,
+    pr_author: str,
+    total_loc: int,
+    head_sha: str,
+    data: dict,
+    diagram_url: Optional[str] = None,
+    deterministic: Optional[dict] = None,
+    pr_created_at: Optional[str] = None,
+    triggered_at: Optional[str] = None,
+) -> str:
+    """
+    Build the original orchestrator prompt (retained for backward compat).
+
+    This function is preserved for existing tests. The new Conductor-based
+    path uses _build_conductor_prompt instead. Kept so existing tests that
+    import this name continue to pass with the legacy inline format.
+    """
+    # Format files changed
+    files_str = "\n".join(
+        f"  - {f.get('filename', '?')} (+{f.get('additions', 0)}/-{f.get('deletions', 0)})"
+        for f in data["files_changed"][:20]
+    )
+
+    # Format diff summary (first 12k chars)
+    diff_summary = data["diff_raw"][:12000]
+    if len(data["diff_raw"]) > 12000:
+        diff_summary += f"\n  ... ({len(data['diff_raw'])} chars total)"
+
+    # Format graphify context
+    graph_str = ""
+    if data["god_nodes"]:
+        graph_str += "God Nodes:\n"
+        for node in data["god_nodes"][:5]:
+            graph_str += f"  - {node['name']} ({node['edges']} edges)\n"
+    if data["communities"]:
+        graph_str += "Communities:\n"
+        for comm in data["communities"][:5]:
+            graph_str += f"  - {comm['name']}\n"
+    if not graph_str:
+        graph_str = "(No graphify analysis available)"
+
+    diagram_section = f"\n## Pre-generated Architecture Diagram\n[View Diagram]({diagram_url})\n" if diagram_url else ""
+    diagram_step = "\n### Step 4: Architecture Diagram\nThe architecture diagram is pre-generated and embedded above. Reference it in your Code Analysis section.\n" if diagram_url else ""
+
+    # Deterministic analysis section (WS-3 Stage 1): pre-computed DiffReport findings
+    deterministic_section = ""
+    if deterministic:
+        verdict = deterministic.get("verdict", "pass")
+        findings = deterministic.get("findings", [])
+        stats = deterministic.get("stats", {})
+        concepts = deterministic.get("aggregate", {}).get("concepts", [])
+        lines = ["## Deterministic Analysis (pre-computed)", ""]
+        lines.append(f"Verdict: **{verdict}** — {len(findings)} finding(s), "
+                     f"{stats.get('total_add', 0)}+/"
+                     f"{stats.get('total_del', 0)}- across "
+                     f"{stats.get('file_count', 0)} file(s).")
+        if concepts:
+            lines.append(f"Concepts touched: {', '.join(concepts)}")
+        if findings:
+            lines.append("")
+            lines.append("Findings (verify against the diff, do NOT re-derive from scratch):")
+            for f in findings[:10]:
+                lines.append(
+                    f"- [{f.get('severity', 'info')}] {f.get('category', '?')}: "
+                    f"{f.get('message', '')}"
+                    + (f" — {f.get('file', '')}" if f.get('file') else "")
+                )
+            if len(findings) > 10:
+                lines.append(f"  … and {len(findings) - 10} more")
+        lines.append("")
+        lines.append("Your subagent review must reference these findings — confirm, refute, or extend them. "
+                     "Do not duplicate the analysis; add value on top of it.")
+        deterministic_section = "\n".join(lines) + "\n\n"
+
+    return f"""PR #{pr_number} in {owner}/{repo} — {total_loc} LOC changed.
+
+## Context (pre-gathered)
+- Title: {pr_title}
+- Author: {pr_author}
+- HEAD SHA: {head_sha[:12]}
+
+### Files Changed
+{files_str}
+
+### Repository Tree
+```
+{format_repo_tree(data.get("repo_tree", []))}
+```
+
+### Diff Summary
+````
+{diff_summary}
+````
+
+### Graphify Analysis
+{graph_str}
+{diagram_section}
+{deterministic_section}## Your Task: Orchestrate Review
+
+You are a senior engineer. Delegate review tasks to subagents, then synthesize.
+
+### Step 1: Delegate Inline Review
+Spawn a subagent with:
+- Role: Code reviewer
+- Task: Call `skill_view('deep-think')` first, then analyze the PR diff, post 1-3 inline review comments with GitHub suggestion blocks
+- Output: JSON list of findings [{{file, line, severity, title, detail}}]
+Severity must be one of: critical, warning, suggestion, info, approved.
+
+### Step 2: Write Findings JSON
+After the inline review subagent finishes, write its findings to /tmp/findings.json as JSON:
+[{{severity, title, detail, file, line}}]
+
+### Step 3: Assemble + Post Review (deterministic)
+Run the assembly script — it validates, formats, and posts. Do NOT hand-format the review.
+
+```
+python -m riptide.assemble_review \
+  --findings /tmp/findings.json \
+  --owner {owner} --repo {repo} --pr {pr_number} \
+  --diagram-url "{diagram_url}" \
+  --model "{DEEPTHINK_MODEL}" --provider "{DEEPTHINK_PROVIDER}" \
+  --pr-created-at "{pr_created_at}" \
+  --triggered-at "{triggered_at}"
+```
+
+The script appends the model/provider to the sign-off deterministically.
+
+### Rules
+- Max 3 inline comments, real issues only
+- Do not invent problems or pad the review
+- Reference inline comments in the summary
+- The Code Analysis and Explanation sections are REQUIRED — never omit them
+- If a section has nothing to report, say so explicitly ("No significant findings") rather than omitting it
+{diagram_step}
+REPO PATH: ~/workspace/{repo}/
+"""
