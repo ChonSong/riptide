@@ -9,45 +9,19 @@
 
 ## 1. Project Overview
 
-Riptide is a self-hosted GitHub App with a **Conductor-orchestrated multi-stage pipeline**:
+Riptide is a self-hosted GitHub App with a **Conductor-orchestrated multi-stage pipeline**. See **[`ARCHITECTURE.md`](ARCHITECTURE.md)** for full system design.
 
-| Stage | Role | Trigger | What it does |
-|-------|------|---------|--------------|
-| 1 | probe | PR open / `@review` / `@fix` | Gathers diff, context bundle, graphify, cleanliness signals |
-| 2 | judge | After probe | Evaluates diff, dedups findings, produces structured findings |
-| 3 | artisan | After judge | Generates Excalidraw diagram |
-| 4 | engine | After artisan | Uploads diagram / runs tests + pushes fixes |
-| 5 | ci_verifier | After fix push | Polls GitHub CI, classifies failures, retries once if fixable |
-| 6 | scribe | After engine/ci_verifier | Posts review/fix summary comment |
-| 7 | cleanliness | After scribe (review) | Evaluates PR hygiene: conflicts, related PRs, test coverage, description |
+### Quick Reference
 
-### Architecture
-
-```
-GitHub Webhook → FastAPI /webhook (server.py)
-  ├─ pull_request → Companion.run_for_pr() (semaphore-guarded)
-  ├─ issue_comment (@riptide-bot review) → handle_review_command() → Conductor review pipeline
-  ├─ issue_comment (@riptide-bot fix) → handle_fix_command() → Conductor fix pipeline
-  └─ issue_comment (@riptide-bot proofshot) → handle_manual_command()
-
-Cron (Hermes) → riptide/poller.py → poll() → Conductor review pipeline
-                                              → Companion.run_for_pr() (no webhook_received_at)
-
-Conductor Pipeline (riptide/pipeline/conductor.py)
-  ├─ probe.py: context gathering + cleanliness signals
-  ├─ judge.py: findings evaluation + dedup
-  ├─ artisan.py: diagram generation
-  ├─ engine.py: shell command execution
-  ├─ ci_verifier.py: CI status polling + classification
-  ├─ cleanliness.py: PR hygiene evaluation
-  └─ scribe.py: comment posting + state updates
-```
-
-### State
-
-- SQLite at `~/.local/share/riptide/state.db`
-- Tables: `deliveries` (webhook dedup), `pr_heuristics` (SHA + timestamp for cooldown), `jobs` (spawn queue), `work_queue` (durable work queue)
-- Job tuple: `(id, pr_number, tier, status, created_at, completed_at)`
+| Stage | Role | What it does |
+|-------|------|--------------|
+| 1 | probe | Gathers diff, context bundle, graphify, cleanliness signals |
+| 2 | judge | Evaluates diff, dedups findings |
+| 3 | artisan | Generates Excalidraw diagram |
+| 4 | engine | Runs tests, pushes commits |
+| 5 | ci_verifier | Polls GitHub CI, classifies failures |
+| 6 | scribe | Posts review/fix summary comment |
+| 7 | cleanliness | Evaluates PR hygiene |
 
 ---
 
@@ -64,9 +38,9 @@ Conductor Pipeline (riptide/pipeline/conductor.py)
 
 ### Key Changes (PR #174)
 
-1. **CI Verifier stage** — Polls `gh pr checks` after fix push, classifies failures (fixable vs non-fixable), retries once for fixable failures
-2. **Cleanliness stage** — Evaluates 7 PR hygiene signals: merge conflicts, related PRs, test coverage, description quality, commit hygiene, staleness, CI pre-check
-3. **Extended probe** — `_gather_cleanliness_signals()` + 7 helper methods for deterministic signal gathering
+1. **CI Verifier stage** — Polls `gh pr checks` after fix push, classifies failures (fixable vs non-fixable), retries once
+2. **Cleanliness stage** — Evaluates 7 PR hygiene signals during review
+3. **Extended probe** — `_gather_cleanliness_signals()` + 7 helper methods
 4. **New fix pipeline** — 6 stages: probe → judge → artisan → engine → ci_verifier → scribe
 5. **Extended review pipeline** — 6 stages: probe → judge → artisan → engine → scribe → cleanliness
 
@@ -184,65 +158,22 @@ Excalidraw URLs render as clickable links, not embedded images. GitHub markdown 
 
 ---
 
-## 6. Key Files Reference
+## 6. Companion Spawn Troubleshooting
 
-### Production Code
+When the companion does NOT fire for a PR, check logs in this order:
 
-| File | Purpose |
-|------|---------|
-| `server.py` | FastAPI/uvicorn entry point |
-| `riptide/webhook.py` | Webhook handler, deploy trigger, background thread spawning |
-| `riptide/companion.py` | Bot 1: TL;DR + ELI5 + timing footer |
-| `riptide/deepthink.py` | Bot 2: Cron + @riptide-bot review spawner |
-| `riptide/fixer.py` | Bot 2b: Autonomous fix (now uses Conductor fix pipeline) |
-| `riptide/poller.py` | Cron entry point for Bot 2/3 discovery |
-| `riptide/assemble_review.py` | Post-process LLM findings into review comment |
-| `riptide/state.py` | SQLite-backed state (dedup, jobs, heuristics, work_queue) |
-| `riptide/labeler.py` | GitHub label engine |
-| `riptide/depth.py` | ReviewDepth enum + classifier |
-| `riptide/grafiphy/orchestrator.py` | Excalidraw diagram pre-generation |
+| Symptom | Meaning | Action |
+|---------|---------|--------|
+| No log entry for PR at all | Webhook delivery failure | Close+reopen PR to retrigger |
+| `"No installation ID, skipping"` | App not installed, not in WATCHED_REPOS | Add repo to WATCHED_REPOS or install App |
+| `"No installation ID, using gh CLI fallback"` then no more logs | gh CLI failed | Check `gh auth status` |
+| `"Busy, skipping {PR}"` | Semaphore held by another PR | Normal — will fire on next sync |
+| `"Companion deterministic flow spawned"` then `"No actionable findings"` | Companion ran but found nothing | Working as designed |
+| `"Companion flow crashed: ..."` | Exception in companion | Check traceback |
+| `"Warm-up failed: ..."` | Ollama timeout | Non-fatal — companion still runs |
+| `"Posted TLDR for {PR}"` | Success | Check PR comment |
 
-### Pipeline Code (New)
-
-| File | Purpose |
-|------|---------|
-| `riptide/pipeline/conductor.py` | Orchestrator — dispatches workers, manages tracks/workstreams |
-| `riptide/pipeline/probe.py` | Context gathering + cleanliness signals |
-| `riptide/pipeline/judge.py` | Findings evaluation + dedup |
-| `riptide/pipeline/artisan.py` | Diagram generation |
-| `riptide/pipeline/engine.py` | Shell command execution |
-| `riptide/pipeline/ci_verifier.py` | CI status polling + classification |
-| `riptide/pipeline/cleanliness.py` | PR hygiene evaluation |
-| `riptide/pipeline/scribe.py` | Comment posting + state updates |
-| `riptide/pipeline/warden.py` | Output verification |
-| `riptide/pipeline/roles.py` | Worker role definitions |
-| `riptide/pipeline/work_state.py` | Track/workstream state management |
-| `riptide/pipeline/recovery.py` | Stall detection + recovery |
-
-### Config & Deploy
-
-| File | Purpose |
-|------|---------|
-| `.github/workflows/riptide-review-required.yml` | CI gate: fail-closed on no review |
-| `.github/workflows/test-required.yml` | CI gate: feat/fix commits need tests |
-| `scripts/deploy.sh` | Auto-deploy: pull, clean, restart, smoke test |
-| `scripts/upload_excalidraw.py` | Fallback Excalidraw upload script |
-
-### Environment Variables
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `RIPTIDE_DEEPTHINK_MODEL` | `LongCat-2.0` | Model for deep-think sessions |
-| `RIPTIDE_DEEPTHINK_PROVIDER` | `longcat` | Provider for deep-think |
-| `RIPTIDE_FIX_MODEL` | `LongCat-2.0` | Model for fix sessions |
-| `RIPTIDE_FIX_PROVIDER` | `longcat` | Provider for fix |
-| `RIPTIDE_WORKSPACE_ROOT` | `/home/sc/workspace` | Spawned session PYTHONPATH |
-| `RIPTIDE_OUR_USERNAME` | `ChonSong` | GitHub username for auth |
-| `RIPTIDE_OUR_ORG` | `ChonSong` | GitHub org for ownership |
-| `RIPTIDE_WATCHED_REPOS` | (list) | Comma-separated repos to poll |
-| `RIPTIDE_DEPLOY_BRANCH` | `main` | Branch that triggers auto-deploy |
-| `RIPTIDE_PROOFSHOT_TIMEOUT` | `180` | Proofshot watchdog timeout (s) |
-| `RIPTIDE_INTERACTION_COOLDOWN` | `300` | Command cooldown (s) |
+**Don't assume code bug** — verify via logs first. Most "companion not spawned" reports are either (a) webhook delivery failure, (b) intentional skip for unwatched repos, or (c) "No actionable findings" suppression.
 
 ---
 
