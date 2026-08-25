@@ -1,16 +1,26 @@
 #!/usr/bin/env python3
-# riptide/checkbox.py — Checkbox parsing, reset, footer generation for Riptide Companion.
-#
-# Provides utilities to parse checkbox state from comment bodies, detect toggles
-# between edits, reset checkbacks to unchecked, and build the checkbox footer
-# appended to Tier-1 TL;DR comments.
+"""
+riptide/checkbox.py — Interactive checkbox button system for Riptide Companion.
+
+Parses GitHub webhook payloads to detect checkbox toggles in PR comments,
+dispatches actions, and resets checkboxes so they can be clicked again.
+
+Checkbox taxonomy:
+    🔍 Trigger review  → deep-think review
+    🛠 Fix issues       → fixer bot
+    📸 ProofShot       → visual verification
+    🏷️ Relabel          → re-classify & apply labels
+
+Each checkbox label is stable text — never changes, so diff parsing is deterministic.
+"""
 
 from __future__ import annotations
 
 import re
 from typing import Optional
 
-# ── Constants ─────────────────────────────────────────────────────────────────
+# ── Checkbox taxonomy ─────────────────────────────────────────────────────────
+# Maps checkbox label → action identifier (used for dispatch + dedup).
 
 CHECKBOX_ACTIONS: dict[str, str] = {
     "🔍 Trigger review": "review",
@@ -19,239 +29,206 @@ CHECKBOX_ACTIONS: dict[str, str] = {
     "🏷️ Relabel": "relabel",
 }
 
+# Reverse lookup: action → label
 ACTION_LABELS: dict[str, str] = {v: k for k, v in CHECKBOX_ACTIONS.items()}
 
-CHECKBOX_FOOTER_PREFIX = "---"
+# ── Regex ─────────────────────────────────────────────────────────────────────
 
-DEFAULT_ACTIONS = ["review", "fix", "visual", "relabel"]
-
-
-# ── Regex Patterns ───────────────────────────────────────────────────────────
-
-# Matches a single checkbox line: "- [ ]" or "- [x]" or "- [X]"
+# Matches checkbox lines: "- [ ] label" or "- [x] label" or "- [X] label"
+# Group 1: checkbox state (' ', 'x', or 'X')
+# Group 2: label text (everything after "] ")
 CHECKBOX_RE = re.compile(r"^- \[([ xX])\] (.+)$", re.MULTILINE)
 
-# Matches a checkbox block starting with "---" separator
+# Footer separator + checkbox block
+# Matches the entire checkbox block at the end of a comment
 CHECKBOX_BLOCK_RE = re.compile(
-    r"^---\s*\n((?:- \[[ xX]\].*\n?)+)",
+    r"(?P<sep>^---$\s*)?(?P<block>(?:^- \[([ xX])\] .+$\s?)+)",
     re.MULTILINE,
 )
 
 
-# ── Parsing Functions ─────────────────────────────────────────────────────────
+# ── Parsing ───────────────────────────────────────────────────────────────────
 
 
 def parse_checkbox_state(body: str) -> dict[str, bool]:
     """
-    Parse a comment body and return a mapping of label → checked state.
+    Parse all checkboxes from a comment body.
 
-    Only recognizes labels defined in CHECKBOX_ACTIONS. Unknown checkbox
-    labels are silently ignored.
-
-    Args:
-        body: The full comment body text.
-
-    Returns:
-        Dict mapping label strings to boolean checked state.
+    Returns dict of {label: checked} for all checkboxes found.
     """
     state: dict[str, bool] = {}
     for match in CHECKBOX_RE.finditer(body):
-        checked_char = match.group(1).strip().lower()
+        checked_char = match.group(1)
         label = match.group(2).strip()
-        if label in CHECKBOX_ACTIONS:
-            state[label] = checked_char == "x"
+        state[label] = checked_char in ("x", "X")
     return state
 
 
-def _parse_all_checkboxes(body: str) -> dict[str, bool]:
+def parse_checkbox_toggles(old_body: str | None, new_body: str) -> list[str]:
     """
-    Parse ALL checkboxes (not just known actions) for toggle detection.
+    Return labels of checkboxes that changed from [ ] → [x] (unchecked to checked).
 
-    Returns:
-        Dict mapping full label strings to boolean checked state.
-    """
-    state: dict[str, bool] = {}
-    for match in CHECKBOX_RE.finditer(body):
-        checked_char = match.group(1).strip().lower()
-        label = match.group(2).strip()
-        state[label] = checked_char == "x"
-    return state
-
-
-def parse_checkbox_toggles(old_body: str, new_body: str) -> list[str]:
-    """
-    Compare two comment bodies and return labels that were checked ([ ] → [x]).
-
-    Only reports transitions from unchecked to checked. Unchecks ([x] → [ ])
-    are ignored for action triggering but reported by parse_checkbox_unchecks.
+    This is the core detection function. Only fires on user-initiated checks,
+    not unchecks or unrelated edits.
 
     Args:
-        old_body: The previous comment body.
-        new_body: The new comment body after edit.
+        old_body: Previous comment body (from changes.body.from), or None if not available.
+        new_body: Current comment body.
 
     Returns:
-        List of action labels that were toggled on.
+        List of checkbox label strings that were freshly checked.
     """
-    old_state = _parse_all_checkboxes(old_body)
-    new_state = _parse_all_checkboxes(new_body)
+    old_state = parse_checkbox_state(old_body) if old_body else {}
+    new_state = parse_checkbox_state(new_body)
 
     toggled: list[str] = []
-    for label, new_checked in new_state.items():
-        old_checked = old_state.get(label, False)
-        if new_checked and not old_checked and label in CHECKBOX_ACTIONS:
+    for label, checked in new_state.items():
+        if checked and not old_state.get(label, False):
             toggled.append(label)
     return toggled
 
 
-def parse_checkbox_unchecks(old_body: str, new_body: str) -> list[str]:
+def parse_checkbox_unchecks(old_body: str | None, new_body: str) -> list[str]:
     """
-    Compare two comment bodies and return labels that were unchecked ([x] → [ ]).
+    Return labels of checkboxes that changed from [x] → [ ] (checked to unchecked).
 
-    Args:
-        old_body: The previous comment body.
-        new_body: The new comment body after edit.
-
-    Returns:
-        List of action labels that were toggled off.
+    Useful for detecting user-initiated cancellations (not used for dispatch,
+    but useful for logging/auditing).
     """
-    old_state = _parse_all_checkboxes(old_body)
-    new_state = _parse_all_checkboxes(new_body)
+    old_state = parse_checkbox_state(old_body) if old_body else {}
+    new_state = parse_checkbox_state(new_body)
 
-    unchecked: list[str] = []
-    for label, new_checked in new_state.items():
-        old_checked = old_state.get(label, False)
-        if not new_checked and old_checked and label in CHECKBOX_ACTIONS:
-            unchecked.append(label)
-    return unchecked
+    toggled: list[str] = []
+    for label, checked in new_state.items():
+        if not checked and old_state.get(label, False):
+            toggled.append(label)
+    return toggled
 
 
-# ── Reset Functions ───────────────────────────────────────────────────────────
+# ── Reset ─────────────────────────────────────────────────────────────────────
 
 
 def reset_checkboxes(body: str, labels: list[str]) -> str:
     """
-    Reset specific checkbox labels to unchecked state ([x] → [ ]) in the body.
+    Reset specified checkboxes to unchecked state.
 
-    Uses line-anchored regex replacement to ensure only exact labels are matched.
+    Uses line-anchored regex to avoid false positives (e.g., checkbox text
+    appearing in code blocks or diff quotes).
+    Labels not found in the body are silently ignored.
 
     Args:
-        body: The full comment body text.
-        labels: List of label strings to reset (e.g., "🔍 Trigger review").
+        body: Comment body text.
+        labels: List of checkbox labels to reset.
 
     Returns:
-        The body with specified checkboxes reset to [ ].
+        Body text with specified checkboxes unchecked.
     """
     for label in labels:
-        escaped = re.escape(label)
-        # Replace [x] or [X] with [ ] for this specific label
-        pattern = rf"^- \[([xX])\] {escaped}$"
+        # Use line-anchored regex to match only checkbox lines, not arbitrary text
+        pattern = rf"^- \[([xX])\] {re.escape(label)}$"
         body = re.sub(pattern, f"- [ ] {label}", body, flags=re.MULTILINE)
     return body
 
 
 def reset_all_checkboxes(body: str) -> str:
     """
-    Reset ALL known checkbox action labels to unchecked state.
+    Reset ALL checkboxes in the body to unchecked state.
 
-    Convenience wrapper around reset_checkboxes that resets all CHECKBOX_ACTIONS.
-
-    Args:
-        body: The full comment body text.
-
-    Returns:
-        The body with all known checkboxes reset to [ ].
+    Used when re-rendering a comment (e.g., Tier-2 enrichment) to ensure
+    all buttons start in the default unchecked state.
     """
-    return reset_checkboxes(body, list(CHECKBOX_ACTIONS.keys()))
+    return CHECKBOX_RE.sub(lambda m: f"- [ ] {m.group(2)}", body)
 
 
-# ── Footer Generation ────────────────────────────────────────────────────────
+# ── Footer generation ─────────────────────────────────────────────────────────
 
 
 def build_checkbox_footer(
-    actions: list[str],
-    checked: Optional[list[str]] = None,
+    actions: list[str] | None = None,
+    checked: list[str] | None = None,
 ) -> str:
     """
-    Build the checkbox footer block.
+    Build the checkbox footer block for a comment.
 
     Args:
-        actions: List of action identifiers (review, fix, visual, relabel).
-        checked: Optional list of action identifiers that should render as checked.
+        actions: List of action identifiers to include. Defaults to all.
+        checked: List of action identifiers that should start checked (rare).
 
     Returns:
-        The footer block string starting with "---\n" followed by checkbox lines.
+        Markdown string with checkbox block.
     """
+    if actions is None:
+        actions = list(CHECKBOX_ACTIONS.values())
+
     checked_set = set(checked or [])
-    lines = [CHECKBOX_FOOTER_PREFIX]
+    lines: list[str] = []
+
     for action in actions:
         label = ACTION_LABELS.get(action, action)
-        mark = "x" if action in checked_set else " "
-        lines.append(f"- [{mark}] {label}")
-    return "\n".join(lines) + "\n"
+        state = "x" if action in checked_set else " "
+        lines.append(f"- [{state}] {label}")
+
+    return "\n".join(lines)
 
 
-def build_comment_with_footer(body: str, actions: list[str]) -> str:
+def build_comment_with_footer(body: str, actions: list[str] | None = None) -> str:
     """
-    Build a comment body with the checkbox footer appended.
+    Append a checkbox footer to an existing comment body.
 
-    If the body already contains a checkbox footer (detected by CHECKBOX_BLOCK_RE),
-    it is replaced. Otherwise, the footer is appended to the end.
+    If the body already has a checkbox block, it is replaced.
+    Otherwise, the footer is appended after a separator.
 
     Args:
-        body: The base comment body.
-        actions: List of action identifiers for the footer.
+        body: Existing comment body.
+        actions: List of action identifiers to include.
 
     Returns:
-        The body with a fresh checkbox footer.
+        Body with checkbox footer.
     """
+    # Remove existing checkbox block if present
+    body = strip_checkbox_footer(body)
+
+    # Append footer
     footer = build_checkbox_footer(actions)
-
-    # If body already has a checkbox block, replace it
-    if CHECKBOX_BLOCK_RE.search(body):
-        # Replace from the "---" before checkboxes to end
-        body = CHECKBOX_BLOCK_RE.sub(footer.rstrip(), body)
-        return body
-
-    # No existing footer — append to end
-    body = body.rstrip("\n")
-    return body + "\n\n" + footer
+    return f"{body}\n\n---\n{footer}"
 
 
 def strip_checkbox_footer(body: str) -> str:
     """
-    Remove the checkbox footer from a comment body.
+    Remove the checkbox footer block from a comment body.
 
-    Removes everything from the first checkbox block match to the end of the body.
-
-    Args:
-        body: The full comment body.
-
-    Returns:
-        The body with checkbox footer removed.
+    Returns the body with the separator and checkbox block removed.
+    Uses finditer() to handle multiple checkbox blocks (e.g., from stale
+    enrichment cycles) — strips from the first match to end of body.
     """
-    match = CHECKBOX_BLOCK_RE.search(body)
-    if match:
-        return body[: match.start()].rstrip("\n")
+    # Strip ALL checkbox blocks, not just the first
+    matches = list(CHECKBOX_BLOCK_RE.finditer(body))
+    if matches:
+        # Remove from the start of the first match to end of body
+        start = matches[0].start("sep") if matches[0].group("sep") else matches[0].start("block")
+        body = body[:start].rstrip()
     return body
 
 
-# ── Webhook Payload Extraction ───────────────────────────────────────────────
+# ── Webhook payload helpers ───────────────────────────────────────────────────
 
 
 def extract_comment_edit(payload: dict) -> Optional[dict]:
     """
-    Extract comment edit info from an issue_comment edited webhook payload.
+    Extract relevant fields from an issue_comment edited webhook payload.
 
-    Returns a normalized dict with:
-        - body: new comment body
-        - old_body: previous comment body
-        - comment_id: the comment's ID
-        - pr_number: the PR number
-        - owner, repo: repository info
-        - author: commenter login
-        - is_pr: whether the issue is a PR
+    Returns None if the payload is not a comment edit or lacks required fields.
 
-    Returns None if the payload is not a valid comment edit on a PR.
+    Returned dict has:
+        - comment_id: int
+        - old_body: str (from changes.body.from)
+        - new_body: str (from comment.body)
+        - commenter: str (user.login)
+        - is_bot: bool (user.type == "Bot")
+        - pr_number: int
+        - owner: str
+        - repo: str
+        - installation_id: int
     """
     action = payload.get("action", "")
     if action != "edited":
@@ -259,73 +236,74 @@ def extract_comment_edit(payload: dict) -> Optional[dict]:
 
     comment = payload.get("comment", {})
     issue = payload.get("issue", {})
+    repo = payload.get("repository", {})
+    installation = payload.get("installation", {})
 
     # Must be a PR comment
-    if not issue.get("pull_request"):
+    if "pull_request" not in issue:
         return None
 
-    body = comment.get("body", "")
-    old_body = (
-        payload.get("changes", {}).get("body", {}).get("from", "")
-    )
+    # Must have body changes
+    changes = payload.get("changes", {})
+    old_body = changes.get("body", {}).get("from")
+    new_body = comment.get("body", "")
 
-    if not body and not old_body:
+    if old_body is None:
+        # No body change (e.g., only reaction added) — not a checkbox toggle
         return None
 
-    repo = payload.get("repository", {})
-    owner, repo_name = _split_full_name(repo.get("full_name", ""))
+    user = comment.get("user", {})
+    repo_full = repo.get("full_name", "")
 
     return {
-        "body": body,
-        "old_body": old_body,
         "comment_id": comment.get("id"),
+        "old_body": old_body,
+        "new_body": new_body,
+        "commenter": user.get("login", "unknown"),
+        "is_bot": user.get("type") == "Bot",
         "pr_number": issue.get("number"),
-        "owner": owner,
-        "repo": repo_name,
-        "author": comment.get("user", {}).get("login", ""),
-        "is_pr": True,
+        "owner": repo_full.split("/")[0] if repo_full else "",
+        "repo": repo.get("name", ""),
+        "installation_id": installation.get("id"),
     }
 
 
 def extract_pr_body_edit(payload: dict) -> Optional[dict]:
     """
-    Extract PR body edit info from a pull_request edited webhook payload.
+    Extract relevant fields from a pull_request edited webhook payload.
 
-    Returns a normalized dict similar to extract_comment_edit but for PR body edits.
-    Returns None if the payload is not a valid PR body edit.
+    Returns None if the payload is not a PR body edit or lacks required fields.
+
+    Returned dict has:
+        - old_body: str (from changes.body.from)
+        - new_body: str (from pull_request.body)
+        - pr_number: int
+        - owner: str
+        - repo: str
+        - installation_id: int
     """
     action = payload.get("action", "")
     if action != "edited":
         return None
 
     pr = payload.get("pull_request", {})
-    if not pr:
-        return None
-
-    body = pr.get("body", "") or ""
-    old_body = payload.get("changes", {}).get("body", {}).get("from", "") or ""
-
-    if not body and not old_body:
-        return None
-
     repo = payload.get("repository", {})
-    owner, repo_name = _split_full_name(repo.get("full_name", ""))
+    installation = payload.get("installation", {})
+
+    changes = payload.get("changes", {})
+    old_body = changes.get("body", {}).get("from")
+    new_body = pr.get("body", "")
+
+    if old_body is None:
+        return None
+
+    repo_full = repo.get("full_name", "")
 
     return {
-        "body": body,
         "old_body": old_body,
-        "comment_id": None,  # Not a comment edit
+        "new_body": new_body,
         "pr_number": pr.get("number"),
-        "owner": owner,
-        "repo": repo_name,
-        "author": pr.get("user", {}).get("login", ""),
-        "is_pr": True,
+        "owner": repo_full.split("/")[0] if repo_full else "",
+        "repo": repo.get("name", ""),
+        "installation_id": installation.get("id"),
     }
-
-
-def _split_full_name(full_name: str) -> tuple[str, str]:
-    """Split 'owner/repo' into (owner, repo) tuple."""
-    parts = full_name.split("/", 1)
-    if len(parts) == 2:
-        return parts[0], parts[1]
-    return "", ""

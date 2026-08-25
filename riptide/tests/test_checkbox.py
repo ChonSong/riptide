@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-# riptide/tests/test_checkbox.py — Pure unit tests for checkbox parsing.
+"""
+Tests for riptide/checkbox.py — interactive checkbox button system.
+
+Covers parsing, toggles, reset, footer generation, and webhook payload extraction.
+"""
 
 import pytest
+
 from riptide.checkbox import (
+    CHECKBOX_RE,
     CHECKBOX_ACTIONS,
     ACTION_LABELS,
-    CHECKBOX_RE,
-    CHECKBOX_BLOCK_RE,
     parse_checkbox_state,
     parse_checkbox_toggles,
     parse_checkbox_unchecks,
@@ -20,380 +24,398 @@ from riptide.checkbox import (
 )
 
 
-class TestConstants:
-    """Test that constants are correctly defined."""
-
-    def test_checkbox_actions_dict(self):
-        assert "🔍 Trigger review" in CHECKBOX_ACTIONS
-        assert CHECKBOX_ACTIONS["🔍 Trigger review"] == "review"
-        assert CHECKBOX_ACTIONS["🛠 Fix issues"] == "fix"
-        assert CHECKBOX_ACTIONS["📸 ProofShot"] == "visual"
-        assert CHECKBOX_ACTIONS["🏷️ Relabel"] == "relabel"
-
-    def test_action_labels_reverse(self):
-        assert ACTION_LABELS["review"] == "🔍 Trigger review"
-        assert ACTION_LABELS["fix"] == "🛠 Fix issues"
-        assert ACTION_LABELS["visual"] == "📸 ProofShot"
-        assert ACTION_LABELS["relabel"] == "🏷️ Relabel"
-
-    def test_actions_are_complete(self):
-        assert len(CHECKBOX_ACTIONS) == 4
-        assert set(CHECKBOX_ACTIONS.values()) == {"review", "fix", "visual", "relabel"}
+# ── Regex ─────────────────────────────────────────────────────────────────────
 
 
 class TestCheckboxRegex:
-    """Test the CHECKBOX_RE pattern."""
+    """Verify CHECKBOX_RE matches valid checkbox lines."""
 
-    def test_match_unchecked(self):
-        m = CHECKBOX_RE.match("- [ ] some label")
+    def test_unchecked(self):
+        m = CHECKBOX_RE.match("- [ ] 🔍 Trigger review")
         assert m is not None
         assert m.group(1) == " "
-        assert m.group(2) == "some label"
+        assert m.group(2) == "🔍 Trigger review"
 
-    def test_match_checked_lowercase(self):
-        m = CHECKBOX_RE.match("- [x] some label")
-        assert m is not None
+    def test_checked_lowercase(self):
+        m = CHECKBOX_RE.match("- [x] 🛠 Fix issues")
         assert m.group(1) == "x"
+        assert m.group(2) == "🛠 Fix issues"
 
-    def test_match_checked_uppercase(self):
-        m = CHECKBOX_RE.match("- [X] some label")
-        assert m is not None
+    def test_checked_uppercase(self):
+        m = CHECKBOX_RE.match("- [X] 📸 ProofShot")
         assert m.group(1) == "X"
+        assert m.group(2) == "📸 ProofShot"
 
     def test_no_match_non_checkbox(self):
-        assert CHECKBOX_RE.match("just text") is None
+        assert CHECKBOX_RE.match("Regular text line") is None
+
+    def test_no_match_empty_line(self):
+        assert CHECKBOX_RE.match("") is None
 
     def test_no_match_partial(self):
-        assert CHECKBOX_RE.match("[ ] missing dash") is None
+        assert CHECKBOX_RE.match("- [ ]") is None
 
-    def test_no_match_empty_label(self):
-        m = CHECKBOX_RE.match("- [ ] ")
-        # Empty label after strip - regex requires at least 1 char
-        assert m is None
+    def test_multiple_checkboxes(self):
+        body = "- [ ] 🔍 Trigger review\n- [x] 🛠 Fix issues\n- [ ] 📸 ProofShot"
+        matches = list(CHECKBOX_RE.finditer(body))
+        assert len(matches) == 3
+        assert matches[0].group(2) == "🔍 Trigger review"
+        assert matches[1].group(2) == "🛠 Fix issues"
+        assert matches[2].group(2) == "📸 ProofShot"
 
 
-class TestCheckboxBlockRegex:
-    """Test CHECKBOX_BLOCK_RE."""
-
-    def test_match_block(self):
-        text = "---\n- [ ] line 1\n- [x] line 2\n"
-        m = CHECKBOX_BLOCK_RE.search(text)
-        assert m is not None
-        assert "- [ ] line 1" in m.group(0)
-        assert "- [x] line 2" in m.group(0)
-
-    def test_match_block_with_separator(self):
-        text = "some text\n\n---\n- [ ] action\nmore text"
-        m = CHECKBOX_BLOCK_RE.search(text)
-        assert m is not None
+# ── Checkbox state parsing ───────────────────────────────────────────────────
 
 
 class TestParseCheckboxState:
-    """Test parse_checkbox_state."""
+    """Verify parse_checkbox_state extracts all checkboxes from a body."""
 
     def test_empty_body(self):
-        result = parse_checkbox_state("")
-        assert result == {}
+        assert parse_checkbox_state("") == {}
 
-    def test_all_unchecked(self):
-        body = "- [ ] 🔍 Trigger review\n- [ ] 🛠 Fix issues\n"
-        result = parse_checkbox_state(body)
-        assert result["🔍 Trigger review"] is False
-        assert result["🛠 Fix issues"] is False
+    def test_no_checkboxes(self):
+        assert parse_checkbox_state("Just some text\nNo boxes here") == {}
 
-    def test_all_checked(self):
-        body = "- [x] 🔍 Trigger review\n- [x] 🛠 Fix issues\n"
-        result = parse_checkbox_state(body)
-        assert result["🔍 Trigger review"] is True
-        assert result["🛠 Fix issues"] is True
+    def test_single_unchecked(self):
+        result = parse_checkbox_state("- [ ] 🔍 Trigger review")
+        assert result == {"🔍 Trigger review": False}
 
-    def test_mixed_state(self):
-        body = "- [x] 🔍 Trigger review\n- [ ] 🛠 Fix issues\n"
-        result = parse_checkbox_state(body)
-        assert result["🔍 Trigger review"] is True
-        assert result["🛠 Fix issues"] is False
-
-    def test_uppercase_x(self):
-        body = "- [X] 🔍 Trigger review\n"
-        result = parse_checkbox_state(body)
-        assert result["🔍 Trigger review"] is True
-
-    def test_ignores_unknown_labels(self):
-        body = "- [ ] unknown label\n- [x] 🔍 Trigger review\n"
-        result = parse_checkbox_state(body)
-        assert "unknown label" not in result
-        assert result["🔍 Trigger review"] is True
-
-    def test_all_four_actions(self):
-        body = (
-            "- [ ] 🔍 Trigger review\n"
-            "- [ ] 🛠 Fix issues\n"
-            "- [ ] 📸 ProofShot\n"
-            "- [ ] 🏷️ Relabel\n"
-        )
-        result = parse_checkbox_state(body)
-        assert len(result) == 4
-        assert all(not v for v in result.values())
-
-    def test_body_with_other_content(self):
-        body = "Some review text\n\n---\n- [x] 🔍 Trigger review\n"
-        result = parse_checkbox_state(body)
+    def test_single_checked(self):
+        result = parse_checkbox_state("- [x] 🔍 Trigger review")
         assert result == {"🔍 Trigger review": True}
+
+    def test_mixed(self):
+        body = "- [ ] 🔍 Trigger review\n- [x] 🛠 Fix issues\n- [X] 📸 ProofShot"
+        result = parse_checkbox_state(body)
+        assert result == {
+            "🔍 Trigger review": False,
+            "🛠 Fix issues": True,
+            "📸 ProofShot": True,
+        }
+
+    def test_ignores_non_checkbox_lines(self):
+        body = "## Header\n- [ ] 🔍 Trigger review\nSome text\n- [x] 🛠 Fix issues"
+        result = parse_checkbox_state(body)
+        assert result == {
+            "🔍 Trigger review": False,
+            "🛠 Fix issues": True,
+        }
+
+
+# ── Toggle detection ─────────────────────────────────────────────────────────
 
 
 class TestParseCheckboxToggles:
-    """Test parse_checkbox_toggles."""
+    """Verify parse_checkbox_toggles detects [ ] → [x] transitions."""
 
-    def test_no_changes(self):
-        body = "- [ ] 🔍 Trigger review\n"
-        assert parse_checkbox_toggles(body, body) == []
+    def test_no_old_body(self):
+        """When old_body is None, all checked boxes are considered toggled."""
+        result = parse_checkbox_toggles(None, "- [x] 🔍 Trigger review")
+        assert result == ["🔍 Trigger review"]
 
-    def test_single_check(self):
-        old = "- [ ] 🔍 Trigger review\n"
-        new = "- [x] 🔍 Trigger review\n"
+    def test_single_toggle(self):
+        old = "- [ ] 🔍 Trigger review\n- [ ] 🛠 Fix issues"
+        new = "- [x] 🔍 Trigger review\n- [ ] 🛠 Fix issues"
         result = parse_checkbox_toggles(old, new)
         assert result == ["🔍 Trigger review"]
 
-    def test_multiple_checks(self):
-        old = "- [ ] 🔍 Trigger review\n- [ ] 🛠 Fix issues\n"
-        new = "- [x] 🔍 Trigger review\n- [x] 🛠 Fix issues\n"
+    def test_multiple_toggles(self):
+        old = "- [ ] 🔍 Trigger review\n- [ ] 🛠 Fix issues\n- [ ] 📸 ProofShot"
+        new = "- [x] 🔍 Trigger review\n- [x] 🛠 Fix issues\n- [ ] 📸 ProofShot"
         result = parse_checkbox_toggles(old, new)
-        assert "🔍 Trigger review" in result
-        assert "🛠 Fix issues" in result
-        assert len(result) == 2
+        assert result == ["🔍 Trigger review", "🛠 Fix issues"]
 
-    def test_uncheck_not_reported(self):
-        old = "- [x] 🔍 Trigger review\n"
-        new = "- [ ] 🔍 Trigger review\n"
+    def test_no_toggle_when_already_checked(self):
+        old = "- [x] 🔍 Trigger review"
+        new = "- [x] 🔍 Trigger review"
         result = parse_checkbox_toggles(old, new)
         assert result == []
 
-    def test_check_then_uncheck_reports_nothing(self):
-        # Both happen → should only report check (since state went back)
-        old = "- [ ] 🔍 Trigger review\n"
-        new = "- [ ] 🔍 Trigger review\n"
+    def test_no_toggle_on_uncheck(self):
+        """Unchecking should NOT trigger action."""
+        old = "- [x] 🔍 Trigger review"
+        new = "- [ ] 🔍 Trigger review"
         result = parse_checkbox_toggles(old, new)
         assert result == []
 
-    def test_unknown_label_not_reported(self):
-        old = "- [ ] some random label\n"
-        new = "- [x] some random label\n"
+    def test_no_toggle_when_unchanged(self):
+        old = "- [ ] 🔍 Trigger review\n- [ ] 🛠 Fix issues"
+        new = "- [ ] 🔍 Trigger review\n- [ ] 🛠 Fix issues"
         result = parse_checkbox_toggles(old, new)
         assert result == []
+
+    def test_text_edit_without_toggle(self):
+        """Editing other text in the comment should not trigger."""
+        old = "## TL;DR\nSome text\n- [ ] 🔍 Trigger review"
+        new = "## TL;DR\nEdited text\n- [ ] 🔍 Trigger review"
+        result = parse_checkbox_toggles(old, new)
+        assert result == []
+
+    def test_empty_bodies(self):
+        assert parse_checkbox_toggles("", "") == []
+        assert parse_checkbox_toggles(None, "") == []
 
 
 class TestParseCheckboxUnchecks:
-    """Test parse_checkbox_unchecks."""
+    """Verify parse_checkbox_unchecks detects [x] → [ ] transitions."""
 
     def test_single_uncheck(self):
-        old = "- [x] 🔍 Trigger review\n"
-        new = "- [ ] 🔍 Trigger review\n"
+        old = "- [x] 🔍 Trigger review"
+        new = "- [ ] 🔍 Trigger review"
         result = parse_checkbox_unchecks(old, new)
         assert result == ["🔍 Trigger review"]
 
-    def test_check_not_reported(self):
-        old = "- [ ] 🔍 Trigger review\n"
-        new = "- [x] 🔍 Trigger review\n"
+    def test_no_uncheck_when_checked(self):
+        old = "- [ ] 🔍 Trigger review"
+        new = "- [x] 🔍 Trigger review"
         result = parse_checkbox_unchecks(old, new)
         assert result == []
 
 
+# ── Reset ─────────────────────────────────────────────────────────────────────
+
+
 class TestResetCheckboxes:
-    """Test reset_checkboxes."""
+    """Verify reset_checkboxes unchecks specified boxes."""
 
     def test_reset_single(self):
-        body = "- [x] 🔍 Trigger review\n- [ ] 🛠 Fix issues\n"
+        body = "- [x] 🔍 Trigger review"
         result = reset_checkboxes(body, ["🔍 Trigger review"])
-        assert result == "- [ ] 🔍 Trigger review\n- [ ] 🛠 Fix issues\n"
+        assert result == "- [ ] 🔍 Trigger review"
 
     def test_reset_multiple(self):
-        body = "- [x] 🔍 Trigger review\n- [x] 🛠 Fix issues\n"
+        body = "- [x] 🔍 Trigger review\n- [X] 🛠 Fix issues\n- [ ] 📸 ProofShot"
         result = reset_checkboxes(body, ["🔍 Trigger review", "🛠 Fix issues"])
-        assert result == "- [ ] 🔍 Trigger review\n- [ ] 🛠 Fix issues\n"
+        assert result == "- [ ] 🔍 Trigger review\n- [ ] 🛠 Fix issues\n- [ ] 📸 ProofShot"
 
-    def test_reset_uppercase_x(self):
-        body = "- [X] 🔍 Trigger review\n"
-        result = reset_checkboxes(body, ["🔍 Trigger review"])
-        assert result == "- [ ] 🔍 Trigger review\n"
+    def test_reset_nonexistent_label(self):
+        """Labels not in body are silently ignored."""
+        body = "- [x] 🔍 Trigger review"
+        result = reset_checkboxes(body, ["Nonexistent"])
+        assert result == "- [x] 🔍 Trigger review"
 
-    def test_reset_preserves_other_content(self):
-        body = "Some text\n- [x] 🔍 Trigger review\n\nMore text\n"
-        result = reset_checkboxes(body, ["🔍 Trigger review"])
-        assert "Some text" in result
-        assert "More text" in result
-
-    def test_reset_non_matching_label(self):
-        body = "- [x] unknown label\n"
-        result = reset_checkboxes(body, ["🔍 Trigger review"])
-        # Should not modify unknown labels
-        assert result == "- [x] unknown label\n"
-
-    def test_reset_already_unchecked(self):
-        body = "- [ ] 🔍 Trigger review\n"
-        result = reset_checkboxes(body, ["🔍 Trigger review"])
-        assert result == "- [ ] 🔍 Trigger review\n"
+    def test_reset_empty_list(self):
+        body = "- [x] 🔍 Trigger review"
+        result = reset_checkboxes(body, [])
+        assert result == "- [x] 🔍 Trigger review"
 
 
 class TestResetAllCheckboxes:
-    """Test reset_all_checkboxes."""
+    """Verify reset_all_checkboxes unchecks all boxes."""
 
     def test_reset_all(self):
-        body = (
-            "- [x] 🔍 Trigger review\n"
-            "- [x] 🛠 Fix issues\n"
-            "- [x] 📸 ProofShot\n"
-            "- [x] 🏷️ Relabel\n"
-        )
+        body = "- [x] 🔍 Trigger review\n- [X] 🛠 Fix issues\n- [ ] 📸 ProofShot"
         result = reset_all_checkboxes(body)
+        assert result == "- [ ] 🔍 Trigger review\n- [ ] 🛠 Fix issues\n- [ ] 📸 ProofShot"
+
+    def test_no_checkboxes(self):
+        body = "Just text"
+        assert reset_all_checkboxes(body) == "Just text"
+
+
+# ── Footer generation ─────────────────────────────────────────────────────────
+
+
+class TestBuildCheckboxFooter:
+    """Verify build_checkbox_footer generates correct markdown."""
+
+    def test_default_all_actions(self):
+        result = build_checkbox_footer()
         assert "- [ ] 🔍 Trigger review" in result
         assert "- [ ] 🛠 Fix issues" in result
         assert "- [ ] 📸 ProofShot" in result
         assert "- [ ] 🏷️ Relabel" in result
 
-
-class TestBuildCheckboxFooter:
-    """Test build_checkbox_footer."""
-
-    def test_default_unchecked(self):
-        footer = build_checkbox_footer(["review", "fix"])
-        assert "---" in footer
-        assert "- [ ] 🔍 Trigger review" in footer
-        assert "- [ ] 🛠 Fix issues" in footer
+    def test_subset_of_actions(self):
+        result = build_checkbox_footer(actions=["review", "fix"])
+        assert "- [ ] 🔍 Trigger review" in result
+        assert "- [ ] 🛠 Fix issues" in result
+        assert "📸 ProofShot" not in result
 
     def test_with_checked(self):
-        footer = build_checkbox_footer(["review", "fix"], checked=["review"])
-        assert "- [x] 🔍 Trigger review" in footer
-        assert "- [ ] 🛠 Fix issues" in footer
+        result = build_checkbox_footer(actions=["review", "fix"], checked=["review"])
+        assert "- [x] 🔍 Trigger review" in result
+        assert "- [ ] 🛠 Fix issues" in result
 
     def test_empty_actions(self):
-        footer = build_checkbox_footer([])
-        assert footer.strip() == "---"
-
-    def test_unknown_action_uses_key_as_label(self):
-        footer = build_checkbox_footer(["unknown_action"])
-        assert "- [ ] unknown_action" in footer
+        result = build_checkbox_footer(actions=[])
+        assert result == ""
 
 
 class TestBuildCommentWithFooter:
-    """Test build_comment_with_footer."""
+    """Verify build_comment_with_footer appends footer correctly."""
 
-    def test_append_to_body_without_footer(self):
-        body = "Review text here"
-        result = build_comment_with_footer(body, ["review"])
-        assert "Review text here" in result
+    def test_append_to_simple_body(self):
+        body = "## TL;DR\nSome review text"
+        result = build_comment_with_footer(body, actions=["review"])
+        assert "## TL;DR\nSome review text" in result
+        assert "---" in result
         assert "- [ ] 🔍 Trigger review" in result
 
     def test_replace_existing_footer(self):
-        body = "Review text\n\n---\n- [x] 🔍 Trigger review\n"
-        result = build_comment_with_footer(body, ["review"])
-        # Should have exactly one footer block
-        count = result.count("🔍 Trigger review")
-        assert count == 1
+        body = "## TL;DR\nText\n\n---\n- [x] 🔍 Trigger review"
+        result = build_comment_with_footer(body, actions=["review"])
+        # Should have exactly one checkbox block
+        assert result.count("- [ ] 🔍 Trigger review") == 1
+        assert result.count("---") == 1
 
-    def test_preserves_original_content(self):
-        body = "## Review\n\nSome analysis\n\n---\n- [x] 🔍 Trigger review\n"
-        result = build_comment_with_footer(body, ["review"])
-        assert "## Review" in result
-        assert "Some analysis" in result
+    def test_no_duplicate_separator(self):
+        body = "## TL;DR\nText"
+        result = build_comment_with_footer(body, actions=["review"])
+        assert result.count("---") == 1
 
 
 class TestStripCheckboxFooter:
-    """Test strip_checkbox_footer."""
+    """Verify strip_checkbox_footer removes footer correctly."""
 
-    def test_strip_with_footer(self):
-        body = "Review text\n\n---\n- [x] 🔍 Trigger review\n"
+    def test_strip_with_separator(self):
+        body = "## TL;DR\nText\n\n---\n- [ ] 🔍 Trigger review"
         result = strip_checkbox_footer(body)
-        assert result.strip() == "Review text"
+        assert result == "## TL;DR\nText"
 
-    def test_strip_without_footer(self):
-        body = "Just review text"
+    def test_strip_without_separator(self):
+        body = "## TL;DR\nText\n- [ ] 🔍 Trigger review"
         result = strip_checkbox_footer(body)
-        assert result == "Just review text"
+        assert result == "## TL;DR\nText"
 
-    def test_strip_preserves_content_before_separator(self):
-        body = "Line 1\nLine 2\n\n---\n- [ ] 🔍 Trigger review\n"
+    def test_no_footer_to_strip(self):
+        body = "## TL;DR\nText"
         result = strip_checkbox_footer(body)
-        assert "Line 1" in result
-        assert "Line 2" in result
-        assert "🔍" not in result
+        assert result == "## TL;DR\nText"
+
+
+# ── Webhook payload extraction ────────────────────────────────────────────────
 
 
 class TestExtractCommentEdit:
-    """Test extract_comment_edit."""
+    """Verify extract_comment_edit parses webhook payloads correctly."""
 
-    def test_valid_edited_comment(self):
+    def test_valid_edit_payload(self):
         payload = {
             "action": "edited",
             "comment": {
-                "id": 123,
-                "body": "new body",
-                "user": {"login": "testuser"},
+                "id": 12345,
+                "body": "- [x] 🔍 Trigger review",
+                "user": {"login": "sean", "type": "User"},
             },
-            "issue": {
-                "number": 42,
-                "pull_request": {"url": "..."},
-                "user": {"login": "testuser"},
-            },
-            "changes": {"body": {"from": "old body"}},
-            "repository": {"full_name": "owner/repo"},
+            "changes": {"body": {"from": "- [ ] 🔍 Trigger review"}},
+            "issue": {"number": 456, "pull_request": {}},
+            "repository": {"full_name": "ChonSong/riptide", "name": "riptide"},
+            "installation": {"id": 789},
         }
         result = extract_comment_edit(payload)
         assert result is not None
-        assert result["body"] == "new body"
-        assert result["old_body"] == "old body"
-        assert result["comment_id"] == 123
-        assert result["pr_number"] == 42
+        assert result["comment_id"] == 12345
+        assert result["old_body"] == "- [ ] 🔍 Trigger review"
+        assert result["new_body"] == "- [x] 🔍 Trigger review"
+        assert result["commenter"] == "sean"
+        assert result["is_bot"] is False
+        assert result["pr_number"] == 456
+        assert result["owner"] == "ChonSong"
+        assert result["repo"] == "riptide"
+        assert result["installation_id"] == 789
 
-    def test_not_edited_action(self):
-        payload = {"action": "created", "comment": {"body": "test"}}
+    def test_non_edit_action(self):
+        payload = {"action": "created", "comment": {}}
         assert extract_comment_edit(payload) is None
 
-    def test_not_a_pr(self):
+    def test_not_a_pr_comment(self):
         payload = {
             "action": "edited",
-            "comment": {"id": 1, "body": "x", "user": {"login": "a"}},
-            "issue": {"number": 1},  # No pull_request key
-            "changes": {"body": {"from": "y"}},
-            "repository": {"full_name": "owner/repo"},
+            "comment": {"body": "- [x] 🔍 Trigger review"},
+            "changes": {"body": {"from": "- [ ] 🔍 Trigger review"}},
+            "issue": {"number": 456},  # No pull_request key
+            "repository": {"full_name": "ChonSong/riptide"},
+            "installation": {"id": 789},
         }
         assert extract_comment_edit(payload) is None
 
-    def test_missing_body_change(self):
+    def test_no_body_change(self):
         payload = {
             "action": "edited",
-            "comment": {"id": 1, "body": "", "user": {"login": "a"}},
-            "issue": {"number": 1, "pull_request": {}},
-            "changes": {},
-            "repository": {"full_name": "owner/repo"},
+            "comment": {"body": "- [ ] 🔍 Trigger review"},
+            "changes": {},  # No body change
+            "issue": {"number": 456, "pull_request": {}},
+            "repository": {"full_name": "ChonSong/riptide"},
+            "installation": {"id": 789},
         }
-        # No body and no old body → None
         assert extract_comment_edit(payload) is None
+
+    def test_bot_user(self):
+        payload = {
+            "action": "edited",
+            "comment": {
+                "id": 12345,
+                "body": "- [x] 🔍 Trigger review",
+                "user": {"login": "riptide-bot", "type": "Bot"},
+            },
+            "changes": {"body": {"from": "- [ ] 🔍 Trigger review"}},
+            "issue": {"number": 456, "pull_request": {}},
+            "repository": {"full_name": "ChonSong/riptide", "name": "riptide"},
+            "installation": {"id": 789},
+        }
+        result = extract_comment_edit(payload)
+        assert result is not None
+        assert result["is_bot"] is True
 
 
 class TestExtractPrBodyEdit:
-    """Test extract_pr_body_edit."""
+    """Verify extract_pr_body_edit parses PR body edit payloads."""
 
     def test_valid_pr_body_edit(self):
         payload = {
             "action": "edited",
             "pull_request": {
-                "number": 42,
-                "body": "new pr body",
-                "user": {"login": "testuser"},
+                "number": 456,
+                "body": "- [x] 🔍 Trigger review",
             },
-            "changes": {"body": {"from": "old pr body"}},
-            "repository": {"full_name": "owner/repo"},
+            "changes": {"body": {"from": "- [ ] 🔍 Trigger review"}},
+            "repository": {"full_name": "ChonSong/riptide", "name": "riptide"},
+            "installation": {"id": 789},
         }
         result = extract_pr_body_edit(payload)
         assert result is not None
-        assert result["body"] == "new pr body"
-        assert result["old_body"] == "old pr body"
-        assert result["pr_number"] == 42
+        assert result["pr_number"] == 456
+        assert result["old_body"] == "- [ ] 🔍 Trigger review"
+        assert result["new_body"] == "- [x] 🔍 Trigger review"
 
-    def test_not_edited_action(self):
-        payload = {"action": "opened", "pull_request": {"number": 1}}
+    def test_non_edit_action(self):
+        payload = {"action": "opened"}
         assert extract_pr_body_edit(payload) is None
 
-    def test_missing_pull_request(self):
-        payload = {"action": "edited", "repository": {"full_name": "owner/repo"}}
+    def test_no_body_change(self):
+        payload = {
+            "action": "edited",
+            "pull_request": {"number": 456, "body": "Some text"},
+            "changes": {},  # No body change
+            "repository": {"full_name": "ChonSong/riptide"},
+            "installation": {"id": 789},
+        }
         assert extract_pr_body_edit(payload) is None
+
+
+# ── Taxonomy ─────────────────────────────────────────────────────────────────
+
+
+class TestCheckboxTaxonomy:
+    """Verify the checkbox taxonomy is consistent."""
+
+    def test_all_actions_have_labels(self):
+        for action in CHECKBOX_ACTIONS.values():
+            assert action in ACTION_LABELS
+
+    def test_all_labels_have_actions(self):
+        for label in CHECKBOX_ACTIONS:
+            assert label in ACTION_LABELS.values()
+
+    def test_review_action(self):
+        assert CHECKBOX_ACTIONS["🔍 Trigger review"] == "review"
+
+    def test_fix_action(self):
+        assert CHECKBOX_ACTIONS["🛠 Fix issues"] == "fix"
+
+    def test_visual_action(self):
+        assert CHECKBOX_ACTIONS["📸 ProofShot"] == "visual"
+
+    def test_relabel_action(self):
+        assert CHECKBOX_ACTIONS["🏷️ Relabel"] == "relabel"
