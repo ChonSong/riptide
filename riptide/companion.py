@@ -428,11 +428,22 @@ class Companion:
                 external repos where the App is not installed — GhCliClient
                 via PAT, installation_id=None).
         """
+        # Self-heal OUTSIDE the semaphore: Ollama recovery can block for up to
+        # 30s (systemd restart timeout). Holding _semaphore during that would
+        # block all other PR events. Probe here, then pass result down.
+        from riptide.ollama_heal import heal as ollama_heal
+        ollama_healthy = True  # optimistically assume healthy
+        try:
+            ollama_healthy = ollama_heal(base_url=self.ollama_base) == 0
+        except Exception as e:
+            logger.warning("Ollama self-heal probe failed (non-fatal): %s", e)
+            ollama_healthy = True  # proceed with ELI5 even if probe fails
+
         if not self._semaphore.acquire(blocking=False):
             logger.warning("Busy, skipping %s/%s#%d", owner, repo, pr_number)
             return
         try:
-            self._execute(installation_id, owner, repo, pr_number, title, author, changed_files, webhook_received_at=webhook_received_at, client=client)
+            self._execute(installation_id, owner, repo, pr_number, title, author, changed_files, webhook_received_at=webhook_received_at, client=client, ollama_healthy=ollama_healthy)
         finally:
             self._semaphore.release()
 
