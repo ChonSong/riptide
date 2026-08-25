@@ -32,6 +32,7 @@ import structlog
 
 from riptide.state import StateStore
 from riptide.depth import ReviewDepth, classify_review_depth, select_skills  # noqa: F401 (re-exported for back-compat)
+from riptide.review_memory import get_memory_context
 
 logging.basicConfig(
     level=logging.INFO,
