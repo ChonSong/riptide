@@ -33,6 +33,8 @@ from .github_app import verify_webhook_signature, GitHubAppClient
 from .orchestrator import T0Orchestrator, TaskClassifier
 from .state import StateStore
 from .labeler import Labeler
+from .review_memory import store_review_outcome
+from .documentarian import on_merge
 
 # Companion is optional — silently unavailable if RIPTIDE_COMPANION_REPOS is unset
 _companion: "Companion | Literal[False] | None" = None
@@ -477,6 +479,21 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
                         log.info(f"[{delivery_id}] Auto-deploy triggered (pid={proc.pid})")
                     except Exception as e:
                         log.error(f"[{delivery_id}] Failed to trigger auto-deploy: {e}")
+
+            # Trigger documentarian post-merge tasks (graphify + changelog)
+            pr_title = pr.get("title", "")
+            pr_body = pr.get("body", "") or ""
+            try:
+                on_merge(
+                    owner=owner,
+                    repo=repo_name,
+                    merged_pr_number=pr_number,
+                    pr_title=pr_title,
+                    pr_body=pr_body,
+                )
+                log.info(f"[{delivery_id}] Documentarian post-merge triggered for {repo_full}#{pr_number}")
+            except Exception as e:
+                log.error(f"[{delivery_id}] Documentarian post-merge failed (non-fatal): {e}")
 
     return Response(status_code=200)
 
