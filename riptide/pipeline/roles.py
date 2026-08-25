@@ -51,6 +51,12 @@ ROLES = {
         "output_format": "json",
         "output_path_key": "ci_result_path",
     },
+    "cleanliness": {
+        "description": "Evaluates PR cleanliness: conflicts, related PRs, test coverage, description",
+        "tools": ["read_file"],
+        "output_format": "json",
+        "output_path_key": "cleanliness_path",
+    },
 }
 
 # ── Worker brief schema ────────────────────────────────────────────────────
