@@ -132,6 +132,22 @@
 
 ---
 
+## Fix Pipeline Reliability (PR #174 — 2026-08-25)
+
+### WS-F1: CI Verifier (Worker 9)
+- **Problem:** Fixer declares success after local tests pass — doesn't check GitHub CI.
+- **Solution:** New Conductor stage polls `gh pr checks` after push, classifies failures (fixable vs non-fixable), retries once for fixable.
+- **Output:** `ci_result.json` with status, failed checks, fixable/non-fixable breakdown.
+- **Pipeline:** Fix pipeline extended to 6 stages (probe → judge → artisan → engine → **ci_verifier** → scribe).
+
+### WS-F2: Cleanliness (Worker 10)
+- **Problem:** Review only checks code quality, not PR hygiene (conflicts, related PRs, test coverage, description).
+- **Solution:** New Conductor stage evaluates 7 cleanliness signals from Probe output.
+- **Output:** `cleanliness.json` with findings (severity-rated), score (0-100), summary.
+- **Pipeline:** Review pipeline extended to 6 stages (probe → judge → artisan → engine → scribe → **cleanliness**).
+
+---
+
 ## Execution Rules (per user)
 
 - **One subagent at a time** (no parallel fan-out for implementation).
