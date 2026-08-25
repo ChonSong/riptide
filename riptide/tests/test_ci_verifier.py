@@ -198,6 +198,31 @@ class TestPoll:
 
         assert result["status"] == "error"
 
+    def test_poll_transient_fetch_error_retries(self):
+        """Poll should retry on transient fetch failures before giving up."""
+        call_count = 0
+
+        def mock_fetch():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                return None  # Transient failure
+            return [{"name": "test-required", "state": "success"}]
+
+        with patch.object(self.verifier, "_fetch_checks", side_effect=mock_fetch):
+            result = self.verifier.poll(timeout=10, interval=1)
+
+        assert result["status"] == "success"
+        assert call_count == 3
+
+    def test_poll_persistent_fetch_error_returns_error(self):
+        """Poll should return error after MAX_TRANSIENT consecutive failures."""
+        with patch.object(self.verifier, "_fetch_checks", return_value=None):
+            result = self.verifier.poll(timeout=10, interval=1)
+
+        assert result["status"] == "error"
+        assert result["poll_count"] == 3  # MAX_TRANSIENT consecutive failures
+
 
 class TestFormatReport:
     """Test human-readable report formatting."""

@@ -64,6 +64,8 @@ class CIVerifier:
         """
         start = time.monotonic()
         poll_count = 0
+        transient_failures = 0
+        MAX_TRANSIENT = 3
 
         while True:
             poll_count += 1
@@ -71,6 +73,10 @@ class CIVerifier:
 
             checks = self._fetch_checks()
             if checks is None:
+                transient_failures += 1
+                if transient_failures < MAX_TRANSIENT:
+                    time.sleep(interval)
+                    continue
                 return {
                     "status": "error",
                     "error": "Failed to fetch CI checks",
