@@ -38,7 +38,8 @@ from .labeler import Labeler
 _companion: "Companion | Literal[False] | None" = None
 
 # gh CLI client for repos without App installation (PAT-based)
-_gh_cli_client = None
+_GH_CLI_CLIENT_UNSET = object()
+_gh_cli_client: object | None = _GH_CLI_CLIENT_UNSET
 
 # Labeler is optional — silently unavailable if RIPTIDE_LABELER_ENABLED != "1"
 _labeler = None
@@ -95,16 +96,18 @@ def get_gh_cli_client():
     """Get or create a gh CLI client for PAT-based API access.
 
     Used as a fallback when the GitHub App is not installed on a repo.
+    Retries on each call if gh CLI was previously unavailable.
     """
     global _gh_cli_client
-    if _gh_cli_client is None:
-        try:
-            from .gh_cli_client import make_gh_cli_client
-            _gh_cli_client = make_gh_cli_client()
-        except Exception as e:
-            log.warning("gh CLI client not available: %s", e)
-            _gh_cli_client = False
-    return _gh_cli_client if _gh_cli_client else None
+    if _gh_cli_client is not _GH_CLI_CLIENT_UNSET:
+        return _gh_cli_client
+    try:
+        from .gh_cli_client import make_gh_cli_client
+        _gh_cli_client = make_gh_cli_client()
+    except Exception as e:
+        log.warning("gh CLI client not available: %s", e)
+        _gh_cli_client = None
+    return _gh_cli_client
 
 
 def get_companion():

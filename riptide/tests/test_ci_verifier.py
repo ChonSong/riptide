@@ -109,6 +109,68 @@ class TestFetchChecks:
         with patch("subprocess.run", return_value=mock_result):
             assert self.verifier._fetch_checks() is None
 
+    def test_fetch_checks_file_not_found(self):
+        """Test that FileNotFoundError is handled gracefully (gh CLI not installed)."""
+        with patch("subprocess.run", side_effect=FileNotFoundError()):
+            assert self.verifier._fetch_checks() is None
+
+    def test_classify_checks(self):
+        """Test _classify_checks separates passed/failed/pending."""
+        checks = [
+            {"name": "test-required", "state": "success"},
+            {"name": "agentlint", "state": "failure"},
+            {"name": "CodeRabbit", "state": "pending"},
+        ]
+        result = self.verifier._classify_checks(checks)
+        assert len(result["passed"]) == 1
+        assert result["passed"][0]["name"] == "test-required"
+        assert len(result["failed"]) == 1
+        assert result["failed"][0]["name"] == "agentlint"
+        assert len(result["pending"]) == 1
+        assert result["pending"][0]["name"] == "CodeRabbit"
+
+    def test_build_result_success(self):
+        """Test _build_result with all checks passed."""
+        checks = [{"name": "test-required", "state": "success"}]
+        classified = {"passed": checks, "failed": [], "pending": []}
+        result = self.verifier._build_result("success", checks, classified, 5.0, 1)
+        assert result["status"] == "success"
+        assert result["failed"] == []
+        assert result["fixable"] == []
+        assert result["non_fixable"] == []
+
+    def test_build_result_failure_with_classification(self):
+        """Test _build_result correctly classifies fixable vs non-fixable."""
+        checks = [
+            {"name": "test-required", "state": "failure"},
+            {"name": "CodeRabbit", "state": "failure"},
+        ]
+        classified = {"passed": [], "failed": checks, "pending": []}
+        result = self.verifier._build_result("failure", checks, classified, 10.0, 2)
+        assert result["status"] == "failure"
+        assert len(result["fixable"]) == 1
+        assert result["fixable"][0]["name"] == "test-required"
+        assert len(result["non_fixable"]) == 1
+        assert result["non_fixable"][0]["name"] == "CodeRabbit"
+
+    def test_handle_transient_failure_returns_none_under_threshold(self):
+        """Test that _handle_transient_failure returns None when under threshold."""
+        with patch("time.sleep"):
+            result = self.verifier._handle_transient_failure(
+                transient_failures=0, interval=1, poll_count=1, elapsed=1.0
+            )
+        assert result is None
+
+    def test_handle_transient_failure_returns_error_at_threshold(self):
+        """Test that _handle_transient_failure returns error at threshold."""
+        with patch("time.sleep"):
+            result = self.verifier._handle_transient_failure(
+                transient_failures=2, interval=1, poll_count=3, elapsed=5.0
+            )
+        assert result is not None
+        assert result["status"] == "error"
+        assert result["poll_count"] == 3
+
 
 class TestPoll:
     """Test the poll loop with mocked _fetch_checks."""

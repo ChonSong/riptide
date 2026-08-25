@@ -48,6 +48,58 @@ class CIVerifier:
         self.repo = repo
         self.pr_number = pr_number
 
+    def _handle_transient_failure(
+        self, transient_failures: int, interval: int, poll_count: int, elapsed: float
+    ) -> dict[str, Any] | None:
+        """Handle a transient fetch failure. Returns error result if max retries exceeded, else None."""
+        transient_failures += 1
+        if transient_failures >= 3:  # MAX_TRANSIENT
+            return {
+                "status": "error",
+                "error": "Failed to fetch CI checks",
+                "checks": [],
+                "failed": [],
+                "fixable": [],
+                "non_fixable": [],
+                "passed": [],
+                "pending": [],
+                "duration_s": round(elapsed, 2),
+                "poll_count": poll_count,
+            }
+        time.sleep(interval)
+        return None
+
+    def _classify_checks(self, checks: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+        """Classify checks into passed/failed/pending."""
+        return {
+            "passed": [c for c in checks if c.get("state") == "success"],
+            "failed": [c for c in checks if c.get("state") == "failure"],
+            "pending": [c for c in checks if c.get("state") in ("pending", "in_progress", "queued")],
+        }
+
+    def _build_result(
+        self,
+        status: str,
+        checks: list[dict[str, Any]],
+        classified: dict[str, list[dict[str, Any]]],
+        elapsed: float,
+        poll_count: int,
+    ) -> dict[str, Any]:
+        """Build a structured result from classified checks."""
+        fixable = [c for c in classified["failed"] if self._is_fixable(c)]
+        non_fixable = [c for c in classified["failed"] if not self._is_fixable(c)]
+        return {
+            "status": status,
+            "checks": checks,
+            "failed": classified["failed"],
+            "fixable": fixable,
+            "non_fixable": non_fixable,
+            "passed": classified["passed"],
+            "pending": classified["pending"],
+            "duration_s": round(elapsed, 2),
+            "poll_count": poll_count,
+        }
+
     def poll(self, timeout: int = POLL_TIMEOUT, interval: int = POLL_INTERVAL) -> dict[str, Any]:
         """Poll CI until all checks complete or timeout.
 
@@ -67,7 +119,6 @@ class CIVerifier:
         start = time.monotonic()
         poll_count = 0
         transient_failures = 0
-        MAX_TRANSIENT = 3
 
         while True:
             poll_count += 1
@@ -75,63 +126,20 @@ class CIVerifier:
 
             checks = self._fetch_checks()
             if checks is None:
-                transient_failures += 1
-                if transient_failures < MAX_TRANSIENT:
-                    time.sleep(interval)
-                    continue
-                return {
-                    "status": "error",
-                    "error": "Failed to fetch CI checks",
-                    "checks": [],
-                    "failed": [],
-                    "fixable": [],
-                    "non_fixable": [],
-                    "passed": [],
-                    "pending": [],
-                    "duration_s": round(elapsed, 2),
-                    "poll_count": poll_count,
-                }
+                error = self._handle_transient_failure(transient_failures, interval, poll_count, elapsed)
+                if error is not None:
+                    return error
+                continue
 
-            transient_failures = 0  # Reset on successful fetch
+            transient_failures = 0
+            classified = self._classify_checks(checks)
 
-            # Classify checks by state
-            passed = [c for c in checks if c.get("state") == "success"]
-            failed = [c for c in checks if c.get("state") == "failure"]
-            pending = [c for c in checks if c.get("state") in ("pending", "in_progress", "queued")]
+            if not classified["pending"]:
+                status = "success" if not classified["failed"] else "failure"
+                return self._build_result(status, checks, classified, elapsed, poll_count)
 
-            # All checks complete?
-            if not pending:
-                fixable = [c for c in failed if self._is_fixable(c)]
-                non_fixable = [c for c in failed if not self._is_fixable(c)]
-
-                return {
-                    "status": "success" if not failed else "failure",
-                    "checks": checks,
-                    "failed": failed,
-                    "fixable": fixable,
-                    "non_fixable": non_fixable,
-                    "passed": passed,
-                    "pending": [],
-                    "duration_s": round(elapsed, 2),
-                    "poll_count": poll_count,
-                }
-
-            # Timeout?
             if elapsed >= timeout:
-                fixable = [c for c in failed if self._is_fixable(c)]
-                non_fixable = [c for c in failed if not self._is_fixable(c)]
-
-                return {
-                    "status": "timeout",
-                    "checks": checks,
-                    "failed": failed,
-                    "fixable": fixable,
-                    "non_fixable": non_fixable,
-                    "passed": passed,
-                    "pending": pending,
-                    "duration_s": round(elapsed, 2),
-                    "poll_count": poll_count,
-                }
+                return self._build_result("timeout", checks, classified, elapsed, poll_count)
 
             time.sleep(interval)
 
@@ -152,6 +160,9 @@ class CIVerifier:
                 log.warning("gh pr checks failed (rc=%d): %s", result.returncode, result.stderr.strip())
                 return None
             return json.loads(result.stdout)
+        except FileNotFoundError:
+            log.error("gh CLI not found in PATH — cannot fetch CI checks")
+            return None
         except (subprocess.TimeoutExpired, json.JSONDecodeError):
             return None
 
