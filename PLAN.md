@@ -1,8 +1,43 @@
 # Riptide — Complete Implementation Plan
 
-**Date:** 2026-08-18
-**Status:** Active
+**Date:** 2026-08-25
+**Status:** Active — Worker 9 (CI Verifier) + Worker 10 (Cleanliness) open as PR #174
 **Author:** Riptide Architecture Team
+
+---
+
+## Current Workstream: Fix Pipeline Reliability (PR #174)
+
+PR #174 adds two new Conductor pipeline stages to make the fix command reliable and reviews thorough:
+
+### Worker 9: CI Verifier (`riptide/pipeline/ci_verifier.py`)
+- Polls `gh pr checks` after a fix push (30s interval, 10min timeout)
+- Classifies failures: FIXABLE (test-required, agentlint) vs NON-FIXABLE (CodeRabbit, review-required, GitGuardian)
+- Retries once for fixable failures, escalates non-fixable to human
+- New 6-stage fix pipeline: probe → judge → artisan → engine → **ci_verifier** → scribe
+
+### Worker 10: Cleanliness (`riptide/pipeline/cleanliness.py`)
+- Evaluates 7 PR cleanliness signals during review:
+  1. Merge conflicts (`gh pr view --json mergeable`)
+  2. Related open PRs touching same files
+  3. Test coverage (source-only changes without tests)
+  4. PR description quality (body length, issue links)
+  5. Commit hygiene (Conventional Commits compliance)
+  6. PR staleness (age > 14/30 days)
+  7. CI pre-check (existing failures before review)
+- Produces severity-rated findings with actionable suggestions
+- Calculates cleanliness score (0-100)
+- Extended probe with `_gather_cleanliness_signals()` + 7 helpers
+
+### Files Changed
+- `riptide/pipeline/ci_verifier.py` (new — CIVerifier class)
+- `riptide/pipeline/cleanliness.py` (new — Cleanliness class)
+- `riptide/pipeline/conductor.py` (+ci_verifier/cleanliness dispatch, `create_fix_pipeline()`)
+- `riptide/pipeline/roles.py` (+ci_verifier/cleanliness roles)
+- `riptide/pipeline/probe.py` (+_gather_cleanliness_signals + 7 helpers)
+- `riptide/fixer.py` (spawn Conductor fix pipeline, CI verification prompt)
+- `riptide/tests/test_ci_verifier.py` (27 tests)
+- `riptide/tests/test_cleanliness.py` (12 tests)
 
 ---
 
@@ -128,6 +163,8 @@ Plus ADHD-friendly output formatting across all agents (informed by [i-have-adhd
 | **Worker 6** | **Review Memory** | **New** | **Post-merge** | **updated profile** |
 | **Worker 7** | **Interaction Handler** | **New** | **Any `@riptide-bot`** | **routed action** |
 | **Worker 8** | **Architecture Documentarian** | **New** | **Post-merge** | **updated graphify** |
+| **Worker 9** | **CI Verifier** | **New** | **After fix push** | **ci_result.json** |
+| **Worker 10** | **Cleanliness** | **New** | **During review** | **cleanliness.json** |
 
 ---
 
@@ -655,8 +692,9 @@ CREATE TABLE IF NOT EXISTS review_profiles (
 
 | # | Title | Branch | Status | Gates | Action |
 |---|-------|--------|--------|-------|--------|
-| **137** | fix: longcat provider + ephemeral testing | `fix/fixer-provider-defaults-v2` | ✅ Review posted | ⚠️ Gate flaky | Ready to merge |
-| **138** | docs: update README | `docs/readme-update-v2` | ✅ Review posted | ✅ Pass | Ready to merge |
+| **174** | feat(ci-verifier): CI verification + cleanliness pipeline stages | `feat/ci-verifier-pipeline` | ✅ Review posted | ⏳ Pending | Ready for review |
+| **172** | feat(queue): Huey task queue + state machine fix | `feat/queue-huey` | ✅ Review posted | ⏳ Pending | Behind #174 |
+| **171** | fix(webhook): durable work queue with startup recovery | `fix/webhook-work-queue` | ✅ Review posted | ⏳ Pending | Behind #174 |
 
 ### Recently Merged
 
@@ -664,6 +702,7 @@ CREATE TABLE IF NOT EXISTS review_profiles (
 |---|-------|-------------|
 | **136** | wire diagram_url + triggered_at | Timing metric fix |
 | **130** | remove duplicate auto-deploy | Race condition fix |
+| **173** | fix(grafiphy): pass repo_tree, file_tree to diagram | Diagram fix |
 
 ### Closed (Superseded)
 
