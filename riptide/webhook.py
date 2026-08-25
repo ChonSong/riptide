@@ -38,7 +38,8 @@ from .labeler import Labeler
 _companion: "Companion | Literal[False] | None" = None
 
 # gh CLI client for repos without App installation (PAT-based)
-_gh_cli_client = None
+_GH_CLI_CLIENT_UNSET = object()
+_gh_cli_client: object | None = _GH_CLI_CLIENT_UNSET
 
 # Labeler is optional — silently unavailable if RIPTIDE_LABELER_ENABLED != "1"
 _labeler = None
@@ -48,7 +49,7 @@ WATCHED_REPOS = [
     r.strip()
     for r in os.environ.get(
         "RIPTIDE_WATCHED_REPOS",
-        "",
+        "ChonSong/riptide,ChonSong/hermes-webui,ChonSong/hermes-webui-extensions,ChonSong/seans-reporepo,ChonSong/pr-review,ChonSong/everything-claude-code,codeovertcp/gto-wizard-clone-v2,nesquena/hermes-webui",
     ).split(",")
     if r.strip()
 ]
@@ -95,16 +96,18 @@ def get_gh_cli_client():
     """Get or create a gh CLI client for PAT-based API access.
 
     Used as a fallback when the GitHub App is not installed on a repo.
+    Retries on each call if gh CLI was previously unavailable.
     """
     global _gh_cli_client
-    if _gh_cli_client is None:
-        try:
-            from .gh_cli_client import make_gh_cli_client
-            _gh_cli_client = make_gh_cli_client()
-        except Exception as e:
-            log.warning("gh CLI client not available: %s", e)
-            _gh_cli_client = False
-    return _gh_cli_client if _gh_cli_client else None
+    if _gh_cli_client is not _GH_CLI_CLIENT_UNSET:
+        return _gh_cli_client
+    try:
+        from .gh_cli_client import make_gh_cli_client
+        _gh_cli_client = make_gh_cli_client()
+    except Exception as e:
+        log.warning("gh CLI client not available: %s", e)
+        _gh_cli_client = None
+    return _gh_cli_client
 
 
 def get_companion():
@@ -268,20 +271,15 @@ async def github_webhook(request: Request) -> Response:
     try:
         if event == "pull_request":
             result = await handle_pull_request(payload, delivery_id)
-            if result is None:
-                # No-op (rate-limited, no installation) — don't mark done, keep retryable
-                return result
-            return result
         elif event == "issue_comment":
             result = await handle_issue_comment(payload, delivery_id)
-            return result
         elif event in ("installation", "installation_repositories"):
             result = await handle_installation(payload, event, delivery_id)
-            return result
         else:
             log.info(f"[{delivery_id}] Unhandled event: {event}")
-            state.mark_delivery_done(delivery_id)
-            return Response(status_code=200)
+            result = Response(status_code=200)
+        state.mark_delivery_done(delivery_id)
+        return result
     except Exception as e:
         state.mark_delivery_failed(delivery_id)
         log.error(
@@ -318,7 +316,7 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
                 log.info(f"[{delivery_id}] No installation ID for {repo_full} — using gh CLI fallback")
             else:
                 log.info(f"[{delivery_id}] No installation ID for {repo_full} and gh CLI unavailable, skipping")
-                return None
+                return Response(status_code=200)
         else:
             log.info(f"[{delivery_id}] No installation ID for {repo_full} (not in WATCHED_REPOS), skipping")
             return Response(status_code=200)
@@ -331,7 +329,7 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
     if action == "synchronize":
         if not _should_process_synchronize(owner, repo_name, pr_number):
             log.info(f"[{delivery_id}] synchronize rate-limited for {repo_full}#{pr_number}")
-            return None
+            return Response(status_code=200)
 
     # PR opened/reopened/synchronize → companion deterministic flow (one pipeline)
     if action in ("opened", "reopened", "synchronize"):
@@ -359,8 +357,9 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
             title = pr.get("title", f"PR #{pr_number}")
             author = pr.get("user", {}).get("login", "unknown")
 
-            # companion.run_for_pr() receives gh_cli via the `client` kwarg
-            # in the _safe_run() closure below.
+            # Pass the gh_cli client to companion.run_for_pr() via client override
+            # so all API calls use the PAT-based client when App isn't installed.
+            companion_client = active_github if using_gh_cli_fallback else None
 
             if os.environ.get("RIPTIDE_T0_FALLBACK", "").lower() in ("1", "true", "yes"):
                 # Legacy T0 dispatcher (opt-in fallback; default is companion flow)

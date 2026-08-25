@@ -20,7 +20,7 @@ jobs:
           # Find the most recent Riptide review
           # Supports: old format (## 🔍 Findings), ADHD format (## 🎯 Summary), companion format (## 🐛 Review), deep-think format (## Review:)
           REVIEW=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
-            --jq '[.[] | select(.body | (contains("## 🔍 Findings") or contains("## 🎯 Summary") or contains("## Review:") or contains("Review Required") or contains("## Review Required") or (contains("critical") and contains("warning"))))] | sort_by(.created_at) | last')
+            --jq '[.[] | select(.body | (contains("## 🔍 Findings") or contains("## 🎯 Summary") or contains("## Review:") or contains("## 🐛 Review") or contains("## Review Required") or (contains("critical") and contains("warning"))))] | sort_by(.created_at) | last')
 
           REVIEW_ID=$(echo "${REVIEW}" | jq -r '.id // empty')
 

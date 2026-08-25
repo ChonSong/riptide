@@ -28,6 +28,7 @@ from .artisan import Artisan
 from .engine import Engine
 from .warden import Warden
 from .scribe import Scribe
+from .ci_verifier import CIVerifier
 
 
 class Conductor:
@@ -121,6 +122,8 @@ class Conductor:
             return self._run_warden(brief)
         elif role == "scribe":
             return self._run_scribe(brief)
+        elif role == "ci_verifier":
+            return self._run_ci_verifier(brief)
         else:
             raise ValueError(f"Unknown role: {role}")
     
@@ -221,6 +224,31 @@ class Conductor:
         
         return {"error": f"Unknown scribe action: {action}"}
 
+    def _run_ci_verifier(self, brief: WorkerBrief) -> dict:
+        """Run CI Verifier worker — poll GitHub CI checks and classify."""
+        owner = brief.inputs.get("owner", "ChonSong")
+        repo = brief.inputs.get("repo", "riptide")
+        pr_number = brief.inputs.get("pr_number", 0)
+        timeout = brief.inputs.get("timeout", 600)
+
+        verifier = CIVerifier(owner, repo, pr_number)
+        result = verifier.poll(timeout=timeout)
+
+        output_path = brief.output_protocol.get("path", "/tmp/ci_result.json")
+        with open(output_path, "w") as f:
+            json.dump(result, f, indent=2, default=str)
+
+        return {
+            "ci_result_path": output_path,
+            "status": result.get("status", "unknown"),
+            "passed": result.get("status") == "success",
+            "failed_count": len(result.get("failed", [])),
+            "fixable_count": len(result.get("fixable", [])),
+            "non_fixable_count": len(result.get("non_fixable", [])),
+        }
+
+
+
 
 # ── Pipeline builder ─────────────────────────────────────────────────────────
 
@@ -297,5 +325,127 @@ def create_pr_review_pipeline(
         role="scribe",
         pipeline=["assemble_review", "post_comment"],
     )
-    
+
+    return track
+
+
+
+def create_fix_pipeline(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    pr_details: dict,
+    files: list[dict],
+    description: str = "",
+    push_eligible: bool = True,
+) -> dict:
+    """Create a fix pipeline with CI verification.
+
+    Called from ``riptide.fixer._spawn_fix()`` when a fix session is spawned.
+
+    Pipeline:
+    1. probe → gather context at PR HEAD
+    2. judge → verify findings against current code
+    3. artisan → apply targeted edits
+    4. engine → run local tests + push
+    5. ci_verifier → poll GitHub CI, classify failures
+    6. scribe → post summary comment with CI results
+
+    Returns the created track dict with all workstreams staged.
+    """
+    track_id = f"riptide-fix-{owner}-{repo}-{pr_number}"
+
+    track = get_track(track_id)
+    if not track:
+        track = create_track(
+            track_id,
+            name=f"Riptide Fix #{pr_number}",
+            phase="Fix",
+            repos={repo: {"owner": owner, "pr": pr_number}},
+        )
+
+    head_sha = pr_details.get("head", {}).get("sha", "")
+
+    create_workstream(
+        track_id,
+        "ws-1-probe",
+        inputs={
+            "pr_number": pr_number,
+            "owner": owner,
+            "repo": repo,
+            "files": files,
+            "head_sha": head_sha,
+        },
+        acceptance={"output_exists": True},
+        role="probe",
+        pipeline=["fetch_diff", "context_bundle", "review_findings"],
+    )
+
+    create_workstream(
+        track_id,
+        "ws-2-judge",
+        inputs={
+            "context_path": f"/tmp/pr-{pr_number}-context.json",
+            "description": description,
+        },
+        acceptance={"findings_valid": True},
+        role="judge",
+        pipeline=["verify_findings", "classify_valid"],
+    )
+
+    create_workstream(
+        track_id,
+        "ws-3-artisan",
+        inputs={
+            "findings_path": "/tmp/findings.json",
+            "files": files,
+            "push_eligible": push_eligible,
+        },
+        acceptance={"edits_applied": True},
+        role="artisan",
+        pipeline=["edit_files", "targeted_fixes"],
+    )
+
+    create_workstream(
+        track_id,
+        "ws-4-engine",
+        inputs={
+            "command": "run_tests_and_push",
+            "push_eligible": push_eligible,
+            "head_ref": pr_details.get("head", {}).get("ref", ""),
+        },
+        acceptance={"tests_passed": True, "pushed": True},
+        role="engine",
+        pipeline=["run_tests", "push_if_green"],
+    )
+
+    create_workstream(
+        track_id,
+        "ws-5-ci-verifier",
+        inputs={
+            "pr_number": pr_number,
+            "owner": owner,
+            "repo": repo,
+            "timeout": 600,
+        },
+        acceptance={"ci_complete": True},
+        role="ci_verifier",
+        pipeline=["poll_ci", "classify_failures"],
+    )
+
+    create_workstream(
+        track_id,
+        "ws-6-scribe",
+        inputs={
+            "pr_number": pr_number,
+            "owner": owner,
+            "repo": repo,
+            "action": "post_fix_summary",
+            "head_sha": head_sha,
+        },
+        acceptance={"posted": True},
+        role="scribe",
+        pipeline=["format_summary", "post_comment"],
+    )
+
     return track
