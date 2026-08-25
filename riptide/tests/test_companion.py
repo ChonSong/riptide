@@ -890,3 +890,67 @@ class TestTimingMetric:
 
         tier1_body = companion.client.post_pr_comment.call_args[0][4]
         assert "⏱️" not in tier1_body
+
+
+# ── Semaphore + heal probe placement ─────────────────────────────────────────
+
+
+class TestHealProbePlacement:
+    """Verify Ollama heal probe runs inside _execute (after semaphore acquire),
+    not in run_for_pr (before semaphore). This prevents the webhook thread
+    from blocking on heal while other PRs wait for the semaphore.
+    """
+
+    def test_heal_probe_runs_inside_execute(self, mock_ollama):
+        """_execute must call ollama_heal after acquiring the semaphore."""
+        companion = make_companion()
+        companion.enable_deterministic = False
+        companion.enable_graphify = False
+        companion._get_last_sha = MagicMock(return_value=None)
+        companion.client.post_pr_comment = MagicMock(return_value={"id": 999})
+        companion.client.update_pr_comment = MagicMock(return_value={"id": 999})
+
+        with patch("riptide.ollama_heal.heal", return_value=0) as mock_heal:
+            companion._execute(
+                123, "owner", "repo", 42,
+                "feat: change", "author",
+                [{"filename": "src/main.py", "patch": "+x = 1", "additions": 1, "deletions": 0, "status": "modified"}]
+            )
+            mock_heal.assert_called_once_with(base_url=companion.ollama_base)
+
+    def test_run_for_pr_skips_when_semaphore_held(self):
+        """When semaphore is already held, run_for_pr returns immediately
+        without calling _execute or ollama_heal."""
+        companion = make_companion()
+        # Hold the semaphore
+        companion._semaphore.acquire()
+
+        with patch.object(companion, "_execute") as mock_execute, \
+             patch("riptide.ollama_heal.heal") as mock_heal:
+            companion.run_for_pr(123, "owner", "repo", 42, "title", "author", [])
+            mock_execute.assert_not_called()
+            mock_heal.assert_not_called()
+
+        companion._semaphore.release()
+
+    def test_run_for_pr_acquires_semaphore_before_execute(self):
+        """run_for_pr must acquire semaphore before calling _execute."""
+        companion = make_companion()
+        companion.enable_deterministic = False
+        companion.enable_graphify = False
+        companion._get_last_sha = MagicMock(return_value=None)
+        companion.client.post_pr_comment = MagicMock(return_value={"id": 999})
+        companion.client.update_pr_comment = MagicMock(return_value={"id": 999})
+
+        acquire_order = []
+        original_acquire = companion._semaphore.acquire
+        def track_acquire(*args, **kwargs):
+            acquire_order.append("acquire")
+            return original_acquire(*args, **kwargs)
+
+        with patch.object(companion._semaphore, "acquire", side_effect=track_acquire), \
+             patch.object(companion, "_execute", side_effect=lambda *a, **k: acquire_order.append("execute")), \
+             patch("riptide.ollama_heal.heal", return_value=0):
+            companion.run_for_pr(123, "owner", "repo", 42, "title", "author", [])
+
+        assert acquire_order == ["acquire", "execute"]

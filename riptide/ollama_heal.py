@@ -16,7 +16,6 @@ Exit codes:
 """
 
 import argparse
-import asyncio
 import os
 import subprocess
 import sys
