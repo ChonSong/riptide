@@ -390,16 +390,22 @@ class StateStore:
         cutoff = time.time() - max_age_seconds
         # Use BEGIN IMMEDIATE to acquire EXCLUSIVE lock immediately,
         # preventing deadlock when multiple cron jobs run concurrently.
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            conn.execute(
-                "UPDATE jobs SET status='failed', completed_at=? WHERE status='pending' AND created_at < ?",
-                (time.time(), cutoff),
-            )
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
+        # Retry on lock contention (concurrent webhook/cron access).
+        for attempt in range(3):
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute(
+                    "UPDATE jobs SET status='failed', completed_at=? WHERE status='pending' AND created_at < ?",
+                    (time.time(), cutoff),
+                )
+                conn.commit()
+                return
+            except sqlite3.OperationalError as e:
+                conn.rollback()
+                if "locked" in str(e).lower() and attempt < 2:
+                    time.sleep(2 * (attempt + 1))
+                else:
+                    raise
 
     def cleanup_old_deliveries(self, max_age_seconds: int = 86400):
         """Remove completed/failed deliveries older than max_age_seconds.
