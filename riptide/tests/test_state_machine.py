@@ -10,6 +10,7 @@ Verifies that:
 import tempfile
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -123,3 +124,96 @@ class TestCleanupStalePending:
         conn = store._get_conn()
         row = conn.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
         assert row[0] == "complete"
+
+
+class TestDeliveryStateMachine:
+    """Test the processing → done | failed lifecycle for webhook deliveries."""
+
+    def test_reserve_delivery_succeeds(self, store):
+        """A new delivery can be reserved."""
+        assert store.reserve_delivery("delivery-1")
+        conn = store._get_conn()
+        row = conn.execute("SELECT status FROM deliveries WHERE delivery_id=?", ("delivery-1",)).fetchone()
+        assert row[0] == "processing"
+
+    def test_duplicate_delivery_dropped(self, store):
+        """A duplicate delivery is dropped."""
+        assert store.reserve_delivery("delivery-1")
+        assert not store.reserve_delivery("delivery-1")
+
+    def test_mark_delivery_done(self, store):
+        """A delivery can be marked done."""
+        store.reserve_delivery("delivery-1")
+        store.mark_delivery_done("delivery-1")
+        conn = store._get_conn()
+        row = conn.execute("SELECT status FROM deliveries WHERE delivery_id=?", ("delivery-1",)).fetchone()
+        assert row[0] == "done"
+
+    def test_mark_delivery_done_missing_logs_warning(self, store):
+        """mark_delivery_done on non-existent delivery logs a warning."""
+        with patch("logging.Logger.warning") as mock_warn:
+            store.mark_delivery_done("nonexistent-delivery")
+            mock_warn.assert_called_once()
+            assert "not found" in mock_warn.call_args[0][1]
+
+    def test_mark_delivery_failed(self, store):
+        """A delivery can be marked failed."""
+        store.reserve_delivery("delivery-1")
+        store.mark_delivery_failed("delivery-1")
+        conn = store._get_conn()
+        row = conn.execute("SELECT status FROM deliveries WHERE delivery_id=?", ("delivery-1",)).fetchone()
+        assert row[0] == "failed"
+
+    def test_mark_delivery_failed_missing_logs_warning(self, store):
+        """mark_delivery_failed on non-existent delivery logs a warning."""
+        with patch("logging.Logger.warning") as mock_warn:
+            store.mark_delivery_failed("nonexistent-delivery")
+            mock_warn.assert_called_once()
+            assert "not found" in mock_warn.call_args[0][1]
+
+    def test_stale_delivery_rereservable(self, store):
+        """A delivery stuck in 'processing' becomes re-reservable after TTL."""
+        # Reserve with a received_at in the past
+        conn = store._get_conn()
+        old_time = time.time() - 600  # 10 minutes ago
+        conn.execute(
+            "INSERT INTO deliveries (delivery_id, received_at, status) VALUES (?, ?, 'processing')",
+            ("delivery-stale", old_time),
+        )
+        conn.commit()
+
+        # Should be re-reservable
+        assert store.reserve_delivery("delivery-stale")
+
+    def test_fresh_processing_delivery_not_rereservable(self, store):
+        """A fresh 'processing' delivery is NOT re-reservable."""
+        store.reserve_delivery("delivery-fresh")
+        assert not store.reserve_delivery("delivery-fresh")
+
+    def test_done_delivery_not_rereservable(self, store):
+        """A 'done' delivery is NOT re-reservable."""
+        store.reserve_delivery("delivery-done")
+        store.mark_delivery_done("delivery-done")
+        assert not store.reserve_delivery("delivery-done")
+
+    def test_cleanup_old_deliveries(self, store):
+        """Old completed/failed deliveries are cleaned up."""
+        # Create deliveries with different statuses
+        store.reserve_delivery("delivery-old-done")
+        store.mark_delivery_done("delivery-old-done")
+        store.reserve_delivery("delivery-old-failed")
+        store.mark_delivery_failed("delivery-old-failed")
+        store.reserve_delivery("delivery-new-done")
+        store.mark_delivery_done("delivery-new-done")
+        store.reserve_delivery("delivery-processing")
+        # Leave delivery-processing in processing state
+
+        # Cleanup with 0-second TTL removes old done/failed
+        store.cleanup_old_deliveries(max_age_seconds=0)
+
+        conn = store._get_conn()
+        remaining = {row[0] for row in conn.execute("SELECT delivery_id FROM deliveries").fetchall()}
+        assert "delivery-old-done" not in remaining
+        assert "delivery-old-failed" not in remaining
+        assert "delivery-new-done" not in remaining  # Also old (just created, but TTL=0)
+        assert "delivery-processing" in remaining  # Processing preserved

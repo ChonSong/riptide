@@ -148,12 +148,9 @@ def heal(wait_timeout: int = DEFAULT_TIMEOUT, base_url: str = OLLAMA_BASE_URL) -
         print(f"⚠️  {SYSTEMD_SERVICE} is installed but not enabled", file=sys.stderr)
         print("   Run: systemctl --user enable --now ollama.service", file=sys.stderr)
         # Attempt restart anyway — may still work
-        if not restart_ollama():
-            return 1
     elif service_status == SystemdStatus.HEALTHY:
         # Service is enabled but Ollama is down — restart it
-        if not restart_ollama():
-            return 1
+        pass
     else:
         # PROBE_FAILED — systemctl unavailable or timed out.
         # Fall back to Docker / non-systemd path:
@@ -163,7 +160,11 @@ def heal(wait_timeout: int = DEFAULT_TIMEOUT, base_url: str = OLLAMA_BASE_URL) -
         # Return 1 (down, couldn't restart) rather than 2 (systemd issue)
         return 1
 
-    # 3. Wait for recovery
+    # 3. DISABLED or HEALTHY — attempt restart in both cases
+    if not restart_ollama():
+        return 1
+
+    # 4. Wait for recovery
     if wait_for_recovery(wait_timeout, base_url):
         return 0
 

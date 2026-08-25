@@ -29,11 +29,13 @@ import time
 import uuid
 from datetime import datetime, timedelta
 
+import structlog
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
-log = logging.getLogger("riptide.fixer")
+log = structlog.get_logger("riptide.fixer")
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -62,6 +64,7 @@ def handle_fix_command(
     pr_number: int,
     commenter: str,
     description: str = "",
+    delivery_id: str = "",
 ) -> str | None:
     """Handle @riptide-bot fix command — spawn an on-demand fix session.
 
@@ -71,7 +74,20 @@ def handle_fix_command(
     message (or error message).
 
     description: optional free-text after `fix` (already stripped).
+    delivery_id: trace ID from the originating webhook event (for log correlation).
     """
+    # ── Structlog trace binding ───────────────────────────────────────────────
+    # If delivery_id is provided (from webhook), bind it so all downstream
+    # log lines automatically include it. This enables end-to-end tracing
+    # from webhook → fixer → Hermes cron → subagent.
+    if delivery_id:
+        structlog.contextvars.bind_contextvars(
+            delivery_id=delivery_id,
+            worker="fixer",
+            pr=f"{owner}/{repo}#{pr_number}",
+        )
+    # Module-level log (line 38) already bound with delivery_id via structlog.contextvars
+
     try:
         pr_details = client.get_pr_details(installation_id, owner, repo, pr_number)
     except Exception as e:
