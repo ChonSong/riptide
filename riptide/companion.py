@@ -527,7 +527,7 @@ class Companion:
             logger.error("SHA update failed: %s", e)
             return False
 
-    def _execute(self, installation_id, owner, repo, pr_number, title, author, changed_files, webhook_received_at=None, client=None):
+    def _execute(self, installation_id, owner, repo, pr_number, title, author, changed_files, webhook_received_at=None, client=None, ollama_healthy=True):
         """Execute the companion review flow.
 
         client: optional GitHub client override. When provided, this client
@@ -541,6 +541,16 @@ class Companion:
         if self._is_skipped(owner, repo, pr_number):
             logger.info("Skipped (user) %s#%d", full_name, pr_number)
             return
+
+        # Self-heal: probe Ollama after acquiring semaphore. Recovery can block
+        # for up to 30s (systemd restart timeout), but the semaphore is already
+        # held so this doesn't block other PRs — they'll skip via acquire(False).
+        from riptide.ollama_heal import heal as ollama_heal
+        try:
+            ollama_healthy = ollama_heal(base_url=self.ollama_base) == 0
+        except Exception as e:
+            logger.warning("Ollama self-heal probe failed (non-fatal): %s", e)
+            ollama_healthy = True  # proceed with ELI5 even if probe fails
 
         # Refresh graphify data before analyzing — cheap AST-only update
         if self.enable_graphify:
@@ -672,7 +682,7 @@ class Companion:
                 # Detect UI files for ProofShot section
                 ui_extensions = {'.css', '.scss', '.less', '.html', '.jsx', '.tsx', '.vue', '.svelte', '.astro'}
                 ui_files = [f for f in files if any(f.get("filename", "").endswith(ext) for ext in ui_extensions)]
-                eli5 = self._generate_eli5(title, files, is_delta=is_delta)
+                eli5 = self._generate_eli5(title, files, is_delta=is_delta, ollama_healthy=ollama_healthy)
 
                 body = self._format_comment(emoji, author, tldr, graph_context, eli5, ui_files,
                                             owner=owner, repo=repo, pr_number=pr_number,
@@ -758,7 +768,7 @@ class Companion:
                 return
 
             # Tier 2: LLM enrichment (ELI5), then PATCH the same comment in place
-            eli5 = self._generate_eli5(title, files, is_delta=is_delta)
+            eli5 = self._generate_eli5(title, files, is_delta=is_delta, ollama_healthy=ollama_healthy)
             enriched_body = self._format_comment(emoji, author, tldr, graph_context, eli5, ui_files,
                                                  owner=owner, repo=repo, pr_number=pr_number,
                                                  title=title, files=files, is_delta=is_delta,
@@ -772,7 +782,7 @@ class Companion:
                 logger.warning("Tier 2 enrichment failed for %s#%d (Tier 1 remains): %s", full_name, pr_number, e)
         else:
             # Legacy path (LLM fallback / deterministic disabled): single POST
-            eli5 = self._generate_eli5(title, files, is_delta=is_delta) if not self.enable_deterministic else None
+            eli5 = self._generate_eli5(title, files, is_delta=is_delta, ollama_healthy=ollama_healthy) if not self.enable_deterministic else None
             body = self._format_comment(emoji, author, tldr, graph_context, eli5, ui_files,
                                         owner=owner, repo=repo, pr_number=pr_number,
                                         title=title, files=files, is_delta=is_delta,
@@ -925,7 +935,11 @@ TLDR:"""
 
         return self._ollama_call(prompt)
 
-    def _generate_eli5(self, title, files, is_delta=False):
+    def _generate_eli5(self, title, files, is_delta=False, ollama_healthy: Optional[bool] = True):
+        if not ollama_healthy:
+            logger.warning("Ollama self-heal failed — skipping ELI5 enrichment")
+            return None
+
         file_list = ", ".join(f.get("filename", "?") for f in files[:5])
         context = "new changes in this push of " if is_delta else ""
         prompt = f"""Explain {context}this PR like I'm 5. One analogy, 1-2 sentences.
