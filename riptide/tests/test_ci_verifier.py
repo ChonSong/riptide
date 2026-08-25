@@ -223,6 +223,23 @@ class TestPoll:
         assert result["status"] == "error"
         assert result["poll_count"] == 3  # MAX_TRANSIENT consecutive failures
 
+    def test_poll_transient_failures_reset_on_success(self):
+        """Transient failure counter should reset after a successful fetch."""
+        call_count = 0
+
+        def mock_fetch():
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1 or call_count == 2:
+                return None  # Two transient failures
+            return [{"name": "test-required", "state": "success"}]
+
+        with patch.object(self.verifier, "_fetch_checks", side_effect=mock_fetch):
+            result = self.verifier.poll(timeout=10, interval=1)
+
+        assert result["status"] == "success"
+        assert call_count == 3  # 2 failures, 1 success → exits
+
 
 class TestFormatReport:
     """Test human-readable report formatting."""

@@ -92,6 +92,8 @@ class CIVerifier:
                     "poll_count": poll_count,
                 }
 
+            transient_failures = 0  # Reset on successful fetch
+
             # Classify checks by state
             passed = [c for c in checks if c.get("state") == "success"]
             failed = [c for c in checks if c.get("state") == "failure"]

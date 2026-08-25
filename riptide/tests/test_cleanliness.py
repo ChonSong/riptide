@@ -307,3 +307,35 @@ class TestProbeCleanlinessSignals:
         assert signals["description_quality"]["has_issue_link"] is True
         assert signals["commit_hygiene"]["all_conventional"] is True
         assert signals["ci_precheck"]["status"] == "passing"
+
+    def test_check_test_coverage_stem_matching(self):
+        """Test coverage check should use stem matching for test files."""
+        probe = Probe(1, "ChonSong", "riptide")
+        files = [
+            {"filename": "foo.py", "additions": 10, "deletions": 0, "status": "modified"},
+            {"filename": "tests/test_foo.py", "additions": 5, "deletions": 0, "status": "added"},
+        ]
+        result = probe._check_test_coverage(files)
+        assert result["has_test_coverage"] is True
+        assert len(result["untested_source"]) == 0
+
+    def test_check_test_coverage_missing_tests(self):
+        """Test coverage check should detect source-only changes."""
+        probe = Probe(1, "ChonSong", "riptide")
+        files = [
+            {"filename": "foo.py", "additions": 10, "deletions": 0, "status": "modified"},
+            {"filename": "bar.py", "additions": 5, "deletions": 0, "status": "modified"},
+        ]
+        result = probe._check_test_coverage(files)
+        assert result["has_test_coverage"] is False
+        assert len(result["untested_source"]) == 2
+
+    def test_check_test_coverage_underscore_test_suffix(self):
+        """Test coverage should match foo_test.py to foo.py."""
+        probe = Probe(1, "ChonSong", "riptide")
+        files = [
+            {"filename": "foo.py", "additions": 10, "deletions": 0, "status": "modified"},
+            {"filename": "tests/foo_test.py", "additions": 5, "deletions": 0, "status": "added"},
+        ]
+        result = probe._check_test_coverage(files)
+        assert result["has_test_coverage"] is True
