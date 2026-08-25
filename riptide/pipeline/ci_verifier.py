@@ -174,9 +174,10 @@ class CIVerifier:
 
         # failure
         lines = ["❌ CI checks failed:"]
+        fixable_names = {c.get("name") for c in result.get("fixable", [])}
         for check in result.get("failed", []):
             name = check.get("name", "unknown")
-            fixable = " (fixable)" if check in result.get("fixable", []) else " (needs human)"
+            fixable = " (fixable)" if name in fixable_names else " (needs human)"
             lines.append(f"  - {name}{fixable}")
 
         if result.get("fixable"):
