@@ -51,7 +51,7 @@ FIX_TTL_SECONDS = 7200  # 2 hours
 class StateStore:
     """SQLite-backed state for tracking jobs, deliveries, and processed comments."""
 
-    SCHEMA_VERSION = 7
+    SCHEMA_VERSION = 8
 
     def __init__(self, db_path: str = DEFAULT_DB_PATH):
         self.db_path = db_path
@@ -111,15 +111,43 @@ class StateStore:
             pr_key TEXT NOT NULL, label TEXT NOT NULL, triggered_at REAL NOT NULL,
             PRIMARY KEY (pr_key, label))""")
 
+        # v8: durable work queue with PID-based recovery
+        conn.execute("""CREATE TABLE IF NOT EXISTS work_queue (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at REAL NOT NULL,
+            completed_at REAL,
+            error TEXT,
+            traceback TEXT,
+            pid INTEGER,
+            attempts INTEGER NOT NULL DEFAULT 0
+        )""")
+
         conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_pr_status ON jobs (pr_number, status)")
 
         if version < 2:
             self._migrate_poller_comments()
 
+        if version < 8:
+            try:
+                conn.execute("ALTER TABLE work_queue ADD COLUMN pid INTEGER")
+                conn.execute("ALTER TABLE work_queue ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e):
+                    raise
+
         if version < self.SCHEMA_VERSION:
             conn.execute("DELETE FROM schema_version")
             conn.execute("INSERT INTO schema_version (version) VALUES (?)", (self.SCHEMA_VERSION,))
         conn.commit()
+
+        # Recover pending work on startup (durability contract)
+        try:
+            self.recover_pending_work()
+        except Exception as e:
+            log.warning(f"Startup recovery failed (non-fatal): {e}")
 
     def _migrate_poller_comments(self):
         pass
@@ -197,9 +225,9 @@ class StateStore:
         try:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
-                """INSERT OR IGNORE INTO work_queue (id, kind, payload, status, created_at)
-                   VALUES (?, ?, ?, 'pending', ?)""",
-                (work_id, kind, json.dumps(payload), time.time()),
+                """INSERT OR IGNORE INTO work_queue (id, kind, payload, status, created_at, pid)
+                   VALUES (?, ?, ?, 'pending', ?, ?)""",
+                (work_id, kind, json.dumps(payload), time.time(), os.getpid()),
             )
             conn.commit()
             return conn.execute("SELECT changes()").fetchone()[0] > 0
@@ -248,38 +276,44 @@ class StateStore:
 
     def recover_pending_work(self) -> list[dict]:
         """Recover pending work after process restart.
-        
+
         Atomically claims recently-pending items by transitioning to 'recovering'.
-        Items older than 5 minutes are marked as stale.
+        Items older than the recovery window are marked as stale.
         Returns items successfully claimed for recovery.
+
+        Tunable via env vars:
+        - RIPTIDE_RECOVERY_WINDOW_SECONDS (default: 300 = 5 min)
+        - RIPTIDE_RECOVERY_STALE_ERROR (default: 'startup_recovery')
         """
         conn = self._get_conn()
         now = time.time()
-        recovery_cutoff = now - 300  # 5 minutes
-        
+        recovery_window = int(os.environ.get("RIPTIDE_RECOVERY_WINDOW_SECONDS", "300"))
+        recovery_cutoff = now - recovery_window
+        stale_error = os.environ.get("RIPTIDE_RECOVERY_STALE_ERROR", "startup_recovery")
+
         # Mark all pending items older than recovery window as stale
         conn.execute(
-            "UPDATE work_queue SET status='failed', completed_at=?, error='stale' WHERE status='pending' AND created_at < ?",
-            (now, recovery_cutoff),
+            "UPDATE work_queue SET status='failed', completed_at=?, error=? WHERE status='pending' AND created_at < ?",
+            (now, stale_error, recovery_cutoff),
         )
         conn.commit()
-        
-        # Get recently-pending items
+
+        # Get recently-pending items (exclude items from this PID — already running)
         rows = conn.execute(
             """SELECT id, kind, payload, created_at FROM work_queue
-               WHERE status='pending' AND created_at > ?
+               WHERE status='pending' AND created_at > ? AND (pid != ? OR pid IS NULL)
                ORDER BY created_at ASC""",
-            (recovery_cutoff,),
+            (recovery_cutoff, os.getpid()),
         ).fetchall()
-        
+
         # Atomically claim each item
         claimed = []
         for row in rows:
             work_id = row[0]
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
-                "UPDATE work_queue SET status='recovering' WHERE id=? AND status='pending'",
-                (work_id,),
+                "UPDATE work_queue SET status='recovering', pid=? WHERE id=? AND status='pending'",
+                (os.getpid(), work_id),
             )
             conn.commit()
             if conn.execute("SELECT changes()").fetchone()[0] > 0:
@@ -289,7 +323,7 @@ class StateStore:
                     "payload": json.loads(row[2]),
                     "created_at": row[3],
                 })
-        
+
         return claimed
 
     @staticmethod

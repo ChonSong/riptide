@@ -761,5 +761,40 @@ def init_db():
         pending = state.recover_pending_work()
         if pending:
             log.info(f"Recovered {len(pending)} pending work items from previous process")
+            # Spawn workers in background to avoid blocking startup
+            import threading
+            threading.Thread(
+                target=_spawn_recovery_workers,
+                args=(pending,),
+                daemon=True,
+                name="startup-recovery",
+            ).start()
     except Exception as e:
         log.warning(f"Work recovery failed (non-fatal): {e}")
+
+
+def _spawn_recovery_workers(pending_items: list[dict]):
+    """Spawn workers for recovered pending items (runs in background thread).
+
+    For now, transition items back to 'pending' so the cron poller re-processes
+    them. Direct worker spawning requires installation_id + client context that
+    isn't persisted in the work_queue payload. A future enhancement can persist
+    that context and spawn workers directly.
+    """
+    try:
+        from riptide.state import StateStore
+        state = StateStore()
+
+        for item in pending_items:
+            work_id = item.get("id", "unknown")
+            kind = item.get("kind")
+            log.info(f"Recovery: transitioning {work_id} (kind={kind}) back to pending for cron pickup")
+            # Transition back to pending so cron poller picks it up
+            conn = state._get_conn()
+            conn.execute(
+                "UPDATE work_queue SET status='pending', pid=NULL WHERE id=? AND status='recovering'",
+                (work_id,),
+            )
+            conn.commit()
+    except Exception as e:
+        log.error(f"Recovery worker spawner failed: {e}")
