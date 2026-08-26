@@ -72,7 +72,7 @@ def handle_command(
     payload: dict,
     delivery_id: str,
     comment_id: int,
-    installation_id: int,
+    installation_id: int | None,
     owner: str,
     repo: str,
     pr_number: int,
@@ -146,7 +146,7 @@ def handle_command(
 
 def _get_pr_author(
     payload: dict,
-    installation_id: int,
+    installation_id: int | None,
     owner: str,
     repo: str,
     pr_number: int,
@@ -169,7 +169,7 @@ def _get_pr_author(
     try:
         from riptide.webhook import github_client
         client = github_client()
-        pr_details = client.get_pr_details(installation_id, owner, repo, pr_number)
+        pr_details = client.get_pr_details(installation_id, owner, repo, pr_number)  # type: ignore[arg-type]
         return pr_details.get("user", {}).get("login", "unknown")
     except Exception as e:
         log.warning(f"Could not fetch PR author: {e}")

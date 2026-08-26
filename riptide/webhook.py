@@ -518,6 +518,16 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
     installation = payload.get("installation", {})
     installation_id = installation.get("id")
 
+    # Must be a PR comment
+    is_pr = bool(issue.get("pull_request"))
+    if not is_pr:
+        return Response(status_code=200)
+
+    owner = repo.get("full_name", "").split("/")[0] if repo.get("full_name") else ""
+    repo_name = repo.get("name", "")
+    pr_number = issue.get("number")
+    commenter = comment.get("user", {}).get("login", "unknown")
+
     # Skip own comments (posted by the bot)
     via_app = comment.get("performed_via_github_app") or {}
     app_slug = os.environ.get("GITHUB_APP_SLUG", "octopus-selfhost")
@@ -531,14 +541,25 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
             log.info(f"[{delivery_id}] Skipping own bot comment: {bot_login}")
             return Response(status_code=200)
 
-    is_pr = bool(issue.get("pull_request"))
-    if not is_pr:
-        return Response(status_code=200)
-
-    owner = repo.get("full_name", "").split("/")[0] if repo.get("full_name") else ""
-    repo_name = repo.get("name", "")
-    pr_number = issue.get("number")
-    commenter = comment.get("user", {}).get("login", "unknown")
+    # ── Fallback: use gh CLI client for repos without App installation ───────
+    # When the GitHub App isn't installed, installation_id is None but we can
+    # still act on watched repos via PAT-authenticated gh CLI.
+    using_gh_cli_fallback = False
+    if not installation_id:
+        repo_full = repo.get("full_name", "")
+        from riptide.webhook import WATCHED_REPOS
+        if repo_full in WATCHED_REPOS:
+            gh_cli = get_gh_cli_client()
+            if gh_cli:
+                installation_id = None  # gh CLI ignores this param
+                using_gh_cli_fallback = True
+                log.info(f"[{delivery_id}] No installation ID for {repo_full} — using gh CLI fallback")
+            else:
+                log.info(f"[{delivery_id}] No installation ID for {repo_full} and gh CLI unavailable, skipping")
+                return Response(status_code=200)
+        else:
+            log.info(f"[{delivery_id}] No installation ID for {repo_full} (not in WATCHED_REPOS), skipping")
+            return Response(status_code=200)
 
     # Route 1: Companion skip/resume commands
     companion = get_companion()
@@ -557,7 +578,7 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
             return Response(status_code=200)
 
     # Route 2: Unified @riptide-bot command router
-    if installation_id and body and "@riptide-bot" in body.lower():
+    if body and "@riptide-bot" in body.lower():
         from riptide.interaction_handler import handle_command
 
         try:
@@ -573,7 +594,7 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
                 commenter=commenter,
             )
             if response:
-                client = github_client()
+                client = github_client() if not using_gh_cli_fallback else get_gh_cli_client()
                 client.post_pr_comment(
                     installation_id, owner, repo_name, pr_number, response
                 )
