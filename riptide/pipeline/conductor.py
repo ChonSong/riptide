@@ -484,3 +484,47 @@ def create_webhook_review_pipeline(
     )
 
     return track
+
+def create_fix_pipeline(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    pr_details: dict,
+    files: list[dict],
+    description: str = '',
+    push_eligible: bool = True,
+) -> dict:
+    track_id = f'riptide-fix-{owner}-{repo}-{pr_number}'
+    track = get_track(track_id)
+    if not track:
+        track = create_track(track_id, name=f'Riptide Fix #{pr_number}', phase='Fix',
+                            repos={repo: {'owner': owner, 'pr': pr_number}})
+    head_sha = pr_details.get('head', {}).get('sha', '')
+    create_workstream(track_id, 'ws-1-probe',
+        inputs={'pr_number': pr_number, 'owner': owner, 'repo': repo, 'files': files, 'head_sha': head_sha},
+        acceptance={'output_exists': True}, role='probe',
+        pipeline=['fetch_diff', 'context_bundle', 'review_findings'])
+    create_workstream(track_id, 'ws-2-judge',
+        inputs={'context_path': f'/tmp/pr-{pr_number}-context.json', 'description': description},
+        acceptance={'findings_valid': True}, role='judge',
+        pipeline=['verify_findings', 'classify_valid'])
+    create_workstream(track_id, 'ws-3-artisan',
+        inputs={'findings_path': '/tmp/findings.json', 'files': files, 'push_eligible': push_eligible},
+        acceptance={'edits_applied': True}, role='artisan',
+        pipeline=['edit_files', 'targeted_fixes'])
+    create_workstream(track_id, 'ws-4-engine',
+        inputs={'command': 'run_tests_and_push', 'push_eligible': push_eligible,
+                'head_ref': pr_details.get('head', {}).get('ref', '')},
+        acceptance={'tests_passed': True, 'pushed': True}, role='engine',
+        pipeline=['run_tests', 'push_if_green'])
+    create_workstream(track_id, 'ws-5-ci-verifier',
+        inputs={'pr_number': pr_number, 'owner': owner, 'repo': repo, 'timeout': 600},
+        acceptance={'ci_complete': True}, role='ci_verifier',
+        pipeline=['poll_ci', 'classify_failures'])
+    create_workstream(track_id, 'ws-6-scribe',
+        inputs={'pr_number': pr_number, 'owner': owner, 'repo': repo,
+                'action': 'post_fix_summary', 'head_sha': head_sha},
+        acceptance={'posted': True}, role='scribe',
+        pipeline=['format_summary', 'post_comment'])
+    return track
+
