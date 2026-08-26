@@ -128,11 +128,11 @@ class CIVerifier:
             return None
 
     def _classify_checks(self, checks: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-        """Classify checks into passed/failed/pending."""
+        """Classify checks into passed/failed/pending (case-insensitive)."""
         return {
-            "passed": [c for c in checks if c.get("state") == "success"],
-            "failed": [c for c in checks if c.get("state") == "failure"],
-            "pending": [c for c in checks if c.get("state") in ("pending", "in_progress", "queued")],
+            "passed": [c for c in checks if (c.get("state") or "").lower() == "success"],
+            "failed": [c for c in checks if (c.get("state") or "").lower() == "failure"],
+            "pending": [c for c in checks if (c.get("state") or "").lower() in ("pending", "in_progress", "queued")],
         }
 
     def _build_result(
