@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+log = logging.getLogger("riptide.work_state")
 
 WORK_STATE_PATH = os.environ.get(
     "RIPTIDE_WORK_STATE",
@@ -187,6 +190,7 @@ def update_workstream(
     ws_id: str,
     status: Optional[str] = None,
     outputs: Optional[dict] = None,
+    retry_count: Optional[int] = None,
 ) -> dict:
     def _do(state):
         ws = state["tracks"][track_id]["workstreams"][ws_id]
@@ -194,6 +198,8 @@ def update_workstream(
             ws["status"] = status
         if outputs:
             ws["outputs"].update(outputs)
+        if retry_count is not None:
+            ws["retry_count"] = retry_count
         if status == "done":
             ws["completed_at"] = now()
         state["tracks"][track_id]["last_updated"] = now()
@@ -210,6 +216,121 @@ def next_pending_workstream(track_id: str) -> Optional[tuple[str, dict]]:
         if ws["status"] == "pending":
             return ws_id, ws
     return None
+
+
+def get_stuck_tracks(max_age_minutes: int = 30) -> list[dict]:
+    """
+    Find tracks with workstreams stuck in 'in_progress' for too long.
+    
+    Args:
+        max_age_minutes: Maximum age in minutes before a workstream is considered stuck.
+    
+    Returns:
+        List of dicts with track_id, workstream_id, age_minutes, role.
+    """
+    state = read_state()
+    stuck = []
+    now = datetime.now(timezone.utc)
+    
+    for track_id, track in state.get("tracks", {}).items():
+        for ws_id, ws in track.get("workstreams", {}).items():
+            if ws.get("status") == "in_progress":
+                # Check if the workstream has a started_at timestamp
+                started_at_str = ws.get("started_at")
+                if started_at_str:
+                    try:
+                        started_at = datetime.fromisoformat(started_at_str)
+                        age = (now - started_at).total_seconds() / 60
+                        if age > max_age_minutes:
+                            stuck.append({
+                                "track_id": track_id,
+                                "workstream_id": ws_id,
+                                "role": ws.get("role", "unknown"),
+                                "age_minutes": round(age, 1),
+                                "status": ws.get("status"),
+                            })
+                    except (ValueError, TypeError):
+                        pass
+    
+    return stuck
+
+
+def cleanup_stuck_tracks(max_age_minutes: int = 30) -> list[dict]:
+    """
+    Mark stuck workstreams as failed so they can be retried.
+    
+    Args:
+        max_age_minutes: Maximum age in minutes before a workstream is considered stuck.
+    
+    Returns:
+        List of dicts with track_id, workstream_id that were cleaned up.
+    """
+    stuck = get_stuck_tracks(max_age_minutes)
+    cleaned = []
+    
+    for item in stuck:
+        track_id = item["track_id"]
+        ws_id = item["workstream_id"]
+        
+        def _do(state, tid=track_id, wid=ws_id):
+            ws = state["tracks"][tid]["workstreams"][wid]
+            ws["status"] = "failed"
+            ws["failed_at"] = now()
+            ws["failure_reason"] = f"Stuck in_progress for {item['age_minutes']} minutes (timeout)"
+            state["tracks"][tid]["last_updated"] = now()
+        
+        modify_state(_do)
+        cleaned.append(item)
+        log.warning(
+            f"Cleaned up stuck workstream {ws_id} in track {track_id} "
+            f"(stuck for {item['age_minutes']} minutes)"
+        )
+    
+    return cleaned
+
+
+def get_pipeline_status(track_id: str) -> Optional[dict]:
+    """
+    Get a summary of the pipeline status for a track.
+    
+    Returns:
+        Dict with track info, workstream statuses, and progress.
+    """
+    track = get_track(track_id)
+    if not track:
+        return None
+    
+    workstreams = track.get("workstreams", {})
+    total = len(workstreams)
+    done = sum(1 for ws in workstreams.values() if ws.get("status") == "done")
+    failed = sum(1 for ws in workstreams.values() if ws.get("status") == "failed")
+    in_progress = sum(1 for ws in workstreams.values() if ws.get("status") == "in_progress")
+    pending = sum(1 for ws in workstreams.values() if ws.get("status") == "pending")
+    
+    # Find current workstream
+    current_ws = None
+    for ws_id, ws in workstreams.items():
+        if ws.get("status") == "in_progress":
+            current_ws = {"id": ws_id, "role": ws.get("role"), "started_at": ws.get("started_at")}
+            break
+    
+    return {
+        "track_id": track_id,
+        "name": track.get("name"),
+        "phase": track.get("phase"),
+        "status": track.get("status"),
+        "progress": {
+            "total": total,
+            "done": done,
+            "failed": failed,
+            "in_progress": in_progress,
+            "pending": pending,
+            "percent": round((done / total * 100) if total > 0 else 0, 1),
+        },
+        "current_workstream": current_ws,
+        "key_facts": track.get("key_facts", {}),
+        "last_updated": track.get("last_updated"),
+    }
 
 
 # ── Key facts ────────────────────────────────────────────────────────────────

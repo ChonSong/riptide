@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-deepthink.py — Bot 2: Riptide Review (autonomous deep-think PR analysis).
+deepthink.py — Bot 2: Riptide Review (stratified PR analysis).
 
-Polls open PRs and spawns Hermes deep-think sessions when:
+Polls open PRs and spawns stratified review pipelines when:
   1. PR has total changes (additions + deletions) > 100 LOC
   2. PR hasn't been updated in >= 30 minutes (settled)
   3. Either we own the repo (ChonSong org) OR we authored the PR
-
-Also handles on-demand @riptide-bot review commands via handle_review_command(),
-called directly from webhook.py when a user comments @riptide-bot review on a PR.
 
 Dedup: tracks pr_number + head_sha to avoid re-spawning on the same revision.
 Uses `gh` CLI (already authenticated as ChonSong) for all GitHub queries.
@@ -28,17 +25,14 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
-import structlog
-
 from riptide.state import StateStore
 from riptide.depth import ReviewDepth, classify_review_depth, select_skills  # noqa: F401 (re-exported for back-compat)
-from riptide.review_memory import get_memory_context
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
-log = structlog.get_logger("riptide.deepthink")
+log = logging.getLogger("riptide.deepthink")
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -107,117 +101,6 @@ def _was_reviewed_today(owner: str, repo: str, pr_number: int) -> bool:
         return False
 
 
-def handle_review_command(
-    client,
-    installation_id: int,
-    owner: str,
-    repo: str,
-    pr_number: int,
-    commenter: str,
-    delivery_id: str = "",
-) -> str | None:
-    """Handle @riptide-bot review command — spawn an on-demand deep-think review.
-
-    Called from webhook.py when a user comments @riptide-bot review on a PR.
-    Fetches PR details via GitHub API client, builds the context bundle,
-    creates a Conductor review pipeline, spawns the deep-think session,
-    and returns a user-facing confirmation message (or error message).
-
-    delivery_id: trace ID from the originating webhook event (for log correlation).
-    """
-    # ── Structlog trace binding ───────────────────────────────────────────────
-    if delivery_id:
-        structlog.contextvars.bind_contextvars(
-            delivery_id=delivery_id,
-            worker="deepthink",
-            pr=f"{owner}/{repo}#{pr_number}",
-        )
-    try:
-        pr_details = client.get_pr_details(installation_id, owner, repo, pr_number)
-    except Exception as e:
-        log.warning("Failed to fetch PR details for review: %s", e)
-        return (
-            f"⚠️ Could not fetch PR #{pr_number} details ({e}). "
-            f"Make sure the PR exists and the app is installed."
-        )
-
-    title = pr_details.get("title", f"PR #{pr_number}")
-    author = pr_details.get("user", {}).get("login", "unknown")
-    additions = pr_details.get("additions", 0)
-    deletions = pr_details.get("deletions", 0)
-    total_loc = additions + deletions
-    head_sha = pr_details.get("head", {}).get("sha", "")
-
-    # Authorization gate: the COMMENTER must be the PR author, the repo owner,
-    # or OUR_USERNAME. This prevents unauthorized users from spawning
-    # expensive deep-think sessions.
-    if commenter != OUR_USERNAME and commenter != author and commenter != owner:
-        log.info(
-            "Unauthorized review attempt on %s/%s#%d by %s (author=%s, owner=%s)",
-            owner, repo, pr_number, commenter, author, owner,
-        )
-        return (
-            f"🚫 **Not authorized.** Only the PR author (@{author}), the repo "
-            f"owner (@{owner}), or @{OUR_USERNAME} can trigger `@riptide-bot review` "
-            f"on this PR."
-        )
-
-    # Note: no 24h dedup guard here — manual @riptide-bot review always spawns.
-    # The cron poller has its own dedup logic in poll().
-
-    try:
-        # Fetch files for the Conductor pipeline
-        files = []
-        try:
-            files = client.get_pr_files(installation_id, owner, repo, pr_number)
-        except Exception as e:
-            log.warning("Failed to fetch PR files for Conductor: %s", e)
-            files = []
-
-        # Create the Conductor review pipeline
-        from riptide.pipeline.conductor import create_webhook_review_pipeline
-        track = create_webhook_review_pipeline(
-            owner=owner,
-            repo=repo,
-            pr_number=pr_number,
-            pr_details=pr_details,
-            files=files,
-        )
-        log.info(
-            "Conductor webhook review pipeline created for %s/%s#%d: %s (phase=%s, workstreams=%d)",
-            owner, repo, pr_number,
-            track.get("name", "?"),
-            track.get("phase", "?"),
-            len(track.get("workstreams", {})),
-        )
-
-        spawned = _spawn_deepthink(owner, repo, pr_number, title, author, total_loc, head_sha)
-    except RuntimeError as e:
-        if "review already pending" in str(e):
-            log.info("Skipping %s/%s#%d — review already pending", owner, repo, pr_number)
-            return (
-                f"⏭️ **Already pending.** PR #{pr_number} already has a deep-think review in progress. "
-                f"Check back in a few minutes — the review will be posted when complete."
-            )
-        log.error("Failed to spawn deep-think: %s", e)
-        return f"⚠️ Failed to spawn deep-think review for #{pr_number}: {e}"
-    except Exception as e:
-        log.error("Failed to spawn deep-think: %s", e)
-        return f"⚠️ Failed to spawn deep-think review for #{pr_number}: {e}"
-
-    log.info("On-demand review spawned for %s/%s#%d by %s", owner, repo, pr_number, commenter)
-    return (
-        f"🧠 **Riptide Review triggered for #{pr_number}!**\n\n"
-        f"A Hermes deep-think session has been scheduled and will begin within 2 minutes. "
-        f"The review will analyze the full diff, run graphify blast-radius analysis, "
-        f"post inline suggestions, and generate an Excalidraw architecture diagram.\n\n"
-        f"**PR:** {title}\n"
-        f"**Author:** @{author}\n"
-        f"**Changes:** +{additions}/-{deletions} ({total_loc} LOC)\n"
-        f"**Commit:** `{head_sha[:12]}`"
-    )
-
-
 def _is_cron_available() -> bool:
     """Check that `hermes cron create` works."""
     result = subprocess.run(
@@ -235,21 +118,26 @@ def _spawn_deepthink(
     total_loc: int,
     head_sha: str,
 ) -> bool:
-    """Spawn a Hermes cron session for deep-think review on this PR.
+    """
+    Spawn a stratified Hermes review pipeline for this PR.
 
-    Uses the Conductor pipeline to orchestrate the review:
-    1. Creates a Conductor track with workstreams (probe → judge → artisan → engine → scribe)
-    2. Spawns a Hermes cron session that runs the Conductor
+    Uses the async Conductor architecture:
+    1. Creates a Conductor track with stratified workstreams
+    2. Dispatches the first worker (probe) as a Hermes session
+    3. Each worker calls back on completion to resume the pipeline
 
-    Retries up to 3 times with exponential backoff (5s/15s/30s).
-    Reserves a pending job before spawning the review; marks the job as
+    This replaces the old model where all workers ran in a single
+    bloated Hermes session. Now each worker gets its own focused
+    context window, skills, and memory.
+
+    Retries up to 3 times with exponential backoff (5s/10s/20s).
+    Reserves a pending job before spawning; marks the job as
     complete on success or failed if all attempts fail.
     Returns True if spawned successfully, False otherwise.
     """
     max_retries = 3
     base_delay = 5  # seconds
     name = f"riptide-review-{owner}-{repo}-{pr_number}"
-    run_at = (datetime.now() + timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%S")
     triggered_at = datetime.now(timezone.utc).isoformat()
 
     # Cross-session awareness: clean up stale jobs, then atomically reserve
@@ -275,190 +163,78 @@ def _spawn_deepthink(
         # Pre-gather data in Python (cheaper than having the agent do it)
         data = _gather_review_data(owner, repo, pr_number, head_sha)
 
-        # Classify PR depth to determine skill loading
-        depth = classify_review_depth(data)
-        skills = select_skills(depth)
-        log.info(f"{owner}/{repo}#{pr_number} classified as {depth.value}, skills={skills}")
+        # Fetch PR files for the pipeline
+        files = data.get("files_changed", [])
 
-        # Build context bundle for the Conductor pipeline
-        bundle = None
-        try:
-            from riptide.context_bundle import build_context_bundle
-            bundle = build_context_bundle(
-                data.get("files_changed", []),
-                data.get("graph_context"),
-                pr_details={"title": pr_title, "author": pr_author, "body": ""},
-            )
-            log.info(
-                "%s/%s#%d deterministic bundle: %d findings, verdict=%s",
-                owner, repo, pr_number,
-                len(bundle.get("findings", [])), bundle.get("verdict"),
-            )
-        except Exception as e:
-            log.warning(f"Context bundle failed for {owner}/{repo}#{pr_number}: {e}")
-
-        # Pre-generate Excalidraw diagram in Python (deterministic, no LLM needed)
-        # Run in background thread with timeout to avoid blocking webhook path
-        from concurrent.futures import ThreadPoolExecutor, TimeoutError
-        diagram_url = None
-        def _gen_diagram():
-            from riptide.grafiphy.orchestrator import pre_generate_diagram
-            return pre_generate_diagram(data, dict(
-                owner=owner, repo=repo, number=pr_number,
-                title=pr_title, author=pr_author, total_loc=total_loc,
-            ))
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(_gen_diagram)
-            try:
-                diagram_url = future.result(timeout=30)
-                if diagram_url:
-                    log.info(f"Pre-generated diagram for {owner}/{repo}#{pr_number}: {diagram_url}")
-            except TimeoutError:
-                log.warning(f"Pre-generate diagram timed out after 30s for {owner}/{repo}#{pr_number}")
-            except Exception as e:
-                log.warning(f"Pre-generate diagram failed (non-fatal): {e}")
-
-        # ── Conductor integration: create the review pipeline ──────────────
-        from riptide.pipeline.conductor import create_deepthink_review_pipeline
+        # Create the stratified review pipeline
+        from riptide.pipeline.async_conductor import create_stratified_review_pipeline
         pr_details = {
             "title": pr_title,
             "author": pr_author,
             "head": {"sha": head_sha},
         }
-        files_changed = data.get("files_changed", [])
-        track = create_deepthink_review_pipeline(
+        track = create_stratified_review_pipeline(
             owner=owner,
             repo=repo,
             pr_number=pr_number,
             pr_details=pr_details,
-            files=files_changed,
+            files=files,
         )
+        track_id = f"riptide-review-{owner}-{repo}-{pr_number}"
         log.info(
-            "Conductor track created for %s/%s#%d: %s (phase=%s, workstreams=%d)",
-            owner, repo, pr_number,
-            track.get("name", "?"),
-            track.get("phase", "?"),
-            len(track.get("workstreams", {})),
-        )
-
-        # Build the prompt: tell the Hermes session to run the Conductor
-        prompt = _build_conductor_prompt(
-            owner=owner,
-            repo=repo,
-            pr_number=pr_number,
-            pr_title=pr_title,
-            pr_author=pr_author,
-            total_loc=total_loc,
-            head_sha=head_sha,
-            diagram_url=diagram_url,
-            deterministic=bundle,
-            pr_created_at=data.get("pr_created_at"),
-            triggered_at=triggered_at,
+            f"Created stratified review pipeline for {owner}/{repo}#{pr_number}: "
+            f"track={track_id}, workstreams={len(track.get('workstreams', {}))}"
         )
     except Exception as e:
         state.mark_failed(job_id)
         raise RuntimeError(
-            f"Failed to gather data or build prompt for {owner}/{repo}#{pr_number}: {e}"
+            f"Failed to create stratified pipeline for {owner}/{repo}#{pr_number}: {e}"
         ) from e
 
-    # Write prompt to temp file to bypass Hermes safety filter
-    # (safety system scans command-line args for keywords like subprocess/threading/daemon)
-    #
-    # SECURITY: The prompt may contain secrets (private keys, tokens, diff content).
-    # We mitigate this by:
-    #   1. Using os.fdopen to atomically write + close the mkstemp fd (no fd leak)
-    #   2. Setting 0o600 permissions (owner read/write only)
-    #   3. Sanitizing the prompt to redact secrets before writing
-    #   4. Cleaning up the file immediately on scheduling failure
-    #   5. Instructing Hermes to delete the file after reading it on success
-    fd, prompt_file = tempfile.mkstemp(suffix=".txt", prefix="riptide-prompt-")
+    # Dispatch the first worker (probe)
     try:
-        # Set restrictive permissions BEFORE writing content
-        os.fchmod(fd, 0o600)
-        # Atomically write + close the fd (avoids separate open() + close())
-        with os.fdopen(fd, "w") as f:
-            # Redact secrets before writing to disk
-            # (e.g. GitHub tokens, private keys, Ollama API keys)
-            sanitized = _sanitize_prompt(prompt)
-            f.write(sanitized)
-    except Exception:
-        # Prompt file creation or write failed — clean up partial file and release reservation
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        try:
-            os.unlink(prompt_file)
-        except OSError:
-            pass
-        state.mark_failed(job_id)
-        raise
+        from riptide.pipeline.async_conductor import AsyncConductor
+        conductor = AsyncConductor(track_id)
 
-    # For successful scheduling, Hermes will clean up the prompt file after reading it.
-    # For scheduling failures, we clean it up immediately in the finally block.
-    cmd_prompt = (
-        f"Read the prompt from {prompt_file} and execute it. "
-        f"After execution, delete the file {prompt_file}."
-    )
-
-    cmd = [
-        "hermes", "cron", "create", run_at,
-        cmd_prompt,
-        "--name", name,
-    ]
-    for skill in skills:
-        cmd.extend(["--skill", skill])
-    cmd.extend([
-        "--model", DEEPTHINK_MODEL,
-        "--provider", DEEPTHINK_PROVIDER,
-        "--deliver", "origin",
-    ])
-
-    scheduled = False
-    try:
         for attempt in range(max_retries):
             if attempt > 0:
                 delay = base_delay * (2 ** attempt)  # 5s, 10s, 20s
                 log.info(f"Retry {attempt+1}/{max_retries} for {owner}/{repo}#{pr_number} in {delay}s...")
                 time.sleep(delay)
 
-            # Check hermes availability before each attempt
             if not _is_cron_available():
                 log.warning(f"hermes not available on attempt {attempt+1} for {owner}/{repo}#{pr_number}")
                 continue
 
-            log.info(f"Spawning: hermes cron create {run_at} --name {name} (attempt {attempt+1})")
+            log.info(f"Dispatching first worker for {owner}/{repo}#{pr_number} (attempt {attempt+1})")
             try:
-                result = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=15
-                )
-                # Hermes returns exit code 0 even when blocked — check stdout for failure markers
-                # Make check robust: case-insensitive, inspect both stdout and stderr
-                if result.returncode == 0 and not _hermes_blocked(result.stdout, result.stderr):
-                    # Reservation stays pending — the scheduled worker marks it complete when done
-                    log.info(f"✓ Spawned deep-think for {owner}/{repo}#{pr_number}: {result.stdout[:200]}")
-                    scheduled = True
-                    return True
+                result = conductor.run()
+                if result and result.get("results"):
+                    dispatched = result["results"][0]
+                    if dispatched.get("status") == "dispatched":
+                        log.info(f"✓ Dispatched {dispatched.get('role')} for {owner}/{repo}#{pr_number}")
+                        return True
+                    elif dispatched.get("status") == "failed":
+                        log.error(f"✗ Dispatch failed for {owner}/{repo}#{pr_number}")
+                        state.mark_failed(job_id)
+                        return False
                 else:
-                    log.error(f"✗ Spawn failed (attempt {attempt+1}): stdout={result.stdout[:300]} stderr={result.stderr[:300]}")
-            except subprocess.TimeoutExpired:
-                log.warning(f"Timeout spawning deep-think (attempt {attempt+1})")
+                    log.error(f"✗ No results from dispatch for {owner}/{repo}#{pr_number}")
             except Exception as e:
-                log.error(f"Error spawning deep-think (attempt {attempt+1}): {e}")
+                log.error(f"Error dispatching (attempt {attempt+1}): {e}")
 
-        # All attempts failed — mark the reserved job as failed
+        # All attempts failed
         state.mark_failed(job_id)
         raise RuntimeError(
-            f"All {max_retries} Hermes cron attempts failed for {owner}/{repo}#{pr_number}"
+            f"All {max_retries} dispatch attempts failed for {owner}/{repo}#{pr_number}"
         )
-    finally:
-        # On scheduling failure, clean up the prompt file immediately.
-        # On success, Hermes will clean it up after reading (via cmd_prompt instruction).
-        if not scheduled:
-            try:
-                os.unlink(prompt_file)
-            except OSError:
-                pass
+    except RuntimeError:
+        raise
+    except Exception as e:
+        state.mark_failed(job_id)
+        raise RuntimeError(
+            f"Failed to dispatch stratified pipeline for {owner}/{repo}#{pr_number}: {e}"
+        )
 
 
 def _sanitize_prompt(prompt: str) -> str:
@@ -664,7 +440,7 @@ def _gather_review_data(
     return data
 
 
-def _build_conductor_prompt(
+def _build_orchestrator_prompt(
     owner: str,
     repo: str,
     pr_number: int,
@@ -672,49 +448,139 @@ def _build_conductor_prompt(
     pr_author: str,
     total_loc: int,
     head_sha: str,
+    data: dict,
     diagram_url: Optional[str] = None,
     deterministic: Optional[dict] = None,
     pr_created_at: Optional[str] = None,
     triggered_at: Optional[str] = None,
 ) -> str:
     """
-    Build a prompt that instructs the Hermes session to run the Conductor pipeline.
+    Build a small orchestrator prompt that delegates to subagents.
 
-    The Conductor (riptide/pipeline/conductor.py) orchestrates:
-      Probe → Judge → Artisan → Engine → Scribe
-    to produce and post the review.
+    The prompt is ~40 lines instead of ~280 lines.
+    All data is pre-gathered in Python and passed as structured context.
+    If diagram_url is provided, the LLM references it instead of generating.
+    If deterministic is provided (WS-3 Stage 1 context bundle), its DiffReport
+    findings + verdict are embedded so the session starts from the deterministic
+    analysis instead of re-deriving it.
     """
-    diagram_line = f"--diagram-url '{diagram_url}'" if diagram_url else ""
-    deterministic_hint = ""
+    # Format files changed
+    files_str = "\n".join(
+        f"  - {f.get('filename', '?')} (+{f.get('additions', 0)}/-{f.get('deletions', 0)})"
+        for f in data["files_changed"][:20]
+    )
+
+    # Format diff summary (first 12k chars)
+    diff_summary = data["diff_raw"][:12000]
+    if len(data["diff_raw"]) > 12000:
+        diff_summary += f"\n  ... ({len(data['diff_raw'])} chars total)"
+
+    # Format graphify context
+    graph_str = ""
+    if data["god_nodes"]:
+        graph_str += "God Nodes:\n"
+        for node in data["god_nodes"][:5]:
+            graph_str += f"  - {node['name']} ({node['edges']} edges)\n"
+    if data["communities"]:
+        graph_str += "Communities:\n"
+        for comm in data["communities"][:5]:
+            graph_str += f"  - {comm['name']}\n"
+    if not graph_str:
+        graph_str = "(No graphify analysis available)"
+
+    diagram_section = f"\n## Pre-generated Architecture Diagram\n[View Diagram]({diagram_url})\n" if diagram_url else ""
+    diagram_step = "\n### Step 4: Architecture Diagram\nThe architecture diagram is pre-generated and embedded above. Reference it in your Code Analysis section.\n" if diagram_url else ""
+
+    # Deterministic analysis section (WS-3 Stage 1): pre-computed DiffReport findings
+    deterministic_section = ""
     if deterministic:
         verdict = deterministic.get("verdict", "pass")
         findings = deterministic.get("findings", [])
-        deterministic_hint = (
-            f"\n## Pre-computed Analysis\n"
-            f"Verdict: {verdict} — {len(findings)} finding(s). "
-            f"Confirm, refute, or extend these in your review."
-        )
+        stats = deterministic.get("stats", {})
+        concepts = deterministic.get("aggregate", {}).get("concepts", [])
+        lines = ["## Deterministic Analysis (pre-computed)", ""]
+        lines.append(f"Verdict: **{verdict}** — {len(findings)} finding(s), "
+                     f"{stats.get('total_add', 0)}+/"
+                     f"{stats.get('total_del', 0)}- across "
+                     f"{stats.get('file_count', 0)} file(s).")
+        if concepts:
+            lines.append(f"Concepts touched: {', '.join(concepts)}")
+        if findings:
+            lines.append("")
+            lines.append("Findings (verify against the diff, do NOT re-derive from scratch):")
+            for f in findings[:10]:
+                lines.append(
+                    f"- [{f.get('severity', 'info')}] {f.get('category', '?')}: "
+                    f"{f.get('message', '')}"
+                    + (f" — {f.get('file', '')}" if f.get('file') else "")
+                )
+            if len(findings) > 10:
+                lines.append(f"  … and {len(findings) - 10} more")
+        lines.append("")
+        lines.append("Your subagent review must reference these findings — confirm, refute, or extend them. "
+                     "Do not duplicate the analysis; add value on top of it.")
+        deterministic_section = "\n".join(lines) + "\n\n"
 
-    return f"""Run the Riptide Conductor pipeline to review PR #{pr_number} in {owner}/{repo}.
+    return f"""PR #{pr_number} in {owner}/{repo} — {total_loc} LOC changed.
 
-## PR Context
+## Context (pre-gathered)
 - Title: {pr_title}
 - Author: {pr_author}
 - HEAD SHA: {head_sha[:12]}
-- Total LOC changed: {total_loc}
-{deterministic_hint}
 
-## Task
-1. Import and instantiate the Conductor for track "riptide-review-{owner}-{repo}-{pr_number}":
-   ```python
-   from riptide.pipeline.conductor import Conductor
-   conductor = Conductor("riptide-review-{owner}-{repo}-{pr_number}")
-   result = conductor.run()
-   ```
-2. The Conductor will dispatch workers: Probe → Judge → Artisan → Engine → Scribe.
-3. The Scribe posts the final review to the PR.
+### Files Changed
+{files_str}
 
-{diagram_line}
+### Repository Tree
+```
+{format_repo_tree(data.get("repo_tree", []))}
+```
+
+### Diff Summary
+````
+{diff_summary}
+````
+
+### Graphify Analysis
+{graph_str}
+{diagram_section}
+{deterministic_section}## Your Task: Orchestrate Review
+
+You are a senior engineer. Delegate review tasks to subagents, then synthesize.
+
+### Step 1: Delegate Inline Review
+Spawn a subagent with:
+- Role: Code reviewer
+- Task: Call `skill_view('deep-think')` first, then analyze the PR diff, post 1-3 inline review comments with GitHub suggestion blocks
+- Output: JSON list of findings [{{file, line, severity, title, detail}}]
+Severity must be one of: critical, warning, suggestion, info, approved.
+
+### Step 2: Write Findings JSON
+After the inline review subagent finishes, write its findings to /tmp/findings.json as JSON:
+[{{severity, title, detail, file, line}}]
+
+### Step 3: Assemble + Post Review (deterministic)
+Run the assembly script — it validates, formats, and posts. Do NOT hand-format the review.
+
+```
+python -m riptide.assemble_review \
+  --findings /tmp/findings.json \
+  --owner {owner} --repo {repo} --pr {pr_number} \
+  --diagram-url "{diagram_url}" \
+  --model "{DEEPTHINK_MODEL}" --provider "{DEEPTHINK_PROVIDER}" \
+  --pr-created-at "{pr_created_at}" \
+  --triggered-at "{triggered_at}"
+```
+
+The script appends the model/provider to the sign-off deterministically.
+
+### Rules
+- Max 3 inline comments, real issues only
+- Do not invent problems or pad the review
+- Reference inline comments in the summary
+- The Code Analysis and Explanation sections are REQUIRED — never omit them
+- If a section has nothing to report, say so explicitly ("No significant findings") rather than omitting it
+{diagram_step}
 REPO PATH: ~/workspace/{repo}/
 """
 
@@ -838,151 +704,3 @@ def run():
 
 if __name__ == "__main__":
     run()
-
-
-# ── Backward compat ──────────────────────────────────────────────────────────
-
-# _build_orchestrator_prompt is retained for backward compatibility with
-# existing tests. The _spawn_deepthink path now uses _build_conductor_prompt
-# which instructs the Hermes session to run the Conductor pipeline.
-# See create_deepthink_review_pipeline() in riptide.pipeline.conductor.
-def _build_orchestrator_prompt(
-    owner: str,
-    repo: str,
-    pr_number: int,
-    pr_title: str,
-    pr_author: str,
-    total_loc: int,
-    head_sha: str,
-    data: dict,
-    diagram_url: Optional[str] = None,
-    deterministic: Optional[dict] = None,
-    pr_created_at: Optional[str] = None,
-    triggered_at: Optional[str] = None,
-) -> str:
-    """
-    Build the original orchestrator prompt (retained for backward compat).
-
-    This function is preserved for existing tests. The new Conductor-based
-    path uses _build_conductor_prompt instead. Kept so existing tests that
-    import this name continue to pass with the legacy inline format.
-    """
-    # Format files changed
-    files_str = "\n".join(
-        f"  - {f.get('filename', '?')} (+{f.get('additions', 0)}/-{f.get('deletions', 0)})"
-        for f in data["files_changed"][:20]
-    )
-
-    # Format diff summary (first 12k chars)
-    diff_summary = data["diff_raw"][:12000]
-    if len(data["diff_raw"]) > 12000:
-        diff_summary += f"\n  ... ({len(data['diff_raw'])} chars total)"
-
-    # Format graphify context
-    graph_str = ""
-    if data["god_nodes"]:
-        graph_str += "God Nodes:\n"
-        for node in data["god_nodes"][:5]:
-            graph_str += f"  - {node['name']} ({node['edges']} edges)\n"
-    if data["communities"]:
-        graph_str += "Communities:\n"
-        for comm in data["communities"][:5]:
-            graph_str += f"  - {comm['name']}\n"
-    if not graph_str:
-        graph_str = "(No graphify analysis available)"
-
-    diagram_section = f"\n## Pre-generated Architecture Diagram\n[View Diagram]({diagram_url})\n" if diagram_url else ""
-    diagram_step = "\n### Step 4: Architecture Diagram\nThe architecture diagram is pre-generated and embedded above. Reference it in your Code Analysis section.\n" if diagram_url else ""
-
-    # Deterministic analysis section (WS-3 Stage 1): pre-computed DiffReport findings
-    deterministic_section = ""
-    if deterministic:
-        verdict = deterministic.get("verdict", "pass")
-        findings = deterministic.get("findings", [])
-        stats = deterministic.get("stats", {})
-        concepts = deterministic.get("aggregate", {}).get("concepts", [])
-        lines = ["## Deterministic Analysis (pre-computed)", ""]
-        lines.append(f"Verdict: **{verdict}** — {len(findings)} finding(s), "
-                     f"{stats.get('total_add', 0)}+/"
-                     f"{stats.get('total_del', 0)}- across "
-                     f"{stats.get('file_count', 0)} file(s).")
-        if concepts:
-            lines.append(f"Concepts touched: {', '.join(concepts)}")
-        if findings:
-            lines.append("")
-            lines.append("Findings (verify against the diff, do NOT re-derive from scratch):")
-            for f in findings[:10]:
-                lines.append(
-                    f"- [{f.get('severity', 'info')}] {f.get('category', '?')}: "
-                    f"{f.get('message', '')}"
-                    + (f" — {f.get('file', '')}" if f.get('file') else "")
-                )
-            if len(findings) > 10:
-                lines.append(f"  … and {len(findings) - 10} more")
-        lines.append("")
-        lines.append("Your subagent review must reference these findings — confirm, refute, or extend them. "
-                     "Do not duplicate the analysis; add value on top of it.")
-        deterministic_section = "\n".join(lines) + "\n\n"
-
-    return f"""PR #{pr_number} in {owner}/{repo} — {total_loc} LOC changed.
-
-## Context (pre-gathered)
-- Title: {pr_title}
-- Author: {pr_author}
-- HEAD SHA: {head_sha[:12]}
-
-### Files Changed
-{files_str}
-
-### Repository Tree
-```
-{format_repo_tree(data.get("repo_tree", []))}
-```
-
-### Diff Summary
-````
-{diff_summary}
-````
-
-### Graphify Analysis
-{graph_str}
-{diagram_section}
-{deterministic_section}## Your Task: Orchestrate Review
-
-You are a senior engineer. Delegate review tasks to subagents, then synthesize.
-
-### Step 1: Delegate Inline Review
-Spawn a subagent with:
-- Role: Code reviewer
-- Task: Call `skill_view('deep-think')` first, then analyze the PR diff, post 1-3 inline review comments with GitHub suggestion blocks
-- Output: JSON list of findings [{{file, line, severity, title, detail}}]
-Severity must be one of: critical, warning, suggestion, info, approved.
-
-### Step 2: Write Findings JSON
-After the inline review subagent finishes, write its findings to /tmp/findings.json as JSON:
-[{{severity, title, detail, file, line}}]
-
-### Step 3: Assemble + Post Review (deterministic)
-Run the assembly script — it validates, formats, and posts. Do NOT hand-format the review.
-
-```
-python -m riptide.assemble_review \
-  --findings /tmp/findings.json \
-  --owner {owner} --repo {repo} --pr {pr_number} \
-  --diagram-url "{diagram_url}" \
-  --model "{DEEPTHINK_MODEL}" --provider "{DEEPTHINK_PROVIDER}" \
-  --pr-created-at "{pr_created_at}" \
-  --triggered-at "{triggered_at}"
-```
-
-The script appends the model/provider to the sign-off deterministically.
-
-### Rules
-- Max 3 inline comments, real issues only
-- Do not invent problems or pad the review
-- Reference inline comments in the summary
-- The Code Analysis and Explanation sections are REQUIRED — never omit them
-- If a section has nothing to report, say so explicitly ("No significant findings") rather than omitting it
-{diagram_step}
-REPO PATH: ~/workspace/{repo}/
-"""

@@ -33,27 +33,12 @@ from .github_app import verify_webhook_signature, GitHubAppClient
 from .orchestrator import T0Orchestrator, TaskClassifier
 from .state import StateStore
 from .labeler import Labeler
-from .review_memory import store_review_outcome
 
 # Companion is optional — silently unavailable if RIPTIDE_COMPANION_REPOS is unset
 _companion: "Companion | Literal[False] | None" = None
 
-# gh CLI client for repos without App installation (PAT-based)
-_GH_CLI_CLIENT_UNSET = object()
-_gh_cli_client: object | None = _GH_CLI_CLIENT_UNSET
-
 # Labeler is optional — silently unavailable if RIPTIDE_LABELER_ENABLED != "1"
 _labeler = None
-
-# Repos the companion should run on, even without App installation
-WATCHED_REPOS = [
-    r.strip()
-    for r in os.environ.get(
-        "RIPTIDE_WATCHED_REPOS",
-        "ChonSong/riptide,ChonSong/hermes-webui,ChonSong/hermes-webui-extensions,ChonSong/seans-reporepo,ChonSong/pr-review,ChonSong/everything-claude-code,codeovertcp/gto-wizard-clone-v2,nesquena/hermes-webui",
-    ).split(",")
-    if r.strip()
-]
 
 
 def _reconcile_labels(github, installation_id, owner, repo, pr_number, new_labels, labeler):
@@ -91,24 +76,6 @@ def get_labeler():
             log.warning("Labeler not available: %s", e)
             _labeler = False
     return _labeler if _labeler else None
-
-
-def get_gh_cli_client():
-    """Get or create a gh CLI client for PAT-based API access.
-
-    Used as a fallback when the GitHub App is not installed on a repo.
-    Retries on each call if gh CLI was previously unavailable.
-    """
-    global _gh_cli_client
-    if _gh_cli_client is not _GH_CLI_CLIENT_UNSET:
-        return _gh_cli_client
-    try:
-        from .gh_cli_client import make_gh_cli_client
-        _gh_cli_client = make_gh_cli_client()
-    except Exception as e:
-        log.warning("gh CLI client not available: %s", e)
-        _gh_cli_client = None
-    return _gh_cli_client
 
 
 def get_companion():
@@ -181,39 +148,84 @@ async def health_check():
     return {"status": "ok", "app": "riptide"}
 
 
-@app.get("/metrics")
-async def metrics_endpoint():
-    """Prometheus-compatible /metrics endpoint for scraping."""
-    from riptide.metrics import get_metrics_payload, get_metrics_content_type
-    return Response(content=get_metrics_payload(), media_type=get_metrics_content_type())
+# ── Conductor resume endpoint ───────────────────────────────────────────────
+# Called by worker Hermes sessions when they complete. This resumes the
+# async state-machine to dispatch the next worker in the pipeline.
 
 
-# ── Trace context (contextvars + structlog) ───────────────────────────────────
-
-import structlog
-import contextvars
-
-# Context variable for delivery_id — propagates through threads and async tasks
-_delivery_id_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("delivery_id", default=None)
-
-logger = structlog.get_logger("riptide")
-
-
-def bind_trace_context(delivery_id: str, **extra):
-    """Bind delivery_id and any extra context to the current execution context.
-
-    This propagates to all child threads and async tasks within the same
-    contextvars.Context. For cross-process jumps (Hermes cron), the
-    delivery_id is embedded in the prompt.
+@app.get("/conductor/resume")
+async def conductor_resume(track: str, workstream: str = ""):
     """
-    _delivery_id_var.set(delivery_id)
-    structlog.contextvars.bind_contextvars(delivery_id=delivery_id, **extra)
+    Resume the Conductor state machine after a worker session completes.
+
+    Called by worker Hermes sessions via the resume_url in their inputs.
+    Dispatches the next pending workstream in the track.
+    """
+    from riptide.pipeline.async_conductor import AsyncConductor
+
+    log.info(f"Conductor resume: track={track}, workstream={workstream}")
+
+    try:
+        conductor = AsyncConductor(track)
+        if workstream:
+            result = conductor.resume(workstream)
+        else:
+            result = conductor.run()
+        return {"status": "ok", "result": result}
+    except Exception as e:
+        log.error(f"Conductor resume failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-def get_delivery_id() -> Optional[str]:
-    """Return the delivery_id bound to the current context, if any."""
-    return _delivery_id_var.get()
+# ── Pipeline monitoring endpoints ─────────────────────────────────────────
 
+
+@app.get("/conductor/status/{track_id}")
+async def conductor_status(track_id: str):
+    """
+    Get the status of a pipeline track.
+    
+    Returns progress, current workstream, and key facts.
+    Useful for debugging stuck pipelines.
+    """
+    from riptide.pipeline.work_state import get_pipeline_status
+    
+    status = get_pipeline_status(track_id)
+    if not status:
+        raise HTTPException(status_code=404, detail=f"Track {track_id} not found")
+    
+    return status
+
+
+@app.get("/conductor/stuck")
+async def conductor_stuck(max_age_minutes: int = 30):
+    """
+    Get a list of stuck workstreams (in_progress for too long).
+    
+    Query params:
+        max_age_minutes: Maximum age in minutes before a workstream is considered stuck (default: 30)
+    """
+    from riptide.pipeline.work_state import get_stuck_tracks
+    
+    stuck = get_stuck_tracks(max_age_minutes)
+    return {"stuck_count": len(stuck), "stuck": stuck}
+
+
+@app.post("/conductor/cleanup")
+async def conductor_cleanup(max_age_minutes: int = 30):
+    """
+    Clean up stuck workstreams by marking them as failed.
+    
+    Query params:
+        max_age_minutes: Maximum age in minutes before a workstream is considered stuck (default: 30)
+    
+    Returns:
+        List of cleaned up workstreams.
+    """
+    from riptide.pipeline.work_state import cleanup_stuck_tracks
+    
+    cleaned = cleanup_stuck_tracks(max_age_minutes)
+    return {"cleaned_count": len(cleaned), "cleaned": cleaned}
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -252,8 +264,7 @@ async def github_webhook(request: Request) -> Response:
     delivery_id = request.headers.get("x-github-delivery", "unknown")
 
     # Idempotency: drop duplicate deliveries before expensive processing
-    state = _get_state_store()
-    if not state.reserve_delivery(delivery_id):
+    if not _get_state_store().reserve_delivery(delivery_id):
         log.info(f"[{delivery_id}] Duplicate delivery dropped")
         return Response(status_code=200)
 
@@ -264,27 +275,19 @@ async def github_webhook(request: Request) -> Response:
     payload = json.loads(body)
     log.info(f"[{delivery_id}] {event} event received")
 
-    # ── Bind trace context for all downstream processing ──────────────────────
-    # This propagates delivery_id through structlog automatically.
-    # Worker threads spawned via contextvars.copy_context().run() inherit this.
-    bind_trace_context(delivery_id, event=event, github_event=event)
-
     try:
         if event == "pull_request":
-            result = await handle_pull_request(payload, delivery_id)
+            return await handle_pull_request(payload, delivery_id)
         elif event == "issue_comment":
-            result = await handle_issue_comment(payload, delivery_id)
+            return await handle_issue_comment(payload, delivery_id)
         elif event in ("installation", "installation_repositories"):
-            result = await handle_installation(payload, event, delivery_id)
+            return await handle_installation(payload, event, delivery_id)
         else:
             log.info(f"[{delivery_id}] Unhandled event: {event}")
-            result = Response(status_code=200)
-        state.mark_delivery_done(delivery_id)
-        return result
+            return Response(status_code=200)
     except Exception as e:
-        state.mark_delivery_failed(delivery_id)
         log.error(
-            f"[{delivery_id}] Error handling {event}: {type(e).__name__}: {e}\n{traceback.format_exc()}"
+            f"[{delivery_id}] Error handling {event}: {e}\n{traceback.format_exc()}"
         )
         # Return 200 to prevent GitHub retry storms on our errors
         return Response(status_code=200)
@@ -303,27 +306,12 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
     pr_number = pr.get("number")
     installation_id = installation.get("id")
 
-    # ── Fallback: use gh CLI client for repos without App installation ───────
-    # When the GitHub App isn't installed, installation_id is None but we can
-    # still act on watched repos via PAT-authenticated gh CLI.
-    gh_cli = None
-    using_gh_cli_fallback = False
     if not installation_id:
-        if repo_full in WATCHED_REPOS:
-            gh_cli = get_gh_cli_client()
-            if gh_cli:
-                installation_id = None  # gh CLI ignores this param
-                using_gh_cli_fallback = True
-                log.info(f"[{delivery_id}] No installation ID for {repo_full} — using gh CLI fallback")
-            else:
-                log.info(f"[{delivery_id}] No installation ID for {repo_full} and gh CLI unavailable, skipping")
-                return Response(status_code=200)
-        else:
-            log.info(f"[{delivery_id}] No installation ID for {repo_full} (not in WATCHED_REPOS), skipping")
-            return Response(status_code=200)
+        log.info(f"[{delivery_id}] No installation ID, skipping")
+        return Response(status_code=200)
 
     log.info(
-        f"[{delivery_id}] PR {action}: {repo_full}#{pr_number} (gh_cli_fallback={using_gh_cli_fallback})"
+        f"[{delivery_id}] PR {action}: {repo_full}#{pr_number}"
     )
 
     # Rate limit: skip 'synchronize' if one happened recently for this PR
@@ -336,31 +324,22 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
     if action in ("opened", "reopened", "synchronize"):
         companion = get_companion()
         github = github_client() if GITHUB_PRIVATE_KEY_PATH else None
-        # When using gh CLI fallback, bypass is_active_for() check since
-        # WATCHED_REPOS was already verified at the webhook level.
-        if companion and (using_gh_cli_fallback or companion.is_active_for(owner, repo_name)):
-            # Use gh CLI client when App is not installed (fallback mode)
-            # gh_cli is already assigned from the fallback check above
-            active_github = gh_cli if using_gh_cli_fallback else github
+        if companion and companion.is_active_for(owner, repo_name):
             from threading import Thread
 
             # Fetch PR files + head SHA (shared by companion flow and T0 fallback)
             files = []
             head_sha = ""
-            if active_github:
+            if github:
                 try:
-                    files = active_github.get_pr_files(installation_id, owner, repo_name, pr_number)
-                    pr_detail = active_github.get_pr_details(installation_id, owner, repo_name, pr_number)
+                    files = github.get_pr_files(installation_id, owner, repo_name, pr_number)
+                    pr_detail = github.get_pr_details(installation_id, owner, repo_name, pr_number)
                     head_sha = pr_detail.get("head", {}).get("sha", "")
                 except Exception as e:
                     log.warning(f"[{delivery_id}] Could not fetch PR files: {e}")
 
             title = pr.get("title", f"PR #{pr_number}")
             author = pr.get("user", {}).get("login", "unknown")
-
-            # Pass the gh_cli client to companion.run_for_pr() via client override
-            # so all API calls use the PAT-based client when App isn't installed.
-            companion_client = active_github if using_gh_cli_fallback else None
 
             if os.environ.get("RIPTIDE_T0_FALLBACK", "").lower() in ("1", "true", "yes"):
                 # Legacy T0 dispatcher (opt-in fallback; default is companion flow)
@@ -404,7 +383,6 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
                         companion.run_for_pr(
                             installation_id, owner, repo_name, pr_number,
                             title, author, files,
-                            client=gh_cli if using_gh_cli_fallback else None,
                         )
                     except Exception as e:
                         log.error(
@@ -419,7 +397,7 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
                 )
                 t.start()
                 log.info(
-                    f"[{delivery_id}] Companion deterministic flow spawned for {repo_full}#{pr_number} (gh_cli_fallback={using_gh_cli_fallback})"
+                    f"[{delivery_id}] Companion deterministic flow spawned for {repo_full}#{pr_number}"
                 )
 
             # Also spawn labeler thread (non-blocking)
@@ -479,35 +457,12 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
                     except Exception as e:
                         log.error(f"[{delivery_id}] Failed to trigger auto-deploy: {e}")
 
-            # Store review outcome on merge (best-effort)
-            try:
-                head_sha = pr.get("head", {}).get("sha", "")
-                store_review_outcome(
-                    owner=owner,
-                    repo=repo_name,
-                    pr_number=pr_number,
-                    head_sha=head_sha,
-                    findings_count=0,
-                    critical_count=0,
-                    warning_count=0,
-                    verdict="merged",
-                    metadata={"source": "webhook_merge", "delivery_id": delivery_id},
-                )
-                log.info(f"[{delivery_id}] Review outcome stored for merged PR #{pr_number}")
-            except Exception as e:
-                log.warning(f"[{delivery_id}] Failed to store review outcome (non-fatal): {e}")
-
     return Response(status_code=200)
 
 
 async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
-    """Handle issue_comment events — companion skip/resume, on-demand commands, and checkbox toggles."""
+    """Handle issue_comment events — companion skip/resume and on-demand review commands."""
     action = payload.get("action", "")
-
-    # Route 4: Checkbox toggle (edited comments)
-    if action == "edited":
-        return await _handle_checkbox_toggle(payload, delivery_id)
-
     if action != "created":
         return Response(status_code=200)
 
@@ -556,101 +511,142 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
                     log.warning(f"[{delivery_id}] Could not post companion reply: {e}")
             return Response(status_code=200)
 
-    # Route 2: Unified @riptide-bot command router
+    # Route 2: On-demand review command (@riptide-bot review / deepthink / full review)
     if installation_id and body and "@riptide-bot" in body.lower():
-        from riptide.interaction_handler import handle_command
+        from riptide.deepthink import REVIEW_RE
 
-        try:
-            response = handle_command(
-                payload=payload,
-                delivery_id=delivery_id,
-                comment_id=comment.get("id", 0),
-                installation_id=installation_id,
-                owner=owner,
-                repo=repo_name,
-                pr_number=pr_number,
-                body=body,
-                commenter=commenter,
-            )
-            if response:
-                client = github_client()
-                client.post_pr_comment(
-                    installation_id, owner, repo_name, pr_number, response
-                )
-        except Exception as e:
-            log.error(f"[{delivery_id}] Command handler failed: {e}")
-
-    return Response(status_code=200)
-
-
-
-async def _handle_checkbox_toggle(payload: dict, delivery_id: str) -> Response:
-    """
-    Handle checkbox toggle events from issue_comment edited webhooks.
-
-    Parses which checkboxes were toggled, checks authorization, applies dedup,
-    dispatches actions, and resets checkboxes.
-    """
-    comment = payload.get("comment", {})
-    issue = payload.get("issue", {})
-    repo = payload.get("repository", {})
-    installation = payload.get("installation", {})
-
-    # Must be a PR comment
-    if "pull_request" not in issue:
-        return Response(status_code=200)
-
-    # Only process our own bot's comments — identified by checkbox pattern
-    # in the comment body (not performed_via_github_app, which indicates
-    # which app *created* the comment, not whether it contains our checkboxes)
-    body = comment.get("body", "")
-    if "- [ ] 🔍 Trigger review" not in body and "- [x] 🔍 Trigger review" not in body:
-        # Not our comment (no checkbox pattern) — skip
-        return Response(status_code=200)
-
-    installation_id = installation.get("id")
-    if not installation_id:
-        return Response(status_code=200)
-
-    owner = repo.get("full_name", "").split("/")[0] if repo.get("full_name") else ""
-    repo_name = repo.get("name", "")
-    pr_number = issue.get("number")
-    commenter = comment.get("user", {}).get("login", "unknown")
-
-    # Skip bot users (our own edits shouldn't trigger actions)
-    if comment.get("user", {}).get("type") == "Bot":
-        return Response(status_code=200)
-
-    # Get PR author for authorization checks
-    try:
-        github = github_client()
-        pr_details = github.get_pr_details(installation_id, owner, repo_name, pr_number)
-        pr_author = pr_details.get("user", {}).get("login", "unknown")
-    except Exception as e:
-        log.warning(f"[{delivery_id}] Failed to fetch PR details for checkbox: {e}")
-        return Response(status_code=200)
-
-    # Handle the checkbox toggle
-    try:
-        from riptide.checkbox_handler import handle_checkbox_toggle
-
-        triggered = handle_checkbox_toggle(
-            payload=payload,
-            github_client=github,
-            state_store=_get_state_store(),
-            installation_id=installation_id,
-            owner=owner,
-            repo=repo_name,
-            pr_number=pr_number,
-            commenter=commenter,
-            pr_author=pr_author,
-        )
-        if triggered:
+        if REVIEW_RE.search(body):
             log.info(
-                f"[{delivery_id}] Checkbox triggered {triggered} on {owner}/{repo_name}#{pr_number}"
+                f"[{delivery_id}] Review command on {owner}/{repo_name}#{pr_number} by {commenter}"
             )
-    except Exception as e:
-        log.error(f"[{delivery_id}] Checkbox handler failed: {e}")
+            try:
+                client = github_client()
+
+                # Authorization gate: the COMMENTER must be the PR author, the repo owner,
+                # or OUR_USERNAME. This prevents unauthorized users from spawning
+                # expensive deep-think sessions.
+                from riptide.deepthink import OUR_USERNAME
+                pr_details = client.get_pr_details(installation_id, owner, repo_name, pr_number)
+                author = pr_details.get("user", {}).get("login", "unknown")
+                if commenter != OUR_USERNAME and commenter != author and commenter != owner:
+                    log.info(
+                        f"Unauthorized review attempt on {owner}/{repo_name}#{pr_number} "
+                        f"by {commenter} (author={author}, owner={owner})"
+                    )
+                    client.post_pr_comment(
+                        installation_id, owner, repo_name, pr_number,
+                        f"🚫 **Not authorized.** Only the PR author (@{author}), the repo "
+                        f"owner (@{owner}), or @{OUR_USERNAME} can trigger `@riptide-bot review` "
+                        f"on this PR."
+                    )
+                    return Response(status_code=200)
+
+                # Create stratified review pipeline
+                from riptide.pipeline.async_conductor import create_stratified_review_pipeline, AsyncConductor
+                files = client.get_pr_files(installation_id, owner, repo_name, pr_number)
+                track = create_stratified_review_pipeline(
+                    owner=owner,
+                    repo=repo_name,
+                    pr_number=pr_number,
+                    pr_details=pr_details,
+                    files=files,
+                )
+                track_id = f"riptide-review-{owner}-{repo_name}-{pr_number}"
+
+                # Dispatch the first worker
+                conductor = AsyncConductor(track_id)
+                result = conductor.run()
+
+                if result and result.get("results"):
+                    dispatched = result["results"][0]
+                    if dispatched.get("status") == "dispatched":
+                        msg = (
+                            f"🧠 **Riptide Review triggered for #{pr_number}!**\n\n"
+                            f"A stratified review pipeline has been started with "
+                            f"{len(track.get('workstreams', {}))} focused workers.\n\n"
+                            f"**PR:** {pr_details.get('title', 'PR #' + str(pr_number))}\n"
+                            f"**Author:** @{author}\n"
+                            f"**Changes:** +{pr_details.get('additions', 0)}/-{pr_details.get('deletions', 0)}\n"
+                            f"**Commit:** `{pr_details.get('head', {}).get('sha', '')[:12]}`"
+                        )
+                    else:
+                        msg = f"⚠️ Failed to dispatch review pipeline: {dispatched.get('message', 'unknown error')}"
+                else:
+                    msg = "⚠️ Failed to create review pipeline"
+
+                if msg:
+                    client.post_pr_comment(installation_id, owner, repo_name, pr_number, msg)
+            except Exception as e:
+                log.error(f"[{delivery_id}] Review command failed: {e}")
+                try:
+                    github_client().post_pr_comment(
+                        installation_id, owner, repo_name, pr_number,
+                        f"⚠️ Failed to trigger review: {str(e)[:500]}"
+                    )
+                except Exception:
+                    pass
+
+        # Route 2b: On-demand fix command (@riptide-bot fix [description])
+        from riptide.fixer import FIX_RE, handle_fix_command
+
+        if FIX_RE.search(body):
+            log.info(
+                f"[{delivery_id}] Fix command on {owner}/{repo_name}#{pr_number} by {commenter}"
+            )
+            try:
+                client = github_client()
+                description = FIX_RE.search(body).group(1).strip()
+                result = handle_fix_command(
+                    client, installation_id, owner, repo_name, pr_number, commenter, description
+                )
+                if result:
+                    client.post_pr_comment(
+                        installation_id, owner, repo_name, pr_number, result
+                    )
+            except Exception as e:
+                log.error(f"[{delivery_id}] Fix command failed: {e}")
+
+        # Route 2c: Relabel command (@riptide-bot relabel)
+        if "@riptide-bot relabel" in body.lower():
+            log.info(
+                f"[{delivery_id}] Relabel command on {owner}/{repo_name}#{pr_number} by {commenter}"
+            )
+            try:
+                client = github_client()
+                labeler = get_labeler()
+                if labeler:
+                    pr_detail = client.get_pr_details(installation_id, owner, repo_name, pr_number)
+                    files = client.get_pr_files(installation_id, owner, repo_name, pr_number)
+                    labels = labeler.classify_pr(pr_detail, files, f"{owner}/{repo_name}")
+                    labeler.setup_labels_on_repo(installation_id, owner, repo_name, client)
+                    # Reconcile: remove stale bot-managed labels before applying new ones
+                    _reconcile_labels(client, installation_id, owner, repo_name, pr_number, labels, labeler)
+                    client.add_labels_to_issue(installation_id, owner, repo_name, pr_number, labels)
+                    client.post_pr_comment(
+                        installation_id, owner, repo_name, pr_number,
+                        f"🏷️ Labels re-applied: {', '.join(labels)}"
+                    )
+            except Exception as e:
+                log.error(f"[{delivery_id}] Relabel command failed: {e}")
+
+        # Route 3: Visual regression command (@riptide-bot visual)
+        from riptide.visual import VISUAL_RE, handle_visual_command
+
+        if VISUAL_RE.search(body):
+            log.info(
+                f"[{delivery_id}] Visual command on {owner}/{repo_name}#{pr_number} by {commenter}"
+            )
+            try:
+                client = github_client()
+                result = handle_visual_command(
+                    client, installation_id, owner, repo_name, pr_number, commenter
+                )
+                if result:
+                    client.post_pr_comment(
+                        installation_id, owner, repo_name, pr_number, result
+                    )
+            except Exception as e:
+                log.error(f"[{delivery_id}] Visual command failed: {e}")
 
     return Response(status_code=200)
 
@@ -726,12 +722,6 @@ async def handle_installation(payload: dict, event: str, delivery_id: str) -> Re
 def init_db():
     import sqlite3
 
-    # Clean up stale checkbox trigger records on startup (non-fatal)
-    try:
-        _get_state_store().cleanup_stale_checkbox_triggers(max_age_seconds=3600)
-    except Exception as e:
-        log.warning(f"Startup checkbox cleanup failed (non-critical): {e}")
-
     with sqlite3.connect(METADATA_DB) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS installations (
@@ -753,48 +743,3 @@ def init_db():
             )
         """)
     log.info(f"Metadata DB ready at {METADATA_DB}")
-
-    # Recover any pending work from a previous process
-    try:
-        from riptide.state import StateStore
-        state = StateStore()
-        pending = state.recover_pending_work()
-        if pending:
-            log.info(f"Recovered {len(pending)} pending work items from previous process")
-            # Spawn workers in background to avoid blocking startup
-            import threading
-            threading.Thread(
-                target=_spawn_recovery_workers,
-                args=(pending,),
-                daemon=True,
-                name="startup-recovery",
-            ).start()
-    except Exception as e:
-        log.warning(f"Work recovery failed (non-fatal): {e}")
-
-
-def _spawn_recovery_workers(pending_items: list[dict]):
-    """Spawn workers for recovered pending items (runs in background thread).
-
-    For now, transition items back to 'pending' so the cron poller re-processes
-    them. Direct worker spawning requires installation_id + client context that
-    isn't persisted in the work_queue payload. A future enhancement can persist
-    that context and spawn workers directly.
-    """
-    try:
-        from riptide.state import StateStore
-        state = StateStore()
-
-        for item in pending_items:
-            work_id = item.get("id", "unknown")
-            kind = item.get("kind")
-            log.info(f"Recovery: transitioning {work_id} (kind={kind}) back to pending for cron pickup")
-            # Transition back to pending so cron poller picks it up
-            conn = state._get_conn()
-            conn.execute(
-                "UPDATE work_queue SET status='pending', pid=NULL WHERE id=? AND status='recovering'",
-                (work_id,),
-            )
-            conn.commit()
-    except Exception as e:
-        log.error(f"Recovery worker spawner failed: {e}")
