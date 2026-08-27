@@ -151,6 +151,11 @@ class StateStore:
             except sqlite3.OperationalError as e:
                 if "duplicate column name" not in str(e):
                     raise
+            try:
+                conn.execute("ALTER TABLE pr_heuristics ADD COLUMN tier1_comment_id INTEGER")
+            except sqlite3.OperationalError as e:
+                if "duplicate column name" not in str(e):
+                    raise
 
         if version < 9:
             try:
@@ -635,3 +640,7 @@ class StateStore:
             (delivery_id,),
         )
         conn.commit()
+
+
+# Module-level convenience
+POLLER_DB_PATH = Path.home() / ".local/share/riptide/metadata.db"

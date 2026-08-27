@@ -210,27 +210,11 @@ class TestSchemaMigration:
                 PRIMARY KEY (pr_key, label)
             )
         """)
-        conn.execute("""
-            CREATE TABLE review_memory (
-                id TEXT PRIMARY KEY,
-                pr_key TEXT NOT NULL,
-                pr_number INTEGER,
-                owner TEXT,
-                repo TEXT,
-                head_sha TEXT,
-                findings_count INTEGER,
-                critical_count INTEGER,
-                warning_count INTEGER,
-                verdict TEXT,
-                user_feedback TEXT,
-                created_at TEXT NOT NULL,
-                metadata TEXT
-            )
-        """)
         conn.commit()
         conn.close()
 
         # Now create StateStore — migration should add status column
+        # and create review_memory (not pre-created here)
         store = StateStore(db_path)
         conn = store._get_conn()
         cursor = conn.execute("PRAGMA table_info(deliveries)")
@@ -241,3 +225,17 @@ class TestSchemaMigration:
             "SELECT status FROM deliveries WHERE delivery_id = ?", ("old-del",)
         ).fetchone()
         assert row[0] == "processing"
+
+    def test_review_memory_created_by_init_db(self, tmp_path):
+        """_init_db must create review_memory with all 13 columns used by store_review_outcome."""
+        db_path = str(tmp_path / "test.db")
+        store = StateStore(db_path)
+        conn = store._get_conn()
+        cursor = conn.execute("PRAGMA table_info(review_memory)")
+        columns = {row[1] for row in cursor.fetchall()}
+        expected = {
+            "id", "pr_key", "pr_number", "owner", "repo", "head_sha",
+            "findings_count", "critical_count", "warning_count",
+            "verdict", "user_feedback", "created_at", "metadata",
+        }
+        assert expected.issubset(columns), f"Missing columns: {expected - columns}"
