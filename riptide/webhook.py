@@ -498,18 +498,22 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
     # Route 1: Companion skip/resume commands
     companion = get_companion()
     if companion:
-        result = companion.handle_comment(
-            installation_id, owner, repo_name, pr_number, body, commenter
-        )
-        if result:
-            if installation_id:
-                try:
-                    github_client().post_pr_comment(
-                        installation_id, owner, repo_name, pr_number, result
-                    )
-                except Exception as e:
-                    log.warning(f"[{delivery_id}] Could not post companion reply: {e}")
-            return Response(status_code=200)
+        try:
+            result = companion.handle_comment(
+                installation_id, owner, repo_name, pr_number, body, commenter
+            )
+            if result:
+                if installation_id:
+                    try:
+                        github_client().post_pr_comment(
+                            installation_id, owner, repo_name, pr_number, result
+                        )
+                    except Exception as e:
+                        log.warning(f"[{delivery_id}] Could not post companion reply: {e}")
+                return Response(status_code=200)
+        except Exception as e:
+            log.warning(f"[{delivery_id}] Companion error (non-fatal): {e}")
+            # Fall through to Route 2 — companion crash must not block review commands
 
     # Route 2: On-demand review command (@riptide-bot review / deepthink / full review)
     if installation_id and body and "@riptide-bot" in body.lower():
