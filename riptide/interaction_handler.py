@@ -120,25 +120,25 @@ def handle_command(
     # 4. Fix (auth: author/owner)
     if FIX_RE.search(body):
         return _handle_fix(
-            installation_id, owner, repo, pr_number, commenter, pr_author, body
+            installation_id, owner, repo, pr_number, commenter, pr_author, body, client
         )
 
     # 5. Proofshot/Visual (auth: author/owner)
     if VISUAL_RE.search(body):
         return _handle_proofshot(
-            installation_id, owner, repo, pr_number, commenter, pr_author
+            installation_id, owner, repo, pr_number, commenter, pr_author, client
         )
 
     # 6. Relabel (anyone)
     if RELABEL_RE.search(body):
-        return _handle_relabel(installation_id, owner, repo, pr_number)
+        return _handle_relabel(installation_id, owner, repo, pr_number, client)
 
     # 7. Explain <n> (anyone)
     explain_match = EXPLAIN_RE.search(body)
     if explain_match:
         finding_num = int(explain_match.group(1))
         return _handle_explain(
-            installation_id, owner, repo, pr_number, finding_num
+            installation_id, owner, repo, pr_number, finding_num, client
         )
 
     # Not a recognized command (just a mention)
@@ -277,6 +277,7 @@ def _handle_fix(
     commenter: str,
     pr_author: str,
     body: str,
+    client: object = None,
 ) -> str:
     """Route to fixer.handle_fix_command() with authorization."""
     if not _is_authorized(commenter, pr_author, owner):
@@ -292,7 +293,8 @@ def _handle_fix(
     try:
         match = FIX_RE.search(body)
         description = match.group(1).strip() if match else ""
-        client = github_client()
+        if client is None:
+            client = github_client()
         result = handle_fix_command(
             client, installation_id, owner, repo, pr_number, commenter, description
         )
@@ -311,6 +313,7 @@ def _handle_proofshot(
     pr_number: int,
     commenter: str,
     pr_author: str,
+    client: object = None,
 ) -> str:
     """Route to visual.handle_visual_command() with authorization."""
     if not _is_authorized(commenter, pr_author, owner):
@@ -324,7 +327,8 @@ def _handle_proofshot(
     from riptide.webhook import github_client
 
     try:
-        client = github_client()
+        if client is None:
+            client = github_client()
         result = handle_visual_command(
             client, installation_id, owner, repo, pr_number, commenter
         )
@@ -341,12 +345,14 @@ def _handle_relabel(
     owner: str,
     repo: str,
     pr_number: int,
+    client: object = None,
 ) -> str:
     """Re-classify and apply labels to PR."""
     from riptide.webhook import github_client, get_labeler, _reconcile_labels
 
     try:
-        client = github_client()
+        if client is None:
+            client = github_client()
         labeler = get_labeler()
         if labeler is None:
             return "⚠️ Labeler not available (RIPTIDE_LABELER_ENABLED != '1')."
@@ -371,12 +377,14 @@ def _handle_explain(
     repo: str,
     pr_number: int,
     finding_num: int,
+    client: object = None,
 ) -> str:
     """Fetch detail for finding #n from latest review comment."""
     from riptide.webhook import github_client
 
     try:
-        client = github_client()
+        if client is None:
+            client = github_client()
         # Fetch comments on the PR
         comments = client.get_issue_comments(
             installation_id, owner, repo, pr_number

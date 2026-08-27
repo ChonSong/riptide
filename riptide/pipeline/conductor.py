@@ -514,7 +514,7 @@ def create_fix_pipeline(
         push_eligible: Whether push is allowed (False for forks/foreign PRs)
 
     Returns:
-        The created or existing track dict
+        The created or existing track dict (fresh from persisted state)
     """
     track_id = f'riptide-fix-{owner}-{repo}-{pr_number}'
     track = get_track(track_id)
@@ -524,49 +524,61 @@ def create_fix_pipeline(
     head_sha = pr_details.get('head', {}).get('sha', '')
     if not head_sha:
         raise ValueError(f"PR #{pr_number} has no head SHA — cannot create fix pipeline")
+
+    # Use a state directory for pipeline artifacts (unique per owner/repo/pr)
+    state_dir = Path.home() / '.local/share/riptide' / 'fix-pipelines' / owner / repo / str(pr_number)
+    state_dir.mkdir(parents=True, exist_ok=True)
+
     # Create missing workstreams only — do not reset completed/pending ones
     workstream_ids = [
         'ws-1-probe', 'ws-2-judge', 'ws-3-artisan',
-        'ws-4-engine', 'ws-5-ci-verifier', 'ws-6-scribe',
+        'ws-4-engine', 'ws-5-ci_verifier', 'ws-6-scribe',
     ]
     existing = track.get('workstreams', {})
+
+    # Static maps — defined once, outside the loop
+    inputs_map = {
+        'ws-1-probe': {'pr_number': pr_number, 'owner': owner, 'repo': repo, 'files': files, 'head_sha': head_sha},
+        'ws-2-judge': {'context_path': str(state_dir / 'context.json'), 'description': description},
+        'ws-3-artisan': {'findings_path': str(state_dir / 'findings.json'), 'files': files, 'push_eligible': push_eligible},
+        'ws-4-engine': {'command': 'run_tests_and_push', 'push_eligible': push_eligible,
+                        'head_ref': pr_details.get('head', {}).get('ref', '')},
+        'ws-5-ci_verifier': {'pr_number': pr_number, 'owner': owner, 'repo': repo, 'timeout': 600},
+        'ws-6-scribe': {'pr_number': pr_number, 'owner': owner, 'repo': repo,
+                        'action': 'post_fix_summary', 'head_sha': head_sha},
+    }
+    pipeline_map = {
+        'ws-1-probe': ['fetch_diff', 'context_bundle', 'review_findings'],
+        'ws-2-judge': ['verify_findings', 'classify_valid'],
+        'ws-3-artisan': ['edit_files', 'targeted_fixes'],
+        'ws-4-engine': ['run_tests', 'push_if_green'],
+        'ws-5-ci_verifier': ['poll_ci', 'classify_failures'],
+        'ws-6-scribe': ['format_summary', 'post_comment'],
+    }
+    acceptance_map = {
+        'ws-1-probe': {'output_exists': True},
+        'ws-2-judge': {'findings_valid': True},
+        'ws-3-artisan': {'edits_applied': True},
+        'ws-4-engine': {'tests_passed': True, 'pushed': True},
+        'ws-5-ci_verifier': {'ci_complete': True},
+        'ws-6-scribe': {'posted': True},
+    }
+    role_map = {
+        'ws-1-probe': 'probe', 'ws-2-judge': 'judge', 'ws-3-artisan': 'artisan',
+        'ws-4-engine': 'engine', 'ws-5-ci_verifier': 'ci_verifier', 'ws-6-scribe': 'scribe',
+    }
+
     for ws_id in workstream_ids:
         if ws_id in existing:
             continue
-        inputs_map = {
-            'ws-1-probe': {'pr_number': pr_number, 'owner': owner, 'repo': repo, 'files': files, 'head_sha': head_sha},
-            'ws-2-judge': {'context_path': f'/tmp/pr-{pr_number}-context.json', 'description': description},
-            'ws-3-artisan': {'findings_path': '/tmp/findings.json', 'files': files, 'push_eligible': push_eligible},
-            'ws-4-engine': {'command': 'run_tests_and_push', 'push_eligible': push_eligible,
-                            'head_ref': pr_details.get('head', {}).get('ref', '')},
-            'ws-5-ci-verifier': {'pr_number': pr_number, 'owner': owner, 'repo': repo, 'timeout': 600},
-            'ws-6-scribe': {'pr_number': pr_number, 'owner': owner, 'repo': repo,
-                            'action': 'post_fix_summary', 'head_sha': head_sha},
-        }
-        pipeline_map = {
-            'ws-1-probe': ['fetch_diff', 'context_bundle', 'review_findings'],
-            'ws-2-judge': ['verify_findings', 'classify_valid'],
-            'ws-3-artisan': ['edit_files', 'targeted_fixes'],
-            'ws-4-engine': ['run_tests', 'push_if_green'],
-            'ws-5-ci-verifier': ['poll_ci', 'classify_failures'],
-            'ws-6-scribe': ['format_summary', 'post_comment'],
-        }
-        acceptance_map = {
-            'ws-1-probe': {'output_exists': True},
-            'ws-2-judge': {'findings_valid': True},
-            'ws-3-artisan': {'edits_applied': True},
-            'ws-4-engine': {'tests_passed': True, 'pushed': True},
-            'ws-5-ci-verifier': {'ci_complete': True},
-            'ws-6-scribe': {'posted': True},
-        }
-        role_map = {
-            'ws-1-probe': 'probe', 'ws-2-judge': 'judge', 'ws-3-artisan': 'artisan',
-            'ws-4-engine': 'engine', 'ws-5-ci-verifier': 'ci_verifier', 'ws-6-scribe': 'scribe',
-        }
         create_workstream(track_id, ws_id,
             inputs=inputs_map[ws_id],
             acceptance=acceptance_map[ws_id],
             role=role_map[ws_id],
             pipeline=pipeline_map[ws_id])
-    return track
+    # Return fresh state from persisted store (includes newly staged workstreams)
+    fresh = get_track(track_id)
+    if fresh is None:
+        raise RuntimeError(f"Track {track_id} disappeared after creation")
+    return fresh
 

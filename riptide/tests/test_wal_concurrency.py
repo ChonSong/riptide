@@ -128,7 +128,7 @@ class TestStateStoreConcurrency:
             assert state.reserve_delivery("test-1") is False
 
     def test_check_same_thread_false(self):
-        """Connection should allow cross-thread access."""
+        """Connection should allow cross-thread access via thread-local storage."""
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test.db")
             state = StateStore(db_path)

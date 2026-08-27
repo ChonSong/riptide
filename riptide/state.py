@@ -60,7 +60,7 @@ class StateStore:
 
     def _get_conn(self) -> sqlite3.Connection:
         if not hasattr(self._local, "conn"):
-            self._local.conn = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
+            self._local.conn = sqlite3.connect(self.db_path, timeout=30)
             self._local.conn.execute("PRAGMA journal_mode=WAL")
             self._local.conn.execute("PRAGMA busy_timeout=30000")
             self._local.conn.execute("PRAGMA synchronous=NORMAL")
