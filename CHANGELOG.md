@@ -3,9 +3,36 @@
 ## [Unreleased]
 
 ### Added
+- **Stratified Hermes sessions** — Each worker gets its own focused session with role-specific context, skills, and memory
+- **Pipeline watchdog** — Stuck-pipeline detection and auto-cleanup (`/conductor/stuck`, `/conductor/cleanup`)
+- **Pipeline status endpoint** — `/conductor/status/{track_id}` for monitoring
+- **Idempotent pipeline creation** — Re-triggering returns existing track (no duplicates)
+- **Output validation** — Each worker's output validated before next dispatch
+- **Retry logic** — Failed workstreams retry up to 3 times
+- **10 worker roles** — probe, judge, artisan, engine, warden, scribe, ci_verifier, test_oracle, review_memory, documentarian
+- **review_memory table** — Schema ownership in `_init_db`, v9 migration
+- **CodeRabbit review fixes** — SQL rollback on lock contention, schema alignment, flaky test removal
+
+### Changed
+- **AsyncConductor** replaces synchronous Conductor for stratified session dispatch
+- **session_spawner.py** wires existing Python modules (diff_analyzer, diagram_analyst, test_oracle, etc.) into stratified prompts
+- **HANDOFF.md** — Complete rewrite for stratified architecture
+- **README.md** — Updated for stratified pipeline architecture
+
+### Fixed
+- **SQLite WAL mode** — Concurrent cron jobs no longer deadlock
+- **Startup recovery** — Pending work recovered on process restart
+- **Stale re-reservation** — Wrapped in try/except OperationalError with rollback
+
+## [0.15.0] - 2026-08-26
+
+### Added
 - SHA-aware dedup guard: `@riptide-bot review` blocked only if same commit SHA reviewed in last 24h
 - Honest messaging: distinguishes "already pending" from spawn failures
 - Post-deploy smoke test in `scripts/deploy.sh`
+- Durable work queue with PID-based recovery
+- SQLite WAL mode for concurrent cron jobs
+- Ollama self-healing systemd service
 
 ### Changed
 - Simplified `riptide-review-required` CI gate to single rule: findings → require follow-up commit

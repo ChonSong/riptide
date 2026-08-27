@@ -1,8 +1,6 @@
-<img width="600" height="300" alt="Riptide Banner" src="https://github.com/user-attachments/assets/a57103c0-a98a-41f1-b7b1-fc9b4a23e27e" />
-
 # Riptide Review Pipeline
 
-Automated code review for GitHub PRs using a three-bot system.
+Automated code review for GitHub PRs using stratified Hermes sessions.
 
 ## Quick Start
 
@@ -19,18 +17,60 @@ python3 -m pytest riptide/tests/ -q
 
 ## Architecture
 
-### Three-Bot System
+### Stratified Pipeline
 
-| Bot | Trigger | What it does |
-|-----|---------|--------------|
-| **Companion** | PR opened/updated | Posts instant TL;DR + ELI5 with blast-radius analysis |
-| **Deepthink** | Cron (15 min) or `@riptide-bot review` | Full deep-think review with findings |
-| **Proofshotter** | Cron (10 min) | Posts visual evidence (GIF/screenshots) for UI changes |
+Riptide uses a **stratified session architecture** where each worker gets its own focused Hermes session with role-specific context, skills, and memory.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         @riptide-bot review                             │
+└─────────────────────────────────────┬───────────────────────────────────┘
+                                      │
+                                      ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│  AsyncConductor (state machine)                                        │
+│  - Creates track with stratified workstreams                           │
+│  - Dispatches ONE worker at a time                                     │
+│  - Resumes on completion callback                                      │
+└─────────────────────────────────────┬───────────────────────────────────┘
+                                      │
+                    ┌─────────────────┼─────────────────┐
+                    ▼                 ▼                 ▼
+┌──────────────────────┐ ┌──────────────────────┐ ┌──────────────────────┐
+│  PROBE               │ │  JUDGE               │ │  ARTISAN             │
+│  - terminal, file    │ │  - file only         │ │  - file, terminal    │
+│  - Fetches diff      │ │  - deep-think skill  │ │  - excalidraw skill  │
+│  - Runs graphify     │ │  - Evaluates code    │ │  - Creates diagram   │
+│  → context.json      │ │  → findings.json     │ │  → diagram.json      │
+└──────────┬───────────┘ └──────────┬───────────┘ └──────────┬───────────┘
+           │                        │                        │
+           └────────────────────────┼────────────────────────┘
+                                    ▼
+┌──────────────────────┐ ┌──────────────────────┐
+│  WARDEN              │ │  SCRIBE              │
+│  - file, terminal    │ │  - file, terminal    │
+│  - code-review skill │ │  - github-pr skill   │
+│  - Verifies outputs  │ │  - Posts review      │
+│  → verification.json │ │  → posted comment    │
+└──────────────────────┘ └──────────────────────┘
+```
+
+### Worker Roles
+
+| Worker | Tools | Skills | Output |
+|--------|-------|--------|--------|
+| **Probe** | terminal, read_file | terminal, file | context.json |
+| **Judge** | read_file, write_file | deep-think, code-review, coding-standards | findings.json |
+| **Artisan** | read_file, write_file, patch, terminal | excalidraw, diagram-generation | diagram.json |
+| **Engine** | terminal | terminal | result.json |
+| **Warden** | read_file, terminal | code-review | verification.json |
+| **Scribe** | read_file, write_file, terminal | github-pr-lifecycle | posted comment |
+| **CI Verifier** | terminal | github-pr-lifecycle | ci_result.json |
 
 ### Data Flow
 
 ```text
-GitHub Webhook → FastAPI /webhook → verify_signature()
+GitHub Webhook → FastAPI /webhook/github → verify_signature()
                                           │
                                           ▼
                               StateStore.reserve_delivery() (dedup)
@@ -40,13 +80,22 @@ GitHub Webhook → FastAPI /webhook → verify_signature()
                    handle_pull_request()  handle_issue_comment()  cron poll
                           │               │               │
                           ▼               ▼               ▼
-                   Companion          Hermes cron      Hermes cron
-                   posts TL;DR        deep-think       deep-think
+                   Companion          AsyncConductor    AsyncConductor
+                   posts TL;DR        creates track     creates track
+                                       dispatches probe  dispatches probe
+                                              │
+                                              ▼
+                                       Hermes cron jobs
+                                       (one per worker)
+                                              │
+                                              ▼
+                                       /conductor/resume
+                                       (callback chain)
 ```
 
 ### Review Command
 
-Comment `@riptide-bot review` on any PR to trigger an on-demand deep-think session.
+Comment `@riptide-bot review` on any PR to trigger an on-demand stratified review pipeline.
 
 **Dedup logic:** Same commit SHA within 24h → blocked. New commit → always allowed.
 
@@ -86,6 +135,7 @@ The session always posts a summary comment with per-finding verdicts, test resul
 | `RIPTIDE_WORKSPACE_ROOT` | `/home/sc/workspace` | Root path inserted into spawned session PYTHONPATH |
 | `RIPTIDE_OUR_USERNAME` | `ChonSong` | GitHub username for push eligibility / auth gate |
 | `RIPTIDE_OUR_ORG` | `ChonSong` | GitHub org for ownership checks |
+| `RIPTIDE_WORK_STATE` | `~/.hermes/state/riptide-work-state.json` | Path to work-state JSON file |
 | `HOST` | `0.0.0.0` | Webhook server host |
 | `PORT` | `8477` | Webhook server port |
 
@@ -103,31 +153,47 @@ SQLite at `~/.local/share/riptide/state.db`:
 - `pr_heuristics` — SHA + timestamp for review cooldown
 - `jobs` — spawn queue for deep-think sessions
 
+Work-state JSON at `~/.hermes/state/riptide-work-state.json`:
+- Tracks pipeline progress per PR
+- Stores key facts between workers
+- Enables resume on completion callback
+
 ## File Layout
 
 ```text
 riptide/
-├── webhook.py         # FastAPI server, GitHub webhook handler
-├── companion.py       # Bot 1: TL;DR + ELI5 + timing footer
-├── deepthink.py       # Bot 2: Cron + @riptide-bot review spawner
-├── proofshotter.py    # Bot 3: Visual verification (GIF/screenshots)
-├── fixer.py           # Bot 2b: Autonomous fix via @riptide-bot fix
-├── poller.py          # Cron entry point for Bot 2/3 discovery
-├── state.py           # SQLite-backed state (dedup, jobs, heuristics)
-├── labeler.py         # GitHub label engine
-├── assemble_review.py # Structured findings assembly
-├── depth.py           # ReviewDepth enum + classifier
-└── grafiphy/          # Excalidraw diagram pre-generation
+├── riptide/
+│   ├── github_app.py      # JWT auth, GitHub API client
+│   ├── companion.py       # Bot 1: TL;DR + ELI5 + ProofShot flagger
+│   ├── deepthink.py       # Bot 2: Cron polling + stratified pipeline spawner
+│   ├── fixer.py           # Bot 2b: Autonomous fix (edit/commit/push)
+│   ├── proofshotter.py    # Bot 3: Cron-polled proofshot visual verification
+│   ├── webhook.py         # FastAPI server (companion trigger, installation sync)
+│   ├── poller.py          # Cron entry point for Bot 2/3 discovery
+│   ├── state.py           # SQLite-backed state (dedup, jobs, heuristics)
+│   ├── labeler.py         # GitHub label engine
+│   ├── assemble_review.py # Structured findings assembly
+│   ├── depth.py           # ReviewDepth enum + classifier
+│   ├── pipeline/
+│   │   ├── async_conductor.py  # State-machine conductor (chains sessions)
+│   │   ├── session_spawner.py  # Spawns stratified Hermes sessions
+│   │   ├── conductor.py        # Synchronous conductor (legacy)
+│   │   ├── roles.py            # Worker role definitions
+│   │   ├── work_state.py       # Work-state JSON management
+│   │   └── recovery.py         # Stall detection + recovery
+│   └── grafiphy/          # Excalidraw diagram pre-generation
+├── server.py              # Uvicorn entry point
+├── requirements.txt       # fastapi, uvicorn, pydantic, cryptography, requests, graphifyy
+├── Dockerfile
+├── docker-compose.yml
+├── proofshot.config.json  # Example proofshot config schema for PR authors
+├── SKILL.md
+└── start.sh
 ```
 
 ## Docs
 
 - [HANDOFF.md](HANDOFF.md) — Session continuity, current state, next steps
-- [VISION-ROADMAP.md](VISION-ROADMAP.md) — Long-term roadmap and pillars
-- [COMPETITOR-PATTERNS.md](COMPETITOR-PATTERNS.md) — Analysis of CodeRabbit/Greptile patterns
 - [AGENTS.md](AGENTS.md) — Rules for AI agents editing this codebase
 - [CHANGELOG.md](CHANGELOG.md) — Recent changes
 - [SECURITY.md](SECURITY.md) — Security policy and vulnerability reporting
-
-
-
