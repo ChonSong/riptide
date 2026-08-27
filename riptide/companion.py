@@ -472,6 +472,7 @@ class Companion:
 
     def _import_legacy_skip_file(self):
         """One-time import of legacy companion_skip.json into StateStore."""
+        global _legacy_skip_imported
         # Module-level flag: only attempt import once per process.
         if _legacy_skip_imported:
             return

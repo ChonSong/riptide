@@ -72,12 +72,13 @@ def handle_command(
     payload: dict,
     delivery_id: str,
     comment_id: int,
-    installation_id: int,
+    installation_id: int | None,
     owner: str,
     repo: str,
     pr_number: int,
     body: str,
     commenter: str,
+    client: object = None,
 ) -> Optional[str]:
     """
     Route @riptide-bot commands to the correct handler.
@@ -114,7 +115,7 @@ def handle_command(
 
     # 3. Review (anyone)
     if REVIEW_RE.search(body):
-        return _handle_review(installation_id, owner, repo, pr_number, commenter, pr_author)
+        return _handle_review(installation_id, owner, repo, pr_number, commenter, pr_author, client)
 
     # 4. Fix (auth: author/owner)
     if FIX_RE.search(body):
@@ -146,7 +147,7 @@ def handle_command(
 
 def _get_pr_author(
     payload: dict,
-    installation_id: int,
+    installation_id: int | None,
     owner: str,
     repo: str,
     pr_number: int,
@@ -169,7 +170,7 @@ def _get_pr_author(
     try:
         from riptide.webhook import github_client
         client = github_client()
-        pr_details = client.get_pr_details(installation_id, owner, repo, pr_number)
+        pr_details = client.get_pr_details(installation_id, owner, repo, pr_number)  # type: ignore[arg-type]
         return pr_details.get("user", {}).get("login", "unknown")
     except Exception as e:
         log.warning(f"Could not fetch PR author: {e}")
@@ -248,13 +249,15 @@ def _handle_review(
     pr_number: int,
     commenter: str,
     pr_author: str,
+    client: object = None,
 ) -> str:
     """Route to deepthink.handle_review_command()."""
     from riptide.deepthink import handle_review_command
     from riptide.webhook import github_client
 
     try:
-        client = github_client()
+        if client is None:
+            client = github_client()
         result = handle_review_command(
             client, installation_id, owner, repo, pr_number, commenter
         )
