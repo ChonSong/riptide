@@ -70,6 +70,7 @@ class SnapshotJudge:
         
         Reads from disk — assumes artisan has already written changes.
         If file doesn't exist on disk, attempts to apply diff in-memory.
+        If reconstruction fails, reports an issue (does NOT skip).
         """
         issues = []
         for file_path in self.diff.get("modified_files", []):
@@ -84,7 +85,9 @@ class SnapshotJudge:
                     # Fall back: apply diff in-memory to original
                     source = self._reconstruct_source(file_path)
                     if source is None:
-                        continue  # Can't validate, skip
+                        # Cannot reconstruct — report as issue, don't skip
+                        issues.append(f"Cannot validate {file_path}: file not found and cannot reconstruct from diff")
+                        continue
                 
                 ast.parse(source, filename=file_path)
             except SyntaxError as e:

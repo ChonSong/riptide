@@ -3,6 +3,12 @@
 
 from __future__ import annotations
 
+import os
+import sys
+
+# Add project root to path so we can import riptide package
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+
 import ast
 import textwrap
 from pathlib import Path

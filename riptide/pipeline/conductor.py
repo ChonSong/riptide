@@ -116,6 +116,8 @@ class Conductor:
             return self._run_judge(brief)
         elif role == "artisan":
             return self._run_artisan(brief)
+        elif role == "snapshot_judge":
+            return self._run_snapshot_judge(brief)
         elif role == "engine":
             return self._run_engine(brief)
         elif role == "warden":
@@ -170,6 +172,18 @@ class Conductor:
             created.append(result)
         
         return {"created": created}
+    
+    def _run_snapshot_judge(self, brief: WorkerBrief) -> dict:
+        """Run Snapshot Judge worker — pre-push validation."""
+        from .snapshot_judge import SnapshotJudge
+        
+        judge_findings = brief.inputs.get("judge_findings", {})
+        diff = brief.inputs.get("diff", {})
+        
+        sj = SnapshotJudge(judge_findings, diff)
+        result = sj.validate()
+        
+        return {"snapshot_result": result, "valid": result["valid"]}
     
     def _run_engine(self, brief: WorkerBrief) -> dict:
         """Run Engine worker."""
@@ -493,16 +507,18 @@ def create_fix_pipeline(
     files: list[dict],
     description: str = '',
     push_eligible: bool = True,
+    max_iterations: int = 3,
 ) -> dict:
-    """Create a 6-workstream fix pipeline for autonomous PR fix sessions.
+    """Create a 7-workstream fix pipeline with validation loops.
 
     Pipeline stages:
         1. probe: Fetch diff, context bundle, review findings
         2. judge: Verify findings, classify valid
         3. artisan: Edit files, apply targeted fixes
-        4. engine: Run tests, push if green
-        5. ci_verifier: Poll CI, classify failures
-        6. scribe: Format summary, post comment
+        4. snapshot-judge: Validate diff matches intent (pre-push loop)
+        5. engine: Run tests, push if green (post-execution loop)
+        6. ci-verifier: Poll CI, classify failures (post-execution loop)
+        7. scribe: Format summary, post comment
 
     Args:
         owner: Repository owner
@@ -512,6 +528,7 @@ def create_fix_pipeline(
         files: List of changed files
         description: Optional free-text description
         push_eligible: Whether push is allowed (False for forks/foreign PRs)
+        max_iterations: Maximum retry attempts for loops (default 3)
 
     Returns:
         The created or existing track dict (fresh from persisted state)
@@ -532,40 +549,44 @@ def create_fix_pipeline(
     # Create missing workstreams only — do not reset completed/pending ones
     workstream_ids = [
         'ws-1-probe', 'ws-2-judge', 'ws-3-artisan',
-        'ws-4-engine', 'ws-5-ci_verifier', 'ws-6-scribe',
+        'ws-4-snapshot-judge', 'ws-5-engine', 'ws-6-ci-verifier', 'ws-7-scribe',
     ]
     existing = track.get('workstreams', {})
 
     # Static maps — defined once, outside the loop
     inputs_map = {
-        'ws-1-probe': {'pr_number': pr_number, 'owner': owner, 'repo': repo, 'files': files, 'head_sha': head_sha},
-        'ws-2-judge': {'context_path': str(state_dir / 'context.json'), 'description': description},
-        'ws-3-artisan': {'findings_path': str(state_dir / 'findings.json'), 'files': files, 'push_eligible': push_eligible},
-        'ws-4-engine': {'command': 'run_tests_and_push', 'push_eligible': push_eligible,
-                        'head_ref': pr_details.get('head', {}).get('ref', '')},
-        'ws-5-ci_verifier': {'pr_number': pr_number, 'owner': owner, 'repo': repo, 'timeout': 600},
-        'ws-6-scribe': {'pr_number': pr_number, 'owner': owner, 'repo': repo,
+        'ws-1-probe': {'pr_number': pr_number, 'owner': owner, 'repo': repo, 'files': files, 'head_sha': head_sha, 'output_path': str(state_dir / 'context.json')},
+        'ws-2-judge': {'context_path': str(state_dir / 'context.json'), 'findings_path': str(state_dir / 'findings.json'), 'description': description, 'max_iterations': max_iterations},
+        'ws-3-artisan': {'findings_path': str(state_dir / 'findings.json'), 'diff_path': str(state_dir / 'artisan_diff.json'), 'files': files, 'push_eligible': push_eligible, 'max_iterations': max_iterations},
+        'ws-4-snapshot-judge': {'judge_findings_path': str(state_dir / 'findings.json'), 'diff_path': str(state_dir / 'artisan_diff.json'), 'max_iterations': max_iterations},
+        'ws-5-engine': {'command': 'run_tests_and_push', 'push_eligible': push_eligible,
+                        'head_ref': pr_details.get('head', {}).get('ref', ''), 'max_iterations': max_iterations},
+        'ws-6-ci-verifier': {'pr_number': pr_number, 'owner': owner, 'repo': repo, 'timeout': 600, 'max_iterations': max_iterations},
+        'ws-7-scribe': {'pr_number': pr_number, 'owner': owner, 'repo': repo,
                         'action': 'post_fix_summary', 'head_sha': head_sha},
     }
     pipeline_map = {
         'ws-1-probe': ['fetch_diff', 'context_bundle', 'review_findings'],
         'ws-2-judge': ['verify_findings', 'classify_valid'],
         'ws-3-artisan': ['edit_files', 'targeted_fixes'],
-        'ws-4-engine': ['run_tests', 'push_if_green'],
-        'ws-5-ci_verifier': ['poll_ci', 'classify_failures'],
-        'ws-6-scribe': ['format_summary', 'post_comment'],
+        'ws-4-snapshot-judge': ['validate_syntax', 'validate_findings', 'validate_no_placeholders'],
+        'ws-5-engine': ['run_tests', 'push_if_green'],
+        'ws-6-ci-verifier': ['poll_ci', 'classify_failures'],
+        'ws-7-scribe': ['format_summary', 'post_comment'],
     }
     acceptance_map = {
         'ws-1-probe': {'output_exists': True},
         'ws-2-judge': {'findings_valid': True},
         'ws-3-artisan': {'edits_applied': True},
-        'ws-4-engine': {'tests_passed': True, 'pushed': True},
-        'ws-5-ci_verifier': {'ci_complete': True},
-        'ws-6-scribe': {'posted': True},
+        'ws-4-snapshot-judge': {'snapshot_valid': True},
+        'ws-5-engine': {'tests_passed': True, 'pushed': True},
+        'ws-6-ci-verifier': {'ci_complete': True},
+        'ws-7-scribe': {'posted': True},
     }
     role_map = {
         'ws-1-probe': 'probe', 'ws-2-judge': 'judge', 'ws-3-artisan': 'artisan',
-        'ws-4-engine': 'engine', 'ws-5-ci_verifier': 'ci_verifier', 'ws-6-scribe': 'scribe',
+        'ws-4-snapshot-judge': 'snapshot_judge', 'ws-5-engine': 'engine',
+        'ws-6-ci-verifier': 'ci_verifier', 'ws-7-scribe': 'scribe',
     }
 
     for ws_id in workstream_ids:
@@ -581,4 +602,26 @@ def create_fix_pipeline(
     if fresh is None:
         raise RuntimeError(f"Track {track_id} disappeared after creation")
     return fresh
+
+
+# ── Loop-based fix pipeline execution ──────────────────────────────────────
+
+
+def run_fix_pipeline_with_loops(track_id: str) -> dict:
+    """Run fix pipeline with pre-push validation and post-execution recovery.
+    
+    This is the entry point for autonomous fix sessions. It uses:
+    1. Pre-Push Snapshot Loop: validates artisan's diff before running tests
+    2. Post-Execution Recovery Loop: feeds errors back to judge/artisan for retry
+    
+    Args:
+        track_id: The track ID for the fix pipeline
+    
+    Returns:
+        Dict with track results and final status
+    """
+    from .pipeline_loops import PipelineLoopRunner
+    
+    runner = PipelineLoopRunner(track_id)
+    return runner.run()
 

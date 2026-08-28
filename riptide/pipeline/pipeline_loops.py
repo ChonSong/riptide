@@ -4,17 +4,13 @@
 Implements two feedback loops:
 1. Pre-Push Snapshot Loop: validates artisan's diff before running tests
 2. Post-Execution Recovery Loop: feeds errors back to judge/artisan for retry
-
-Key design decisions:
-- Append-only failure history (prevents trajectory amnesia)
-- Log truncation (prevents context window blowout)
-- Hard iteration cap (prevents infinite loops)
-- AST-based validation (avoids false positives)
 """
 
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 from typing import Optional
 
 from .work_state import (
@@ -24,30 +20,44 @@ from .snapshot_judge import SnapshotJudge, truncate_error_log
 
 log = logging.getLogger("riptide.pipeline.loops")
 
-# Maximum retry attempts per loop
-MAX_SNAPSHOT_RETRIES = 3
-MAX_ENGINE_RETRIES = 3
-MAX_CI_RETRIES = 3
-
 
 class PipelineLoopRunner:
     """Executes fix pipeline with validation and recovery loops."""
+    
+    # Stage IDs for the 7-workstream pipeline
+    WS_PROBE = "ws-1-probe"
+    WS_JUDGE = "ws-2-judge"
+    WS_ARTISAN = "ws-3-artisan"
+    WS_SNAPSHOT_JUDGE = "ws-4-snapshot-judge"
+    WS_ENGINE = "ws-5-engine"
+    WS_CI_VERIFIER = "ws-6-ci-verifier"
+    WS_SCRIBE = "ws-7-scribe"
+    
+    DEFAULT_MAX_ITERATIONS = 3
     
     def __init__(self, track_id: str):
         self.track_id = track_id
         self.track = get_track(track_id)
         if not self.track:
             raise ValueError(f"Track {track_id} not found")
+        self.max_iterations = self._get_max_iterations()
+    
+    def _get_max_iterations(self) -> int:
+        """Get max_iterations from pipeline config (default 3)."""
+        probe_ws = get_workstream(self.track_id, self.WS_PROBE)
+        if probe_ws and probe_ws.get("inputs", {}).get("max_iterations"):
+            return probe_ws["inputs"]["max_iterations"]
+        return self.DEFAULT_MAX_ITERATIONS
     
     def run(self) -> dict:
         """Execute the full fix pipeline with loops."""
         results = []
         
         # Phase 1: Probe (gather context)
-        results.append(self._run_workstream("ws-1-probe"))
+        results.append(self._run_workstream(self.WS_PROBE))
         
         # Phase 2: Judge (verify findings, produce fix plan)
-        results.append(self._run_workstream("ws-2-judge"))
+        results.append(self._run_workstream(self.WS_JUDGE))
         
         # Phase 3: Pre-Push Snapshot Loop (artisan + validation)
         snapshot_result = self._run_pre_push_loop()
@@ -64,7 +74,7 @@ class PipelineLoopRunner:
             return self._short_circuit_to_scribe(results, "execution_failed")
         
         # Phase 5: Scribe (format summary, post comment)
-        results.append(self._run_workstream("ws-6-scribe"))
+        results.append(self._run_workstream(self.WS_SCRIBE))
         
         return {"track": self.track_id, "results": results, "status": "complete"}
     
@@ -72,20 +82,17 @@ class PipelineLoopRunner:
         """Run artisan + snapshot judge loop until valid or max retries."""
         results = []
         
-        for attempt in range(MAX_SNAPSHOT_RETRIES):
-            # Run artisan
-            artisan_result = self._run_workstream("ws-3-artisan")
+        for attempt in range(self.max_iterations):
+            artisan_result = self._run_workstream(self.WS_ARTISAN)
             results.append(artisan_result)
             
-            # Run snapshot judge
             snapshot_result = self._run_snapshot_judge()
             results.append(snapshot_result)
             
             if snapshot_result.get("valid", False):
                 return {"success": True, "results": results}
             
-            # Append failure to history (NOT overwrite)
-            self._append_failure_history("ws-3-artisan", {
+            self._append_failure_history(self.WS_ARTISAN, {
                 "attempt": attempt + 1,
                 "issues": snapshot_result.get("issues", []),
                 "correction_context": snapshot_result.get("correction_context", {}),
@@ -97,43 +104,33 @@ class PipelineLoopRunner:
         """Run engine + CI with error feedback loop."""
         results = []
         
-        for attempt in range(MAX_ENGINE_RETRIES):
-            # Run engine (local tests)
-            engine_result = self._run_workstream("ws-4-engine")
+        for attempt in range(self.max_iterations):
+            engine_result = self._run_workstream(self.WS_ENGINE)
             results.append(engine_result)
             
             if engine_result.get("status") == "done":
-                # Engine passed, now check CI
                 ci_result = self._run_ci_loop()
                 results.extend(ci_result["results"])
                 
                 if ci_result["success"]:
                     return {"success": True, "results": results}
-                
-                # CI failed after max retries
                 return {"success": False, "results": results}
             
-            # Engine failed — extract error and feed back
             error_context = self._extract_error_context(engine_result)
-            
-            # Append to failure history
-            self._append_failure_history("ws-3-artisan", {
+            self._append_failure_history(self.WS_ARTISAN, {
                 "attempt": attempt + 1,
                 "error_type": "engine",
                 "error_context": error_context,
             })
             
-            # Re-run judge with error context
-            self._update_workstream_inputs("ws-2-judge", {
+            self._update_workstream_inputs(self.WS_JUDGE, {
                 "error_context": error_context,
-                "failure_history": self._get_failure_history("ws-3-artisan"),
+                "failure_history": self._get_failure_history(self.WS_ARTISAN),
             })
-            self._run_workstream("ws-2-judge")
-            
-            # Re-run artisan with correction context
-            self._update_workstream_inputs("ws-3-artisan", {
+            self._run_workstream(self.WS_JUDGE)
+            self._update_workstream_inputs(self.WS_ARTISAN, {
                 "error_context": error_context,
-                "failure_history": self._get_failure_history("ws-3-artisan"),
+                "failure_history": self._get_failure_history(self.WS_ARTISAN),
             })
         
         return {"success": False, "results": results}
@@ -142,60 +139,61 @@ class PipelineLoopRunner:
         """Run CI verifier with error feedback loop."""
         results = []
         
-        for attempt in range(MAX_CI_RETRIES):
-            ci_result = self._run_workstream("ws-5-ci_verifier")
+        for attempt in range(self.max_iterations):
+            ci_result = self._run_workstream(self.WS_CI_VERIFIER)
             results.append(ci_result)
             
             if ci_result.get("passed", False):
                 return {"success": True, "results": results}
             
-            # CI failed — extract error context
             ci_error_context = self._extract_ci_error_context(ci_result)
-            
-            # Check for non-fixable failures (short-circuit)
             non_fixable = ci_error_context.get("non_fixable_checks", [])
             if non_fixable:
                 log.info(f"Non-fixable CI failures: {non_fixable}")
                 return {"success": False, "results": results}
             
-            # Append to failure history
-            self._append_failure_history("ws-3-artisan", {
+            self._append_failure_history(self.WS_ARTISAN, {
                 "attempt": attempt + 1,
                 "error_type": "ci",
                 "error_context": ci_error_context,
             })
             
-            # Re-run judge with CI error context
-            self._update_workstream_inputs("ws-2-judge", {
+            self._update_workstream_inputs(self.WS_JUDGE, {
                 "ci_error_context": ci_error_context,
-                "failure_history": self._get_failure_history("ws-3-artisan"),
+                "failure_history": self._get_failure_history(self.WS_ARTISAN),
             })
-            self._run_workstream("ws-2-judge")
-            
-            # Re-run artisan with correction context
-            self._update_workstream_inputs("ws-3-artisan", {
+            self._run_workstream(self.WS_JUDGE)
+            self._update_workstream_inputs(self.WS_ARTISAN, {
                 "ci_error_context": ci_error_context,
-                "failure_history": self._get_failure_history("ws-3-artisan"),
+                "failure_history": self._get_failure_history(self.WS_ARTISAN),
             })
-            self._run_workstream("ws-3-artisan")
-            
-            # Re-run engine
-            self._run_workstream("ws-4-engine")
+            self._run_workstream(self.WS_ARTISAN)
+            self._run_workstream(self.WS_ENGINE)
         
         return {"success": False, "results": results}
     
     def _run_snapshot_judge(self) -> dict:
-        """Run snapshot judge to validate artisan's diff."""
-        judge_output = get_workstream(self.track_id, "ws-2-judge") or {}
-        artisan_output = get_workstream(self.track_id, "ws-3-artisan") or {}
+        """Run snapshot judge — reads from staged file paths."""
+        judge_ws = get_workstream(self.track_id, self.WS_JUDGE) or {}
+        artisan_ws = get_workstream(self.track_id, self.WS_ARTISAN) or {}
         
-        judge_findings = judge_output.get("outputs", {}).get("findings", {})
-        diff = artisan_output.get("outputs", {}).get("diff", {})
+        # Read from file paths that the workers wrote to
+        judge_findings_path = judge_ws.get("inputs", {}).get("findings_path", "")
+        diff_path = artisan_ws.get("inputs", {}).get("diff_path", "")
+        
+        judge_findings = {}
+        if judge_findings_path and Path(judge_findings_path).exists():
+            with open(judge_findings_path) as f:
+                judge_findings = json.load(f)
+        
+        diff = {}
+        if diff_path and Path(diff_path).exists():
+            with open(diff_path) as f:
+                diff = json.load(f)
         
         sj = SnapshotJudge(judge_findings, diff)
         result = sj.validate()
         
-        # Record in track key_facts
         update_key_facts(self.track_id, {
             "snapshot_judge": result,
             "snapshot_attempt": self.track.get("key_facts", {}).get("snapshot_attempt", 0) + 1,
@@ -206,11 +204,9 @@ class PipelineLoopRunner:
     def _extract_error_context(self, engine_result: dict) -> dict:
         """Extract truncated error context from engine failure."""
         output = engine_result.get("output", {})
-        
         stderr = truncate_error_log(output.get("stderr", ""))
         stdout = truncate_error_log(output.get("stdout", ""))
         
-        # Classify error type
         error_type = "unknown"
         combined = stderr + stdout
         if "SyntaxError" in combined or "IndentationError" in combined:
@@ -233,12 +229,10 @@ class PipelineLoopRunner:
     def _extract_ci_error_context(self, ci_result: dict) -> dict:
         """Extract truncated CI error context."""
         output = ci_result.get("output", {})
-        
         failed_checks = output.get("failed", [])
         fixable_checks = output.get("fixable", [])
         non_fixable_checks = output.get("non_fixable", [])
         
-        # Truncate error messages
         for check in failed_checks:
             if "message" in check:
                 check["message"] = truncate_error_log(check["message"], max_chars=2000)
@@ -250,11 +244,7 @@ class PipelineLoopRunner:
         }
     
     def _append_failure_history(self, ws_id: str, entry: dict) -> None:
-        """Append a failure entry to the workstream's failure history.
-        
-        This is append-only to prevent trajectory amnesia — the artisan
-        remembers all past attempts and their failures.
-        """
+        """Append a failure entry to the workstream's failure history."""
         ws = get_workstream(self.track_id, ws_id) or {}
         inputs = ws.get("inputs", {})
         history = inputs.get("failure_history", [])
@@ -275,23 +265,179 @@ class PipelineLoopRunner:
         update_workstream(self.track_id, ws_id, inputs=inputs)
     
     def _run_workstream(self, ws_id: str) -> dict:
-        """Run a single workstream (placeholder — actual dispatch in conductor)."""
-        # This is a placeholder — actual implementation dispatches to conductor
+        """Run a single workstream by dispatching to the appropriate worker."""
         ws = get_workstream(self.track_id, ws_id)
         if not ws:
             return {"workstream": ws_id, "status": "not_found"}
-        return {"workstream": ws_id, "status": "dispatched"}
+        
+        update_workstream(self.track_id, ws_id, status="in_progress")
+        
+        try:
+            role = ws.get("role", "engine")
+            output = self._dispatch_worker(role, ws)
+            update_workstream(self.track_id, ws_id, status="done", outputs=output)
+            return {"workstream": ws_id, "status": "done", "output": output}
+        except Exception as e:
+            update_workstream(self.track_id, ws_id, status="failed")
+            return {"workstream": ws_id, "status": "failed", "error": str(e)}
+    
+    def _dispatch_worker(self, role: str, ws: dict) -> dict:
+        """Dispatch to the appropriate worker based on role."""
+        inputs = ws.get("inputs", {})
+        
+        if role == "probe":
+            return self._execute_probe(inputs)
+        elif role == "judge":
+            return self._execute_judge(inputs)
+        elif role == "artisan":
+            return self._execute_artisan(inputs)
+        elif role == "snapshot_judge":
+            return self._execute_snapshot_judge(inputs)
+        elif role == "engine":
+            return self._execute_engine(inputs)
+        elif role == "ci_verifier":
+            return self._execute_ci_verifier(inputs)
+        elif role == "scribe":
+            return self._execute_scribe(inputs)
+        else:
+            raise ValueError(f"Unknown role: {role}")
+    
+    def _execute_probe(self, inputs: dict) -> dict:
+        """Execute probe worker — gather context."""
+        from .probe import Probe
+        
+        pr = inputs.get("pr_number", 1)
+        owner = inputs.get("owner", "ChonSong")
+        repo = inputs.get("repo", "riptide")
+        
+        probe = Probe(pr, owner, repo)
+        context = probe.gather()
+        
+        # Write to output_path -> this becomes context_path for judge
+        output_path = inputs.get("output_path", "/tmp/output.json")
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, 'w') as f:
+            json.dump(context, f, indent=2, default=str)
+        
+        return {"context_path": output_path, "gathered": True}
+    
+    def _execute_judge(self, inputs: dict) -> dict:
+        """Execute judge worker — evaluate diff, produce findings."""
+        from .judge import Judge
+        
+        # Read context from probe's output
+        context_path = inputs.get("context_path", "/tmp/output.json")
+        with open(context_path) as f:
+            context = json.load(f)
+        
+        judge = Judge(context)
+        result = judge.evaluate()
+        
+        # Write findings to findings_path for artisan and snapshot judge
+        findings_path = inputs.get("findings_path", "/tmp/findings.json")
+        Path(findings_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(findings_path, 'w') as f:
+            json.dump(result, f, indent=2)
+        
+        return {"findings_path": findings_path, "findings_count": len(result.get("findings", []))}
+    
+    def _execute_artisan(self, inputs: dict) -> dict:
+        """Execute artisan worker — edit files, apply fixes."""
+        from .artisan import Artisan
+        
+        artisan = Artisan()
+        files = inputs.get("files", [])
+        created = []
+        for file_spec in files:
+            result = artisan.create_file(file_spec["path"], file_spec["content"])
+            created.append(result)
+        
+        return {"created": created}
+    
+    def _execute_snapshot_judge(self, inputs: dict) -> dict:
+        """Execute snapshot judge — validate diff against intent."""
+        from .snapshot_judge import SnapshotJudge
+        
+        judge_findings = inputs.get("judge_findings", {})
+        diff = inputs.get("diff", {})
+        
+        sj = SnapshotJudge(judge_findings, diff)
+        result = sj.validate()
+        
+        return {"snapshot_result": result, "valid": result["valid"]}
+    
+    def _execute_engine(self, inputs: dict) -> dict:
+        """Execute engine worker — run tests."""
+        from .engine import Engine
+        
+        engine = Engine()
+        command = inputs.get("command", "")
+        result = engine.run(command, expected_exit=inputs.get("expected_exit", 0))
+        
+        return result
+    
+    def _execute_ci_verifier(self, inputs: dict) -> dict:
+        """Execute CI verifier worker — poll CI checks."""
+        from .ci_verifier import CIVerifier
+        
+        owner = inputs.get("owner", "ChonSong")
+        repo = inputs.get("repo", "riptide")
+        pr_number = inputs.get("pr_number", 0)
+        timeout = inputs.get("timeout", 600)
+        
+        verifier = CIVerifier(owner, repo, pr_number)
+        result = verifier.poll(timeout=timeout)
+        
+        return {
+            "status": result.get("status", "unknown"),
+            "passed": result.get("status") == "success",
+            "failed_count": len(result.get("failed", [])),
+            "fixable_count": len(result.get("fixable", [])),
+            "non_fixable_count": len(result.get("non_fixable", [])),
+        }
+    
+    def _execute_scribe(self, inputs: dict) -> dict:
+        """Execute scribe worker — format summary, post comment."""
+        from .scribe import Scribe
+        
+        scribe = Scribe()
+        action = inputs.get("action", "update_workstream")
+        
+        if action == "update_workstream":
+            return scribe.update_workstream(
+                self.track_id,
+                inputs.get("workstream", ""),
+                inputs.get("status", "done"),
+                inputs.get("outputs"),
+            )
+        elif action == "post_review":
+            return scribe.post_review_with_assembler(
+                inputs.get("owner", "ChonSong"),
+                inputs.get("repo", "riptide"),
+                inputs.get("pr_number", 0),
+                inputs.get("findings", []),
+                inputs.get("diagram_url"),
+            )
+        elif action == "post_fix_summary":
+            return scribe.post_pr_comment(
+                inputs.get("owner", "ChonSong"),
+                inputs.get("repo", "riptide"),
+                inputs.get("pr_number", 0),
+                inputs.get("summary", "Fix attempt completed"),
+            )
+        
+        return {"error": f"Unknown scribe action: {action}"}
     
     def _short_circuit_to_scribe(self, results: list, reason: str) -> dict:
         """When loops exhaust retries, go to scribe with failure context."""
-        scribe_ws = get_workstream(self.track_id, "ws-6-scribe") or {}
+        scribe_ws = get_workstream(self.track_id, self.WS_SCRIBE) or {}
         inputs = scribe_ws.get("inputs", {})
         inputs["action"] = "post_failure_summary"
         inputs["failure_reason"] = reason
         inputs["results"] = results
-        update_workstream(self.track_id, "ws-6-scribe", inputs=inputs)
+        update_workstream(self.track_id, self.WS_SCRIBE, inputs=inputs)
         
-        scribe_result = self._run_workstream("ws-6-scribe")
+        scribe_result = self._run_workstream(self.WS_SCRIBE)
         results.append(scribe_result)
         
         return {"track": self.track_id, "results": results, "status": f"failed:{reason}"}

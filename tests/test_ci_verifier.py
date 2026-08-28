@@ -368,4 +368,21 @@ class TestConductorIntegration:
         # We can't fully instantiate without a track, but we can test the method exists
         assert hasattr(Conductor, "_run_ci_verifier")
 
+    def test_create_fix_pipeline(self):
+        """Test that create_fix_pipeline function exists and has correct signature."""
+        from riptide.pipeline.conductor import create_fix_pipeline
+        import inspect
 
+        sig = inspect.signature(create_fix_pipeline)
+        params = list(sig.parameters.keys())
+        assert "owner" in params
+        assert "repo" in params
+        assert "pr_number" in params
+        assert "pr_details" in params
+        assert "files" in params
+        assert "description" in params
+        assert "push_eligible" in params
+
+        # Verify the function has a docstring mentioning CI
+        doc = create_fix_pipeline.__doc__ or ""
+        assert "ci_verifier" in doc or "CI" in doc
