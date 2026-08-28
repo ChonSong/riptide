@@ -71,7 +71,10 @@ def skip_comment_payload(installation_id=4262983, number=185):
 class TestRoute1FallbackToRoute2:
     """When companion crashes, Route 2 (@riptide-bot review) must still run."""
 
-    def test_companion_crash_falls_through_to_route2(self, client, webhook_secret, mock_state):
+    @patch("riptide.webhook.github_client")
+    @patch("riptide.interaction_handler.handle_command", return_value="Review done")
+    @patch("riptide.webhook.get_companion")
+    def test_companion_crash_falls_through_to_route2(self, mock_get_companion, mock_cmd, mock_gh, client, webhook_secret, mock_state):
         """handle_comment raising must not block handle_command."""
         delivery_id = "test-route1-crash-fresh"
         payload = review_comment_payload()
@@ -80,27 +83,27 @@ class TestRoute1FallbackToRoute2:
 
         mock_companion = MagicMock()
         mock_companion.handle_comment.side_effect = RuntimeError("UnboundLocalError simulated")
+        mock_get_companion.return_value = mock_companion
+        mock_gh.return_value.post_pr_comment.return_value = True
 
-        with patch("riptide.webhook.get_companion", return_value=mock_companion):
-            with patch("riptide.interaction_handler.handle_command", return_value="Review done") as mock_cmd:
-                with patch("riptide.webhook.github_client") as mock_gh:
-                    mock_gh.return_value.post_pr_comment.return_value = True
-                    resp = client.post(
-                        "/webhook/github",
-                        content=body,
-                        headers={
-                            "X-Hub-Signature-256": sig,
-                            "X-GitHub-Event": "issue_comment",
-                            "X-GitHub-Delivery": delivery_id,
-                        },
-                    )
+        resp = client.post(
+            "/webhook/github",
+            content=body,
+            headers={
+                "X-Hub-Signature-256": sig,
+                "X-GitHub-Event": "issue_comment",
+                "X-GitHub-Delivery": delivery_id,
+            },
+        )
 
         assert resp.status_code == 200
         mock_cmd.assert_called_once()
-        # Response posted exactly once
         mock_gh.return_value.post_pr_comment.assert_called_once()
 
-    def test_companion_crash_response_posted_exactly_once(self, client, webhook_secret, mock_state):
+    @patch("riptide.webhook.github_client")
+    @patch("riptide.interaction_handler.handle_command", return_value="📋 Review")
+    @patch("riptide.webhook.get_companion")
+    def test_companion_crash_response_posted_exactly_once(self, mock_get_companion, mock_cmd, mock_gh, client, webhook_secret, mock_state):
         """handle_command response must be posted exactly once after companion crash."""
         delivery_id = "test-route1-once-fresh"
         payload = review_comment_payload()
@@ -109,24 +112,21 @@ class TestRoute1FallbackToRoute2:
 
         mock_companion = MagicMock()
         mock_companion.handle_comment.side_effect = Exception("boom")
+        mock_get_companion.return_value = mock_companion
+        mock_gh.return_value.post_pr_comment.return_value = True
 
-        with patch("riptide.webhook.get_companion", return_value=mock_companion):
-            with patch("riptide.interaction_handler.handle_command", return_value="📋 Review") as mock_cmd:
-                with patch("riptide.webhook.github_client") as mock_gh:
-                    mock_gh.return_value.post_pr_comment.return_value = True
-                    resp = client.post(
-                        "/webhook/github",
-                        content=body,
-                        headers={
-                            "X-Hub-Signature-256": sig,
-                            "X-GitHub-Event": "issue_comment",
-                            "X-GitHub-Delivery": delivery_id,
-                        },
-                    )
+        resp = client.post(
+            "/webhook/github",
+            content=body,
+            headers={
+                "X-Hub-Signature-256": sig,
+                "X-GitHub-Event": "issue_comment",
+                "X-GitHub-Delivery": delivery_id,
+            },
+        )
 
         assert resp.status_code == 200
         assert mock_gh.return_value.post_pr_comment.call_count == 1
-        # Verify the call was for the review response, not a companion reply
         call_args = mock_gh.return_value.post_pr_comment.call_args
         assert "Review" in call_args[0][4] or "Review" in str(call_args)
 
@@ -134,7 +134,10 @@ class TestRoute1FallbackToRoute2:
 class TestRoute1SkipsRoute2:
     """When companion handles a skip/resume, Route 2 must NOT run."""
 
-    def test_skip_response_blocks_route2(self, client, webhook_secret, mock_state):
+    @patch("riptide.webhook.github_client")
+    @patch("riptide.interaction_handler.handle_command")
+    @patch("riptide.webhook.get_companion")
+    def test_skip_response_blocks_route2(self, mock_get_companion, mock_cmd, mock_gh, client, webhook_secret, mock_state):
         """Companion skip response must return early — Route 2 not invoked."""
         delivery_id = "test-skip-blocks-fresh"
         payload = skip_comment_payload()
@@ -143,25 +146,26 @@ class TestRoute1SkipsRoute2:
 
         mock_companion = MagicMock()
         mock_companion.handle_comment.return_value = "🤖 Companion will **skip** this PR."
+        mock_get_companion.return_value = mock_companion
+        mock_gh.return_value.post_pr_comment.return_value = True
 
-        with patch("riptide.webhook.get_companion", return_value=mock_companion):
-            with patch("riptide.interaction_handler.handle_command") as mock_cmd:
-                with patch("riptide.webhook.github_client") as mock_gh:
-                    mock_gh.return_value.post_pr_comment.return_value = True
-                    resp = client.post(
-                        "/webhook/github",
-                        content=body,
-                        headers={
-                            "X-Hub-Signature-256": sig,
-                            "X-GitHub-Event": "issue_comment",
-                            "X-GitHub-Delivery": delivery_id,
-                        },
-                    )
+        resp = client.post(
+            "/webhook/github",
+            content=body,
+            headers={
+                "X-Hub-Signature-256": sig,
+                "X-GitHub-Event": "issue_comment",
+                "X-GitHub-Delivery": delivery_id,
+            },
+        )
 
         assert resp.status_code == 200
         mock_cmd.assert_not_called()
 
-    def test_resume_response_blocks_route2(self, client, webhook_secret, mock_state):
+    @patch("riptide.webhook.github_client")
+    @patch("riptide.interaction_handler.handle_command")
+    @patch("riptide.webhook.get_companion")
+    def test_resume_response_blocks_route2(self, mock_get_companion, mock_cmd, mock_gh, client, webhook_secret, mock_state):
         """Companion resume response must return early — Route 2 not invoked."""
         delivery_id = "test-resume-blocks-fresh"
         payload = {
@@ -183,20 +187,18 @@ class TestRoute1SkipsRoute2:
 
         mock_companion = MagicMock()
         mock_companion.handle_comment.return_value = "🤖 Companion **resumed** for this PR."
+        mock_get_companion.return_value = mock_companion
+        mock_gh.return_value.post_pr_comment.return_value = True
 
-        with patch("riptide.webhook.get_companion", return_value=mock_companion):
-            with patch("riptide.interaction_handler.handle_command") as mock_cmd:
-                with patch("riptide.webhook.github_client") as mock_gh:
-                    mock_gh.return_value.post_pr_comment.return_value = True
-                    resp = client.post(
-                        "/webhook/github",
-                        content=body,
-                        headers={
-                            "X-Hub-Signature-256": sig,
-                            "X-GitHub-Event": "issue_comment",
-                            "X-GitHub-Delivery": delivery_id,
-                        },
-                    )
+        resp = client.post(
+            "/webhook/github",
+            content=body,
+            headers={
+                "X-Hub-Signature-256": sig,
+                "X-GitHub-Event": "issue_comment",
+                "X-GitHub-Delivery": delivery_id,
+            },
+        )
 
         assert resp.status_code == 200
         mock_cmd.assert_not_called()
@@ -205,8 +207,11 @@ class TestRoute1SkipsRoute2:
 class TestRoute1NoInstallation:
     """When no installation_id, Route 1 still runs but doesn't post."""
 
-    def test_companion_crash_no_installation_still_returns_200(self, client, webhook_secret, mock_state):
-        """No installation + companion crash → 200, no command attempted."""
+    @patch("riptide.interaction_handler.handle_command")
+    @patch("riptide.webhook.get_gh_cli_client")
+    @patch("riptide.webhook.get_companion")
+    def test_companion_crash_no_installation_uses_gh_cli_fallback(self, mock_get_companion, mock_gh_cli, mock_cmd, client, webhook_secret, mock_state):
+        """No installation + companion crash → Route 2 uses gh CLI fallback."""
         delivery_id = "test-no-install-crash-fresh"
         payload = review_comment_payload(installation_id=None)
         body = json.dumps(payload).encode()
@@ -214,22 +219,22 @@ class TestRoute1NoInstallation:
 
         mock_companion = MagicMock()
         mock_companion.handle_comment.side_effect = RuntimeError("crash")
+        mock_get_companion.return_value = mock_companion
+        mock_gh_cli.return_value = MagicMock()
 
-        with patch("riptide.webhook.get_companion", return_value=mock_companion):
-            with patch("riptide.interaction_handler.handle_command") as mock_cmd:
-                resp = client.post(
-                    "/webhook/github",
-                    content=body,
-                    headers={
-                        "X-Hub-Signature-256": sig,
-                        "X-GitHub-Event": "issue_comment",
-                        "X-GitHub-Delivery": delivery_id,
-                    },
-                )
+        resp = client.post(
+            "/webhook/github",
+            content=body,
+            headers={
+                "X-Hub-Signature-256": sig,
+                "X-GitHub-Event": "issue_comment",
+                "X-GitHub-Delivery": delivery_id,
+            },
+        )
 
         assert resp.status_code == 200
-        # Route 2 requires installation_id — should not be called
-        mock_cmd.assert_not_called()
+        # Route 2 now uses gh CLI fallback when installation_id is None
+        mock_cmd.assert_called_once()
 
 
 # ── _build_tier1_body fix: ui_files parameter ────────────────────────────────
