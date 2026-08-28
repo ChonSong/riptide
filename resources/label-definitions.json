@@ -1,0 +1,232 @@
+{
+  "$schema": "label-definitions.schema.json",
+  "version": "1.1.0",
+  "description": "Canonical label taxonomy for the Riptide labeling engine. All labels, colors, descriptions, and per-repo component mappings.",
+  "updated": "2026-08-04",
+  "maintainer": "riptide-labeler",
+
+  "shared_labels": {
+    "description": "Labels valid on every repo. Dimensions: type/, priority/, scope/, status/, area/, sweeper/, bot/.",
+    "dimensions": {
+      "type": {
+        "description": "Nature of the change or request",
+        "color": "#C5DEF5",
+        "labels": {
+          "type/bug":          { "description": "Something isn't working — fix, bugfix, hotfix", "color": "#C5DEF5" },
+          "type/feature":      { "description": "New capability or enhancement request", "color": "#C5DEF5" },
+          "type/docs":         { "description": "Documentation improvements — README, comments, wiki", "color": "#C5DEF5" },
+          "type/refactor":     { "description": "Code restructuring, no behavior change", "color": "#C5DEF5" },
+          "type/perf":         { "description": "Performance improvement or optimization", "color": "#C5DEF5" },
+          "type/test":         { "description": "Test additions, changes, or test infrastructure", "color": "#C5DEF5" },
+          "type/security":     { "description": "Security vulnerability or hardening", "color": "#C5DEF5" },
+          "type/ci":           { "description": "CI/CD pipeline or workflow changes", "color": "#C5DEF5" },
+          "type/deps":         { "description": "Dependency updates or requirements changes", "color": "#C5DEF5" }
+        }
+      },
+      "priority": {
+        "description": "Urgency and severity level",
+        "color": "severity_gradient",
+        "labels": {
+          "priority/critical": { "description": "Security, data loss, crash loop, P0-equivalent", "color": "#B60205" },
+          "priority/high":     { "description": "Major feature broken, no workaround, P1-equivalent", "color": "#D93F0B" },
+          "priority/medium":   { "description": "Degraded experience, workaround exists, P2-equivalent", "color": "#FBCA04" },
+          "priority/low":      { "description": "Cosmetic, nice to have, P3-equivalent", "color": "#0E8A16" }
+        }
+      },
+      "scope": {
+        "description": "Blast radius / impact size measured by lines changed",
+        "color": "#848d97",
+        "labels": {
+          "scope/tiny":    { "description": "< 10 lines changed", "color": "#848d97" },
+          "scope/small":   { "description": "10–99 lines changed", "color": "#848d97" },
+          "scope/medium":  { "description": "100–499 lines changed", "color": "#848d97" },
+          "scope/large":   { "description": "500–999 lines changed", "color": "#848d97" },
+          "scope/massive": { "description": "1000+ lines changed", "color": "#848d97" }
+        }
+      },
+      "status": {
+        "description": "Issue/PR lifecycle state",
+        "color": "#D876E3",
+        "labels": {
+          "status/needs-triage":  { "description": "Confidence < 70% — needs human classification", "color": "#D876E3" },
+          "status/needs-repro":   { "description": "Bug report without reproduction steps", "color": "#D876E3" },
+          "status/blocked":       { "description": "Blocked on external dependency or decision", "color": "#D876E3" },
+          "status/stale":         { "description": "No activity for 30+ days", "color": "#D876E3" },
+          "status/draft":         { "description": "PR is in draft state or marked WIP", "color": "#D876E3" },
+          "status/reviewed":      { "description": "Has received at least one human review pass", "color": "#D876E3" }
+        }
+      },
+      "area": {
+        "description": "Cross-cutting concern area",
+        "color": "#c2e0c6",
+        "labels": {
+          "area/auth":         { "description": "Authentication, OAuth, credential pools", "color": "#c2e0c6" },
+          "area/billing":      { "description": "Account usage, credit usage, billing", "color": "#c2e0c6" },
+          "area/compression":  { "description": "Context compression and continuation sessions", "color": "#c2e0c6" },
+          "area/config":       { "description": "Config system, migrations, profiles", "color": "#c2e0c6" },
+          "area/docker":       { "description": "Docker image, Compose, packaging", "color": "#c2e0c6" },
+          "area/memory":       { "description": "Memory subsystem: store, providers, sync", "color": "#c2e0c6" },
+          "area/sessions":     { "description": "Session lifecycle, resume, persistence", "color": "#c2e0c6" },
+          "area/streaming":    { "description": "Streaming responses: gateway delivery, provider wire", "color": "#c2e0c6" },
+          "area/install":      { "description": "Installer, updater, packaging, wheels, doctor", "color": "#c2e0c6" },
+          "area/i18n":         { "description": "Localization, locales, translations", "color": "#c2e0c6" },
+          "area/usage-cost":   { "description": "Token accounting, usage reporting, billing, cost tracking", "color": "#c2e0c6" },
+          "area/labels":       { "description": "Label taxonomy, classification rules, labeler engine", "color": "#c2e0c6" }
+        }
+      },
+      "sweeper": {
+        "description": "Sweeper audit risk classification (cross-cutting)",
+        "color": "#fbca04",
+        "labels": {
+          "sweeper:blast-contained":  { "description": "Blast radius: contained — one narrow path / opt-in / few users", "color": "#0e8a16" },
+          "sweeper:blast-moderate":   { "description": "Blast radius: moderate — a subsystem or single platform", "color": "#bfd4f2" },
+          "sweeper:blast-broad":      { "description": "Blast radius: broad — a core path most sessions hit", "color": "#fbca04" },
+          "sweeper:blast-massive":    { "description": "Blast radius: massive — everyone, every turn (invariant surface)", "color": "#b60205" },
+          "sweeper:risk-automation":  { "description": "Risk: may affect CI, automerge, label sync, or maintainer automation", "color": "#e99695" },
+          "sweeper:risk-caching":     { "description": "Risk: may break/degrade prompt caching or cache-key stability", "color": "#b60205" },
+          "sweeper:risk-compatibility": { "description": "Risk: may break existing users, config, migrations, defaults, or upgrades", "color": "#e99695" }
+        }
+      },
+      "bot": {
+        "description": "Automation markers — bot-internal, not classification",
+        "color": "#E99695",
+        "labels": {
+          "bot/labeled":     { "description": "Bot has applied labels to this item (dedup guard)", "color": "#E99695" },
+          "bot/mislabeled":  { "description": "Human flagged that the bot's labels were wrong", "color": "#E99695" }
+        }
+      }
+    }
+  },
+
+  "repo_components": {
+    "description": "Per-repo comp/* mappings. Each repo has its own component labels derived from file paths.",
+    "repos": {
+      "ChonSong/riptide": {
+        "comp/github-app":  { "description": "GitHub App plumbing: JWT auth, webhook server, installation sync", "color": "#BFD4F2", "paths": ["riptide/github_app.py", "riptide/webhook.py", "server.py"] },
+        "comp/companion":   { "description": "Bot 1: PR companion TL;DR, ELI5, emoji classification", "color": "#BFD4F2", "paths": ["riptide/companion.py"] },
+        "comp/deepthink":   { "description": "Bot 2: Cron-pumped Hermes deep-think PR reviews", "color": "#BFD4F2", "paths": ["riptide/deepthink.py"] },
+        "comp/proofshot":   { "description": "Bot 3: Cron-pumped Playwright visual verification captures", "color": "#BFD4F2", "paths": ["riptide/proofshotter.py", "proofshot.config.json", "proofshot/**"] },
+        "comp/diagram":     { "description": "Excalidraw diagram generation, grafiphy integration", "color": "#BFD4F2", "paths": ["riptide/grafiphy/**", "**/excalidraw_*"] },
+        "comp/labeler":     { "description": "Labeling engine — labeler.py, label-definitions.json", "color": "#BFD4F2", "paths": ["riptide/labeler*", "riptide/resources/label-definitions*"] },
+        "comp/infra":       { "description": "Deployment, Docker, Cloudflare tunnel, scripts", "color": "#BFD4F2", "paths": ["Dockerfile", "docker-compose.yml", "start.sh", ".github/**"] }
+      },
+      "ChonSong/proofshot": {
+        "comp/runner":   { "description": "Test execution, browser automation driver", "color": "#BFD4F2", "paths": ["**/runner*", "**/execute*", "**/browser*"] },
+        "comp/reporter": { "description": "Result reporting, output formatting, PR comment posting", "color": "#BFD4F2", "paths": ["**/reporter*", "**/result*", "**/output*"] },
+        "comp/config":   { "description": "Configuration, selectors, proofshot.config.json", "color": "#BFD4F2", "paths": ["**/config*", "**/*.config.*", "**/selectors*"] },
+        "comp/cli":      { "description": "CLI entry point, argument parsing", "color": "#BFD4F2", "paths": ["cli.py", "**/main*", "**/entry*"] }
+      },
+      "ChonSong/hermes-webui": {
+        "comp/ui":           { "description": "Svelte frontend components, pages, CSS, static assets", "color": "#BFD4F2", "paths": ["static/ui*", "static/style.css", "static/*.js", "static/*.html"] },
+        "comp/extensions":   { "description": "Extension system, plugin hooks, extension settings", "color": "#BFD4F2", "paths": ["static/extension*", "api/extensions.py"] },
+        "comp/api":          { "description": "FastAPI backend endpoints, routes, middleware", "color": "#BFD4F2", "paths": ["api/routes.py", "api/**/*.py"] },
+        "comp/auth":         { "description": "Authentication, OAuth, passkeys, sessions", "color": "#BFD4F2", "paths": ["api/auth*", "api/oauth*", "api/passkeys*"] },
+        "comp/sessions":     { "description": "Session lifecycle, recovery, export, streaming", "color": "#BFD4F2", "paths": ["api/session*", "api/streaming*", "api/gateway*"] },
+        "comp/gateway":      { "description": "AI provider gateway, model routing, SSE chunking", "color": "#BFD4F2", "paths": ["api/gateway*", "api/sse_*", "api/providers*"] },
+        "comp/workspace":    { "description": "Workspace management, git integration, file tools", "color": "#BFD4F2", "paths": ["api/workspace*", "api/worktrees*", "workspace*"] },
+        "comp/deploy":       { "description": "Docker, Nix, deployment scripts, CI/CD configs", "color": "#BFD4F2", "paths": ["Dockerfile*", "docker-compose*", "flake*", "docker_init*", "scripts/**"] }
+      },
+      "NousResearch/hermes-agent": {
+        "comp/agent":      { "description": "Core agent runtime: loop, agent_init, prompt builder", "color": "#6f42c1", "paths": ["src/hermes_agent/**"] },
+        "comp/cli":        { "description": "CLI entry point, hermes_cli/, setup wizard", "color": "#6f42c1", "paths": ["src/hermes_cli/**"] },
+        "comp/gateway":    { "description": "Gateway runner, session dispatch, delivery", "color": "#6f42c1", "paths": ["src/gateway/**"] },
+        "comp/tools":      { "description": "Tool registry, model_tools, toolsets", "color": "#6f42c1", "paths": ["src/tools/**"] },
+        "comp/tui":        { "description": "Terminal UI (ui-tui/ + tui_gateway/)", "color": "#6f42c1", "paths": ["src/ui-tui/**"] },
+        "comp/plugins":    { "description": "Plugin system and bundled plugins", "color": "#6f42c1", "paths": ["src/plugins/**"] },
+        "comp/cron":       { "description": "Cron scheduler and job management", "color": "#6f42c1", "paths": ["src/cron/**"] },
+        "comp/acp":        { "description": "Agent Communication Protocol adapter", "color": "#6f42c1", "paths": ["src/acp/**"] }
+      }
+    }
+  },
+
+  "preserved_legacy_labels": {
+    "description": "Default GitHub labels that coexist with the new taxonomy. These are human-assigned only (bot never auto-applies).",
+    "labels": [
+      { "name": "good first issue", "color": "7057ff", "reason": "Human designation for new contributors" },
+      { "name": "help wanted",      "color": "008672", "reason": "Human designation for external help" },
+      { "name": "question",         "color": "d876e3", "reason": "Support signal, not a type/ change" },
+      { "name": "duplicate",        "color": "cfd3d7", "reason": "Human cross-reference marker" },
+      { "name": "invalid",          "color": "e4e669", "reason": "Human decision, not auto-detectable" },
+      { "name": "wontfix",          "color": "ffffff", "reason": "Human decision" }
+    ]
+  },
+
+  "labels_to_remove": {
+    "description": "Default GitHub labels replaced by type/* taxonomy. Bot removes these on repo setup.",
+    "labels": [
+      { "name": "bug",          "replaced_by": "type/bug" },
+      { "name": "enhancement",  "replaced_by": "type/feature" },
+      { "name": "documentation","replaced_by": "type/docs" }
+    ]
+  },
+
+  "classification_rules": {
+    "description": "Deterministic rules for label assignment. Applied in order — first match wins per dimension.",
+    "type": [
+      { "label": "type/bug",      "pattern": "^fix[:\\s]|\\b(bug|bugfix|hotfix|regression)\\b|steps to reproduce" },
+      { "label": "type/docs",     "pattern": "^docs[:\\s]|\\b(readme|documentation|wiki)\\b", "paths": ["*.md","*.rst","docs/**"] },
+      { "label": "type/feature",  "pattern": "^feat[:\\s]|\\b(feature|add)\\b" },
+      { "label": "type/refactor", "pattern": "^(refactor|chore)[:\\s]|\\b(restructure|reorganize)\\b" },
+      { "label": "type/perf",     "pattern": "^perf[:\\s]|\\b(performance|optimize|speed|latency)\\b" },
+      { "label": "type/test",     "pattern": "^test[:\\s]|\\b(testing|tests)\\b", "paths": ["test*/*","*_test.*","*.test.*","*_spec.*"] },
+      { "label": "type/security", "pattern": "\\b(security|vuln|cve|xss|injection|exploit)\\b" },
+      { "label": "type/ci",       "pattern": "^ci[:\\s]", "paths": [".github/**","Dockerfile*"] },
+      { "label": "type/deps",     "pattern": "^(deps|depend)[:\\s]|\\b(dependencies|requirements)\\b", "paths": ["requirements*.txt","package*.json","Cargo.*","go.mod","go.sum","pyproject.toml"] }
+    ],
+    "priority": [
+      { "label": "priority/critical", "pattern": "\\b(security|data loss|crash loop|p0|data breach|exploit|rce)\\b" },
+      { "label": "priority/high",     "pattern": "\\b(crash|down|blocking|broken|regression)\\b", "condition": "loc >= 1000" },
+      { "label": "priority/medium",   "condition": "loc >= 200" },
+      { "label": "priority/low" }
+    ],
+    "scope": [
+      { "label": "scope/tiny",    "condition": "loc < 10" },
+      { "label": "scope/small",   "condition": "10 <= loc < 100" },
+      { "label": "scope/medium",  "condition": "100 <= loc < 500" },
+      { "label": "scope/large",   "condition": "500 <= loc < 1000" },
+      { "label": "scope/massive", "condition": "loc >= 1000" }
+    ],
+    "status": [
+      { "label": "status/draft",        "condition": "pr.draft == true" },
+      { "label": "status/needs-triage", "condition": "confidence < 0.7" },
+      { "label": "status/needs-repro",  "pattern": "type/bug", "condition": "no_repro_steps" },
+      { "label": "status/blocked",      "pattern": "\\b(blocked on|waiting for|depends on)\\b" },
+      { "label": "status/stale",        "condition": "inactive_days >= 30" }
+    ],
+    "area": [
+      { "label": "area/auth",        "pattern": "\\b(auth|oauth|credential|login|session|passkey)\\b" },
+      { "label": "area/billing",     "pattern": "\\b(billing|usage|credit|cost)\\b" },
+      { "label": "area/compression", "pattern": "\\b(compression|compress|context.window|truncat)\\b" },
+      { "label": "area/config",      "pattern": "\\b(config|migration|profile|settings)\\b" },
+      { "label": "area/docker",      "pattern": "\\b(docker|container|compose)\\b", "paths": ["Dockerfile*","docker-compose*"] },
+      { "label": "area/memory",      "pattern": "\\b(memory|store|cache|provider.*sync)\\b" },
+      { "label": "area/sessions",    "pattern": "\\b(session|resume|history|persistence)\\b" },
+      { "label": "area/streaming",   "pattern": "\\b(streaming|sse|chunk|delivery|gateway)\\b" },
+      { "label": "area/install",     "pattern": "\\b(install|updater|packaging|wheel|doctor)\\b" },
+      { "label": "area/i18n",        "pattern": "\\b(i18n|localization|locale|translation)\\b" },
+      { "label": "area/usage-cost",  "pattern": "\\b(token.*account|usage.*report|spending)\\b" },
+      { "label": "area/labels",      "pattern": "\\b(label|taxonomy|classification)\\b" }
+    ],
+    "sweeper": [
+      { "label": "sweeper:blast-massive",    "condition": "loc >= 1000 AND touches_core_path" },
+      { "label": "sweeper:blast-broad",      "condition": "loc >= 500 OR touches_core_path" },
+      { "label": "sweeper:blast-moderate",   "condition": "loc >= 100" },
+      { "label": "sweeper:blast-contained",  "condition": "loc < 100" },
+      { "label": "sweeper:risk-automation",  "pattern": "\\b(ci|automerge|label.sync|webhook|cron)\\b" },
+      { "label": "sweeper:risk-caching",     "pattern": "\\b(cache|prompt.cach|cache.key)\\b" },
+      { "label": "sweeper:risk-compatibility", "pattern": "\\b(breaking|migration|upgrade|deprecated)\\b" }
+    ]
+  },
+
+  "ai_fallback_config": {
+    "description": "When deterministic rules can't classify, falls back to local LLM.",
+    "model": "qwen2.5-coder:7b",
+    "endpoint": "http://localhost:11434/api/generate",
+    "confidence_threshold": 0.7,
+    "triggers": [
+      "Non-conventional-commit PR title (no type: prefix)",
+      "Issue classification (no files to analyze)",
+      "Priority escalation detected from conversation (cron sweep re-evaluates)"
+    ]
+  }
+}

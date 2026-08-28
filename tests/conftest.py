@@ -1,10 +1,12 @@
-# riptide/tests/conftest.py
-"""
-Shared test infrastructure for Riptide.
-Mocks GitHub API, Ollama, Hermes cron, and external CLIs.
-"""
+#!/usr/bin/env python3
+"""Shared test infrastructure for Riptide."""
 
 import os
+import sys
+
+# Add workspace root to path so we can import riptide package
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
 import json
 import hmac
 import hashlib

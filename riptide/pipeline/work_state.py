@@ -187,6 +187,7 @@ def update_workstream(
     ws_id: str,
     status: Optional[str] = None,
     outputs: Optional[dict] = None,
+    inputs: Optional[dict] = None,
 ) -> dict:
     def _do(state):
         ws = state["tracks"][track_id]["workstreams"][ws_id]
@@ -194,6 +195,8 @@ def update_workstream(
             ws["status"] = status
         if outputs:
             ws["outputs"].update(outputs)
+        if inputs:
+            ws["inputs"].update(inputs)
         if status == "done":
             ws["completed_at"] = now()
         state["tracks"][track_id]["last_updated"] = now()

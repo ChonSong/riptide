@@ -72,13 +72,12 @@ def handle_command(
     payload: dict,
     delivery_id: str,
     comment_id: int,
-    installation_id: int | None,
+    installation_id: int,
     owner: str,
     repo: str,
     pr_number: int,
     body: str,
     commenter: str,
-    client: object = None,
 ) -> Optional[str]:
     """
     Route @riptide-bot commands to the correct handler.
@@ -115,30 +114,30 @@ def handle_command(
 
     # 3. Review (anyone)
     if REVIEW_RE.search(body):
-        return _handle_review(installation_id, owner, repo, pr_number, commenter, pr_author, client)
+        return _handle_review(installation_id, owner, repo, pr_number, commenter, pr_author)
 
     # 4. Fix (auth: author/owner)
     if FIX_RE.search(body):
         return _handle_fix(
-            installation_id, owner, repo, pr_number, commenter, pr_author, body, client
+            installation_id, owner, repo, pr_number, commenter, pr_author, body
         )
 
     # 5. Proofshot/Visual (auth: author/owner)
     if VISUAL_RE.search(body):
         return _handle_proofshot(
-            installation_id, owner, repo, pr_number, commenter, pr_author, client
+            installation_id, owner, repo, pr_number, commenter, pr_author
         )
 
     # 6. Relabel (anyone)
     if RELABEL_RE.search(body):
-        return _handle_relabel(installation_id, owner, repo, pr_number, client)
+        return _handle_relabel(installation_id, owner, repo, pr_number)
 
     # 7. Explain <n> (anyone)
     explain_match = EXPLAIN_RE.search(body)
     if explain_match:
         finding_num = int(explain_match.group(1))
         return _handle_explain(
-            installation_id, owner, repo, pr_number, finding_num, client
+            installation_id, owner, repo, pr_number, finding_num
         )
 
     # Not a recognized command (just a mention)
@@ -147,7 +146,7 @@ def handle_command(
 
 def _get_pr_author(
     payload: dict,
-    installation_id: int | None,
+    installation_id: int,
     owner: str,
     repo: str,
     pr_number: int,
@@ -170,7 +169,7 @@ def _get_pr_author(
     try:
         from riptide.webhook import github_client
         client = github_client()
-        pr_details = client.get_pr_details(installation_id, owner, repo, pr_number)  # type: ignore[arg-type]
+        pr_details = client.get_pr_details(installation_id, owner, repo, pr_number)
         return pr_details.get("user", {}).get("login", "unknown")
     except Exception as e:
         log.warning(f"Could not fetch PR author: {e}")
@@ -249,15 +248,13 @@ def _handle_review(
     pr_number: int,
     commenter: str,
     pr_author: str,
-    client: object = None,
 ) -> str:
     """Route to deepthink.handle_review_command()."""
     from riptide.deepthink import handle_review_command
     from riptide.webhook import github_client
 
     try:
-        if client is None:
-            client = github_client()
+        client = github_client()
         result = handle_review_command(
             client, installation_id, owner, repo, pr_number, commenter
         )
@@ -277,7 +274,6 @@ def _handle_fix(
     commenter: str,
     pr_author: str,
     body: str,
-    client: object = None,
 ) -> str:
     """Route to fixer.handle_fix_command() with authorization."""
     if not _is_authorized(commenter, pr_author, owner):
@@ -293,8 +289,7 @@ def _handle_fix(
     try:
         match = FIX_RE.search(body)
         description = match.group(1).strip() if match else ""
-        if client is None:
-            client = github_client()
+        client = github_client()
         result = handle_fix_command(
             client, installation_id, owner, repo, pr_number, commenter, description
         )
@@ -313,7 +308,6 @@ def _handle_proofshot(
     pr_number: int,
     commenter: str,
     pr_author: str,
-    client: object = None,
 ) -> str:
     """Route to visual.handle_visual_command() with authorization."""
     if not _is_authorized(commenter, pr_author, owner):
@@ -327,8 +321,7 @@ def _handle_proofshot(
     from riptide.webhook import github_client
 
     try:
-        if client is None:
-            client = github_client()
+        client = github_client()
         result = handle_visual_command(
             client, installation_id, owner, repo, pr_number, commenter
         )
@@ -345,14 +338,12 @@ def _handle_relabel(
     owner: str,
     repo: str,
     pr_number: int,
-    client: object = None,
 ) -> str:
     """Re-classify and apply labels to PR."""
     from riptide.webhook import github_client, get_labeler, _reconcile_labels
 
     try:
-        if client is None:
-            client = github_client()
+        client = github_client()
         labeler = get_labeler()
         if labeler is None:
             return "⚠️ Labeler not available (RIPTIDE_LABELER_ENABLED != '1')."
@@ -377,14 +368,12 @@ def _handle_explain(
     repo: str,
     pr_number: int,
     finding_num: int,
-    client: object = None,
 ) -> str:
     """Fetch detail for finding #n from latest review comment."""
     from riptide.webhook import github_client
 
     try:
-        if client is None:
-            client = github_client()
+        client = github_client()
         # Fetch comments on the PR
         comments = client.get_issue_comments(
             installation_id, owner, repo, pr_number

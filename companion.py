@@ -472,8 +472,8 @@ class Companion:
 
     def _import_legacy_skip_file(self):
         """One-time import of legacy companion_skip.json into StateStore."""
-        global _legacy_skip_imported
         # Module-level flag: only attempt import once per process.
+        global _legacy_skip_imported
         if _legacy_skip_imported:
             return
         try:
@@ -1154,7 +1154,8 @@ ELI5:"""
         return "\n".join(parts)
 
     def _build_tier1_body(self, emoji: str, author: str, tldr: str, deterministic_report,
-                          depth: str = "standard", webhook_received_at=None, ui_files=None) -> str:
+                          depth: str = "standard", webhook_received_at=None,
+                          ui_files=None) -> str:
         """Build the Tier 1 deterministic comment body (no LLM required).
 
         Contains verdict, findings, and a progress marker indicating
@@ -1180,6 +1181,10 @@ ELI5:"""
 
         body = header + footer
 
+        # Checkbox footer — interactive button system
+        checkbox_actions = self._get_checkbox_actions(ui_files=ui_files)
+        body += f"\n\n{self._build_checkbox_footer(checkbox_actions)}"
+
         # Timing metric: webhook received → comment posted
         if webhook_received_at:
             import time as _time
@@ -1193,7 +1198,7 @@ ELI5:"""
             body += f"\n\n---\n<sub>⏱️ Review posted in {elapsed_str}</sub>"
 
         # Checkbox footer — interactive button system
-        checkbox_actions = self._get_checkbox_actions(ui_files=ui_files)
+        checkbox_actions = self._get_checkbox_actions()
         body += f"\n\n{self._build_checkbox_footer(checkbox_actions)}"
 
         return body

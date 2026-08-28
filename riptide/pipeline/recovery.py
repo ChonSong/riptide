@@ -177,3 +177,118 @@ def assess_partial_output(
     accept = len(failed) < len(acceptance) if acceptance else False
     
     return accept, failed
+
+
+# ── Loop Recovery ──────────────────────────────────────────────────────────
+
+
+class LoopRecovery:
+    """Recovery actions specific to pipeline retry loops.
+    
+    Handles three types of loop failures:
+    1. Snapshot validation failures (pre-push)
+    2. Engine test failures (post-execution)
+    3. CI failures (post-push)
+    """
+    
+    MAX_SNAPSHOT_RETRIES = 3
+    MAX_ENGINE_RETRIES = 3
+    MAX_CI_RETRIES = 3
+    
+    @staticmethod
+    def snapshot_failure(issues: list[str], attempt: int, max_attempts: int = MAX_SNAPSHOT_RETRIES) -> dict:
+        """Recovery action for snapshot judge failure.
+        
+        Args:
+            issues: List of validation issues found
+            attempt: Current attempt number (0-indexed)
+            max_attempts: Maximum allowed attempts
+        
+        Returns:
+            Dict with action and context for next iteration
+        """
+        if attempt >= max_attempts - 1:
+            return {
+                "action": "escalate",
+                "reason": "max_snapshot_retries_exceeded",
+                "issues": issues,
+            }
+        
+        return {
+            "action": "retry_artisan",
+            "correction_context": {
+                "issues": issues,
+                "suggestion": f"Fix these {len(issues)} issues before proceeding",
+            },
+        }
+    
+    @staticmethod
+    def engine_failure(error_context: dict, attempt: int, max_attempts: int = MAX_ENGINE_RETRIES) -> dict:
+        """Recovery action for engine test failure.
+        
+        Args:
+            error_context: Truncated error context from engine
+            attempt: Current attempt number (0-indexed)
+            max_attempts: Maximum allowed attempts
+        
+        Returns:
+            Dict with action and context for next iteration
+        """
+        if attempt >= max_attempts - 1:
+            return {
+                "action": "escalate",
+                "reason": "max_engine_retries_exceeded",
+                "error_context": error_context,
+            }
+        
+        error_type = error_context.get("error_type", "unknown")
+        
+        return {
+            "action": "retry_with_errors",
+            "error_type": error_type,
+            "error_context": error_context,
+            "suggestion": f"Fix the {error_type} error before proceeding",
+        }
+    
+    @staticmethod
+    def ci_failure(ci_context: dict, attempt: int, max_attempts: int = MAX_CI_RETRIES) -> dict:
+        """Recovery action for CI failure.
+        
+        Args:
+            ci_context: CI error context with failed/fixable/non_fixable checks
+            attempt: Current attempt number (0-indexed)
+            max_attempts: Maximum allowed attempts
+        
+        Returns:
+            Dict with action and context for next iteration
+        """
+        if attempt >= max_attempts - 1:
+            return {
+                "action": "escalate",
+                "reason": "max_ci_retries_exceeded",
+                "ci_context": ci_context,
+            }
+        
+        non_fixable = ci_context.get("non_fixable_checks", [])
+        if non_fixable:
+            return {
+                "action": "escalate",
+                "reason": "non_fixable_ci_failures",
+                "non_fixable": non_fixable,
+            }
+        
+        return {
+            "action": "retry_with_ci_errors",
+            "failed_checks": ci_context.get("failed_checks", []),
+            "suggestion": f"Fix these {len(ci_context.get('failed_checks', []))} CI failures",
+        }
+    
+    @staticmethod
+    def should_retry(recovery_result: dict) -> bool:
+        """Check if the recovery action allows a retry."""
+        return recovery_result.get("action", "").startswith("retry")
+    
+    @staticmethod
+    def is_escalation(recovery_result: dict) -> bool:
+        """Check if the recovery action is an escalation (no more retries)."""
+        return recovery_result.get("action") == "escalate"

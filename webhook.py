@@ -39,8 +39,6 @@ from .review_memory import store_review_outcome
 _companion: "Companion | Literal[False] | None" = None
 
 # gh CLI client for repos without App installation (PAT-based)
-# NOTE: This is a temporary fallback that violates the strict API routing constraint.
-# TODO: Remove this and use GitHubAppClient with PAT-based installation tokens instead.
 _GH_CLI_CLIENT_UNSET = object()
 _gh_cli_client: object | None = _GH_CLI_CLIENT_UNSET
 
@@ -247,32 +245,49 @@ def github_client() -> GitHubAppClient:
 
 @app.post("/webhook/github")
 async def github_webhook(request: Request) -> Response:
-    """Main GitHub webhook endpoint.
-
-    Note: Reviews are handled by the cron poller (deepthink.py), not webhooks.
-    We return 200 for all deliveries to prevent GitHub retries.
-    Signature verification is skipped — the cron poller is the source of truth.
-    """
+    """Main GitHub webhook endpoint."""
     body = await request.body()
     signature = request.headers.get("x-hub-signature-256", "")
     event = request.headers.get("x-github-event", "")
     delivery_id = request.headers.get("x-github-delivery", "unknown")
 
-    # Idempotency: drop duplicate deliveries
+    # Idempotency: drop duplicate deliveries before expensive processing
     state = _get_state_store()
     if not state.reserve_delivery(delivery_id):
         log.info(f"[{delivery_id}] Duplicate delivery dropped")
         return Response(status_code=200)
 
-    # Skip signature verification — cron poller handles reviews
-    log.info(f"[{delivery_id}] {event} event received (webhook disabled, using cron poller)")
-    return Response(status_code=200)
+    if not verify_webhook_signature(body, signature, WEBHOOK_SECRET):
+        log.warning(f"[{delivery_id}] Invalid webhook signature from {request.client}")
+        raise HTTPException(status_code=401, detail="Invalid signature")
 
+    payload = json.loads(body)
+    log.info(f"[{delivery_id}] {event} event received")
 
-# ── Dead code below — kept for reference but unreachable ─────────────────────
-# The original webhook handler processed pull_request, issue_comment, and
-# installation events. All review functionality has moved to the cron poller
-# (deepthink.py). This code is preserved for reference but never executes.
+    # ── Bind trace context for all downstream processing ──────────────────────
+    # This propagates delivery_id through structlog automatically.
+    # Worker threads spawned via contextvars.copy_context().run() inherit this.
+    bind_trace_context(delivery_id, event=event, github_event=event)
+
+    try:
+        if event == "pull_request":
+            result = await handle_pull_request(payload, delivery_id)
+        elif event == "issue_comment":
+            result = await handle_issue_comment(payload, delivery_id)
+        elif event in ("installation", "installation_repositories"):
+            result = await handle_installation(payload, event, delivery_id)
+        else:
+            log.info(f"[{delivery_id}] Unhandled event: {event}")
+            result = Response(status_code=200)
+        state.mark_delivery_done(delivery_id)
+        return result
+    except Exception as e:
+        state.mark_delivery_failed(delivery_id)
+        log.error(
+            f"[{delivery_id}] Error handling {event}: {type(e).__name__}: {e}\n{traceback.format_exc()}"
+        )
+        # Return 200 to prevent GitHub retry storms on our errors
+        return Response(status_code=200)
 
 
 async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
@@ -503,16 +518,6 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
     installation = payload.get("installation", {})
     installation_id = installation.get("id")
 
-    # Must be a PR comment
-    is_pr = bool(issue.get("pull_request"))
-    if not is_pr:
-        return Response(status_code=200)
-
-    owner = repo.get("full_name", "").split("/")[0] if repo.get("full_name") else ""
-    repo_name = repo.get("name", "")
-    pr_number = issue.get("number")
-    commenter = comment.get("user", {}).get("login", "unknown")
-
     # Skip own comments (posted by the bot)
     via_app = comment.get("performed_via_github_app") or {}
     app_slug = os.environ.get("GITHUB_APP_SLUG", "octopus-selfhost")
@@ -526,57 +531,72 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
             log.info(f"[{delivery_id}] Skipping own bot comment: {bot_login}")
             return Response(status_code=200)
 
-    # ── Fallback: use gh CLI client for repos without App installation ───────
-    # When the GitHub App isn't installed, installation_id is None but we can
-    # still act on watched repos via PAT-authenticated gh CLI.
-    using_gh_cli_fallback = False
-    if not installation_id:
-        repo_full = repo.get("full_name", "")
-        if repo_full in WATCHED_REPOS:
-            gh_cli = get_gh_cli_client()
-            if gh_cli:
-                installation_id = None  # gh CLI ignores this param
-                using_gh_cli_fallback = True
-                log.info(f"[{delivery_id}] No installation ID for {repo_full} — using gh CLI fallback")
-            else:
-                log.info(f"[{delivery_id}] No installation ID for {repo_full} and gh CLI unavailable, skipping")
-                return Response(status_code=200)
-        else:
-            log.info(f"[{delivery_id}] No installation ID for {repo_full} (not in WATCHED_REPOS), skipping")
-            return Response(status_code=200)
+    is_pr = bool(issue.get("pull_request"))
+    if not is_pr:
+        return Response(status_code=200)
+
+    owner = repo.get("full_name", "").split("/")[0] if repo.get("full_name") else ""
+    repo_name = repo.get("name", "")
+    pr_number = issue.get("number")
+    commenter = comment.get("user", {}).get("login", "unknown")
 
     # Route 1: Companion skip/resume commands
     companion = get_companion()
     if companion:
-        result = companion.handle_comment(
-            installation_id, owner, repo_name, pr_number, body, commenter
-        )
-        if result:
-            if using_gh_cli_fallback:
-                try:
-                    get_gh_cli_client().post_pr_comment(
-                        installation_id, owner, repo_name, pr_number, result
-                    )
-                except Exception as e:
-                    log.warning(f"[{delivery_id}] Could not post companion reply via gh CLI: {e}")
-            elif installation_id:
-                try:
-                    github_client().post_pr_comment(
-                        installation_id, owner, repo_name, pr_number, result
-                    )
-                except Exception as e:
-                    log.warning(f"[{delivery_id}] Could not post companion reply: {e}")
-            return Response(status_code=200)
+        try:
+            result = companion.handle_comment(
+                installation_id, owner, repo_name, pr_number, body, commenter
+            )
+            if result:
+                if installation_id:
+                    try:
+                        github_client().post_pr_comment(
+                            installation_id, owner, repo_name, pr_number, result
+                        )
+                    except Exception as e:
+                        log.warning(f"[{delivery_id}] Could not post companion reply: {e}")
+                return Response(status_code=200)
+        except Exception as e:
+            log.warning(f"[{delivery_id}] Companion error (non-fatal): {e}")
+            # Fall through to Route 2 — companion crash must not block review commands
 
     # Route 2: Unified @riptide-bot command router
-    # Note: Reviews are handled by the cron poller (deepthink.py) which runs
-    # every 15 minutes. Webhooks are not required for review functionality.
-    # We return 200 to acknowledge the comment and prevent GitHub retries.
-    if body and "@riptide-bot" in body.lower():
-        log.info(f"[{delivery_id}] @riptide-bot command received — deferring to cron poller")
-        # The cron poller (deepthink.py) will pick up this PR and spawn a review
-        # if it qualifies (LOC > threshold, stale > 30 min). No webhook processing needed.
-        return Response(status_code=200)
+    # Support gh CLI fallback for repos without App installation
+    route2_gh_cli = None
+    if not installation_id and body and "@riptide-bot" in body.lower():
+        repo_full = repo.get("full_name", "")
+        if repo_full in WATCHED_REPOS:
+            route2_gh_cli = get_gh_cli_client()
+            if route2_gh_cli:
+                log.info(f"[{delivery_id}] Route 2: no installation ID for {repo_full} — using gh CLI fallback")
+
+    if (installation_id or route2_gh_cli) and body and "@riptide-bot" in body.lower():
+        from riptide.interaction_handler import handle_command
+
+        try:
+            response = handle_command(
+                payload=payload,
+                delivery_id=delivery_id,
+                comment_id=comment.get("id", 0),
+                installation_id=installation_id,
+                owner=owner,
+                repo=repo_name,
+                pr_number=pr_number,
+                body=body,
+                commenter=commenter,
+            )
+            if response:
+                if installation_id:
+                    client = github_client()
+                    client.post_pr_comment(
+                        installation_id, owner, repo_name, pr_number, response
+                    )
+                elif route2_gh_cli:
+                    route2_gh_cli.post_pr_comment(
+                        installation_id, owner, repo_name, pr_number, response
+                    )
+        except Exception as e:
+            log.error(f"[{delivery_id}] Command handler failed: {e}")
 
     return Response(status_code=200)
 
