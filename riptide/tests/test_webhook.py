@@ -178,3 +178,52 @@ class TestDefaultBranch:
         result = asyncio.run(handle_pull_request(payload, "test-delivery-id"))
 
         mock_popen.assert_not_called()
+
+
+class TestRoute2GhCliFallback:
+    """Tests for Route 2 @riptide-bot command gh CLI fallback."""
+
+    def _make_issue_comment_payload(self, body, installation_id=None):
+        """Create a test issue_comment payload."""
+        return {
+            "action": "created",
+            "comment": {
+                "id": 123,
+                "body": body,
+                "user": {"login": "testuser", "type": "User"},
+            },
+            "issue": {
+                "number": 185,
+                "pull_request": {"href": "https://api.github.com/repos/ChonSong/riptide/pulls/185"},
+            },
+            "repository": {"full_name": "ChonSong/riptide", "name": "riptide"},
+            "installation": {"id": installation_id} if installation_id else {},
+            "sender": {"login": "testuser"},
+        }
+
+    @patch("riptide.interaction_handler.handle_command")
+    @patch("riptide.webhook.get_gh_cli_client")
+    def test_route2_gh_cli_fallback(self, mock_gh_cli, mock_handle):
+        """Route 2 falls back to gh CLI when installation_id is None."""
+        from riptide.webhook import handle_issue_comment
+
+        mock_gh_cli.return_value = MagicMock()
+        mock_handle.return_value = "🧠 Review triggered"
+
+        payload = self._make_issue_comment_payload("@riptide-bot review")
+        result = asyncio.run(handle_issue_comment(payload, "test-delivery-id"))
+
+        mock_handle.assert_called_once()
+        assert result.status_code == 200
+
+    @patch("riptide.interaction_handler.handle_command")
+    def test_route2_skipped_no_installation_no_gh_cli(self, mock_handle):
+        """Route 2 skipped when no installation and gh CLI unavailable."""
+        from riptide.webhook import handle_issue_comment
+
+        with patch("riptide.webhook.get_gh_cli_client", return_value=None):
+            payload = self._make_issue_comment_payload("@riptide-bot review")
+            result = asyncio.run(handle_issue_comment(payload, "test-delivery-id"))
+
+        mock_handle.assert_not_called()
+        assert result.status_code == 200

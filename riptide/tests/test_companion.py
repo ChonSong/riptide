@@ -90,15 +90,18 @@ class TestStateStoreHeuristics:
 
     def test_legacy_skip_file_import(self, tmp_path):
         """A pre-existing companion_skip.json must import into StateStore once."""
-        companion = make_companion(tmp_path)
+        import riptide.companion as companion_mod
+        companion_mod._legacy_skip_imported = False
         legacy = tmp_path / "companion_skip.json"
         legacy.write_text(
             '{"ChonSong/riptide#42": {"skip": true, "last_sha": "legacy1"}}'
         )
-        companion._skip_file = legacy
-        companion._import_legacy_skip_file()
-        assert companion._is_skipped("ChonSong", "riptide", 42) is True
-        assert companion._get_last_sha("ChonSong", "riptide", 42) == "legacy1"
+        # Point RIPTIDE_DATA_DIR to tmp_path so companion.__init__ finds the legacy file
+        with patch.dict(os.environ, {"RIPTIDE_DATA_DIR": str(tmp_path)}):
+            companion = make_companion(tmp_path)
+            # __init__ already ran _import_legacy_skip_file since the file existed
+            assert companion._is_skipped("ChonSong", "riptide", 42) is True
+            assert companion._get_last_sha("ChonSong", "riptide", 42) == "legacy1"
 
 
 # ── classify_pr_mood ────────────────────────────────────────────────────────

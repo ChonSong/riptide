@@ -543,21 +543,34 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
     # Route 1: Companion skip/resume commands
     companion = get_companion()
     if companion:
-        result = companion.handle_comment(
-            installation_id, owner, repo_name, pr_number, body, commenter
-        )
-        if result:
-            if installation_id:
-                try:
-                    github_client().post_pr_comment(
-                        installation_id, owner, repo_name, pr_number, result
-                    )
-                except Exception as e:
-                    log.warning(f"[{delivery_id}] Could not post companion reply: {e}")
-            return Response(status_code=200)
+        try:
+            result = companion.handle_comment(
+                installation_id, owner, repo_name, pr_number, body, commenter
+            )
+            if result:
+                if installation_id:
+                    try:
+                        github_client().post_pr_comment(
+                            installation_id, owner, repo_name, pr_number, result
+                        )
+                    except Exception as e:
+                        log.warning(f"[{delivery_id}] Could not post companion reply: {e}")
+                return Response(status_code=200)
+        except Exception as e:
+            log.warning(f"[{delivery_id}] Companion error (non-fatal): {e}")
+            # Fall through to Route 2 — companion crash must not block review commands
 
     # Route 2: Unified @riptide-bot command router
-    if installation_id and body and "@riptide-bot" in body.lower():
+    # Support gh CLI fallback for repos without App installation
+    route2_gh_cli = None
+    if not installation_id and body and "@riptide-bot" in body.lower():
+        repo_full = repo.get("full_name", "")
+        if repo_full in WATCHED_REPOS:
+            route2_gh_cli = get_gh_cli_client()
+            if route2_gh_cli:
+                log.info(f"[{delivery_id}] Route 2: no installation ID for {repo_full} — using gh CLI fallback")
+
+    if (installation_id or route2_gh_cli) and body and "@riptide-bot" in body.lower():
         from riptide.interaction_handler import handle_command
 
         try:
@@ -573,10 +586,15 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
                 commenter=commenter,
             )
             if response:
-                client = github_client()
-                client.post_pr_comment(
-                    installation_id, owner, repo_name, pr_number, response
-                )
+                if installation_id:
+                    client = github_client()
+                    client.post_pr_comment(
+                        installation_id, owner, repo_name, pr_number, response
+                    )
+                elif route2_gh_cli:
+                    route2_gh_cli.post_pr_comment(
+                        installation_id, owner, repo_name, pr_number, response
+                    )
         except Exception as e:
             log.error(f"[{delivery_id}] Command handler failed: {e}")
 

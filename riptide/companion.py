@@ -473,6 +473,7 @@ class Companion:
     def _import_legacy_skip_file(self):
         """One-time import of legacy companion_skip.json into StateStore."""
         # Module-level flag: only attempt import once per process.
+        global _legacy_skip_imported
         if _legacy_skip_imported:
             return
         try:
@@ -756,7 +757,8 @@ class Companion:
             # Tier 1: deterministic comment + progress marker (no LLM required)
             tier1_body = self._build_tier1_body(emoji, author, tldr, deterministic_report,
                                                 depth=getattr(self, "_depth", "standard"),
-                                                webhook_received_at=webhook_received_at)
+                                                webhook_received_at=webhook_received_at,
+                                                ui_files=ui_files)
             pr_key = f"{owner}/{repo}#{pr_number}"
             # Stage 2: canonical thread — PATCH the existing Tier-1 comment on
             # re-sync instead of re-POSTing a duplicate thread.
@@ -1152,7 +1154,8 @@ ELI5:"""
         return "\n".join(parts)
 
     def _build_tier1_body(self, emoji: str, author: str, tldr: str, deterministic_report,
-                          depth: str = "standard", webhook_received_at=None) -> str:
+                          depth: str = "standard", webhook_received_at=None,
+                          ui_files=None) -> str:
         """Build the Tier 1 deterministic comment body (no LLM required).
 
         Contains verdict, findings, and a progress marker indicating
@@ -1180,7 +1183,7 @@ ELI5:"""
 
         # Checkbox footer — interactive button system
         checkbox_actions = self._get_checkbox_actions(ui_files=ui_files)
-        parts.append(f"\n\n{self._build_checkbox_footer(checkbox_actions)}")
+        body += f"\n\n{self._build_checkbox_footer(checkbox_actions)}"
 
         # Timing metric: webhook received → comment posted
         if webhook_received_at:
