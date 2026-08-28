@@ -17,6 +17,7 @@ from .work_state import read_state, write_state, get_track, create_track, create
 from .conductor import Conductor, create_pr_review_pipeline
 from .roles import WorkerBrief, ROLES
 from .recovery import StallSignal, FailureType, detect_stall, recover
+from .snapshot_judge import SnapshotJudge, truncate_error_log
 
 __all__ = [
     "Conductor",
@@ -32,4 +33,6 @@ __all__ = [
     "get_track",
     "create_track",
     "create_workstream",
+    "SnapshotJudge",
+    "truncate_error_log",
 ]

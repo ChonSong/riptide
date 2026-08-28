@@ -12,7 +12,9 @@ Catches errors BEFORE engine runs tests or pushes to remote:
 from __future__ import annotations
 
 import ast
+import io
 import re
+import tokenize
 from pathlib import Path
 from typing import Optional
 
@@ -85,7 +87,6 @@ class SnapshotJudge:
                     # Fall back: apply diff in-memory to original
                     source = self._reconstruct_source(file_path)
                     if source is None:
-                        # Cannot reconstruct — report as issue, don't skip
                         issues.append(f"Cannot validate {file_path}: file not found and cannot reconstruct from diff")
                         continue
                 
@@ -98,24 +99,96 @@ class SnapshotJudge:
         """Reconstruct source by applying diff hunks in-memory.
         
         Used when artisan hasn't written to disk yet.
-        Returns None if reconstruction fails.
+        
+        For new files (not in original_files), defaults to empty string
+        so new file content can be validated.
         """
         # Find the original file content from the diff
-        original = self.diff.get("original_files", {}).get(file_path)
-        if original is None:
-            return None
+        # If file is new (not in original_files), default to empty string
+        original = self.diff.get("original_files", {}).get(file_path, "")
         
         # Apply hunks sequentially
         source = original
         for hunk in self.diff.get("hunks", []):
             if hunk.get("file") != file_path:
                 continue
+            
             old_text = hunk.get("old_text", "")
             new_text = hunk.get("new_text", "")
-            if old_text in source:
-                source = source.replace(old_text, new_text, 1)
+            start_line = hunk.get("start_line")
+            
+            if start_line is not None:
+                # Line-number-based application (preferred)
+                source = self._apply_hunk_at_line(source, old_text, new_text, start_line)
+            elif not old_text:
+                # Pure addition (new file or appended content)
+                source = source + new_text
+            else:
+                # Fallback: strict context matching
+                source = self._apply_hunk_strict(source, old_text, new_text)
         
         return source
+    
+    def _apply_hunk_at_line(self, source: str, old_text: str, new_text: str, start_line: int) -> str:
+        """Apply a hunk at a specific line number."""
+        lines = source.splitlines(keepends=True)
+        old_lines = old_text.splitlines(keepends=True)
+        
+        # Convert to 0-indexed
+        idx = start_line - 1
+        
+        # Verify the old text matches at this position
+        if idx < 0 or idx + len(old_lines) > len(lines):
+            return source  # Out of bounds, skip
+        
+        # Check if the lines match
+        for i, old_line in enumerate(old_lines):
+            if lines[idx + i] != old_line:
+                return source  # Mismatch, skip
+        
+        # Apply the hunk
+        new_lines = new_text.splitlines(keepends=True)
+        lines[idx:idx + len(old_lines)] = new_lines
+        return "".join(lines)
+    
+    def _apply_hunk_strict(self, source: str, old_text: str, new_text: str) -> str:
+        """Apply a hunk using strict context matching.
+        
+        Requires at least 2 lines of context to avoid false matches.
+        """
+        if not old_text or not new_text:
+            return source
+        
+        old_lines = old_text.splitlines()
+        source_lines = source.splitlines()
+        
+        # Need at least 2 lines of context for strict matching
+        if len(old_lines) < 2:
+            # For single-line hunks, find first exact match
+            for i in range(len(source_lines)):
+                if source_lines[i] == old_lines[0]:
+                    new_lines = new_text.splitlines()
+                    source_lines[i:i+1] = new_lines
+                    return "\n".join(source_lines)
+            return source
+        
+        # Find the first occurrence of the context lines
+        # Use first 2 and last 2 lines as anchors
+        anchor_start = old_lines[:2]
+        anchor_end = old_lines[-2:]
+        
+        for i in range(len(source_lines) - len(old_lines) + 1):
+            # Check if anchors match at this position
+            if (source_lines[i:i+2] == anchor_start and 
+                source_lines[i+len(old_lines)-2:i+len(old_lines)] == anchor_end):
+                # Full match check
+                if source_lines[i:i+len(old_lines)] == old_lines:
+                    # Apply the hunk
+                    new_lines = new_text.splitlines()
+                    source_lines[i:i+len(old_lines)] = new_lines
+                    return "\n".join(source_lines)
+        
+        return source  # No match found
     
     def _check_findings_addressed(self) -> list[str]:
         """Check that all judge findings have corresponding diff hunks."""
@@ -132,19 +205,15 @@ class SnapshotJudge:
         """Check for placeholder comments using tokenize for Python files.
         
         Uses tokenize.COMMENT to find actual comments only - NOT string
-        literals or docstrings. This avoids false positives like:
-            x = "TODO: fix this"  # string literal, NOT a comment
-            triple-quoted docstrings with TODO in them, NOT a comment
+        literals or docstrings.
         """
         issues = []
         
         for file_path in self.diff.get("modified_files", []):
             if not file_path.endswith(".py"):
-                # Non-Python: use simple string matching on added lines
                 issues.extend(self._check_placeholders_simple(file_path))
                 continue
             
-            # Python: use tokenize to get actual comments only
             try:
                 if Path(file_path).exists():
                     with open(file_path) as f:
@@ -152,10 +221,9 @@ class SnapshotJudge:
                 else:
                     source = self._reconstruct_source(file_path)
                     if source is None:
+                        issues.append(f"Cannot check placeholders in {file_path}: file not found and cannot reconstruct from diff")
                         continue
                 
-                import tokenize
-                import io
                 try:
                     tokens = tokenize.generate_tokens(io.StringIO(source).readline)
                     for tok_type, tok_string, start, end, line in tokens:
@@ -187,11 +255,7 @@ class SnapshotJudge:
         return issues
     
     def _check_broken_patterns(self) -> list[str]:
-        """Check for broken patterns using AST for Python files.
-        
-        Uses AST to detect bare except clauses, avoiding false positives
-        from string literals and docstrings.
-        """
+        """Check for broken patterns using AST for Python files."""
         issues = []
         
         for file_path in self.diff.get("modified_files", []):
@@ -205,26 +269,24 @@ class SnapshotJudge:
                 else:
                     source = self._reconstruct_source(file_path)
                     if source is None:
+                        issues.append(f"Cannot check broken patterns in {file_path}: file not found and cannot reconstruct from diff")
                         continue
                 
                 tree = ast.parse(source, filename=file_path)
                 
                 for node in ast.walk(tree):
-                    # Detect bare except clauses
                     if isinstance(node, ast.ExceptHandler):
-                        if node.type is None:  # bare except:
+                        if node.type is None:
                             issues.append(
                                 f"Bare except clause in {file_path}:{node.lineno}"
                             )
                     
-                    # Detect empty pass blocks (function/class with only pass)
                     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                         if len(node.body) == 1 and isinstance(node.body[0], ast.Pass):
                             issues.append(
                                 f"Empty {node.__class__.__name__} '{node.name}' in {file_path}:{node.lineno}"
                             )
                     
-                    # Detect wildcard imports
                     if isinstance(node, ast.ImportFrom):
                         for alias in node.names:
                             if alias.name == "*":
@@ -264,7 +326,7 @@ def truncate_error_log(raw_output: str, max_chars: int = MAX_ERROR_CONTEXT_CHARS
     Strategy:
     - Strip dependency installation logs
     - Keep first 50 lines and last 100 lines (where tracebacks live)
-    - Hard-cap at max_chars
+    - Hard-cap at max_chars, slicing at newline boundary
     """
     if not raw_output:
         return ""
@@ -296,8 +358,13 @@ def truncate_error_log(raw_output: str, max_chars: int = MAX_ERROR_CONTEXT_CHARS
     
     result = "\n".join(filtered)
     
-    # Hard cap
+    # Hard cap at newline boundary to avoid slicing mid-word
     if len(result) > max_chars:
-        result = result[:max_chars] + "\n... [truncated]"
+        # Find the last newline before max_chars
+        last_newline = result.rfind("\n", 0, max_chars)
+        if last_newline > 0:
+            result = result[:last_newline] + "\n... [truncated]"
+        else:
+            result = result[:max_chars] + "\n... [truncated]"
     
     return result

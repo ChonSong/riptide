@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=64", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [tool.ruff]
 line-length = 100
@@ -22,5 +22,6 @@ ignore = ["E501"]  # line length handled by ruff formatter
 quote-style = "double"
 
 [tool.pytest.ini_options]
-testpaths = ["riptide/tests"]
+testpaths = ["tests"]
 python_files = ["test_*.py"]
+pythonpath = ["."]
