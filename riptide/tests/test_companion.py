@@ -957,3 +957,94 @@ class TestHealProbePlacement:
             companion.run_for_pr(123, "owner", "repo", 42, "title", "author", [])
 
         assert acquire_order == ["acquire", "execute"]
+
+
+class TestBuildTier1Body:
+    """Tests for Companion._build_tier1_body — verifies single checkbox footer behavior."""
+
+    def test_single_checkbox_footer_no_duplication(self):
+        """The checkbox footer should appear exactly once in the body.
+
+        Regression test: _build_tier1_body previously had a duplicate
+        checkbox block at the end that re-rendered without ui_files.
+        """
+        from riptide.companion import Companion
+        from riptide.diff_analyzer import DiffReport
+
+        companion = Companion.__new__(Companion)
+        companion.model = "test"
+        companion.client = MagicMock()
+
+        report = DiffReport(
+            verdict="pass",
+            summary="Test summary",
+            findings=[],
+            stats={"files": 1, "additions": 1, "deletions": 0},
+        )
+
+        body = companion._build_tier1_body(
+            emoji="✨",
+            author="testuser",
+            tldr="Test TL;DR",
+            deterministic_report=report,
+            depth="trivial",
+        )
+
+        # Count checkbox footer occurrences — should be exactly 1
+        # The footer uses "- [ ] markdown checkboxes"
+        checkbox_count = body.count("- [ ]")
+        assert checkbox_count == 3, f"Expected 3 checkbox items (review/fix/relabel), found {checkbox_count}"
+
+    def test_checkbox_footer_includes_proofshot_when_ui_files(self):
+        """When UI files are changed, ProofShot action should be included."""
+        from riptide.companion import Companion
+        from riptide.diff_analyzer import DiffReport
+
+        companion = Companion.__new__(Companion)
+        companion.model = "test"
+        companion.client = MagicMock()
+
+        report = DiffReport(
+            verdict="pass",
+            summary="Test summary",
+            findings=[],
+            stats={"files": 1, "additions": 1, "deletions": 0},
+        )
+
+        body = companion._build_tier1_body(
+            emoji="✨",
+            author="testuser",
+            tldr="Test TL;DR",
+            deterministic_report=report,
+            depth="trivial",
+            ui_files=["src/ui/App.tsx"],
+        )
+
+        assert "ProofShot" in body
+
+    def test_checkbox_footer_excludes_proofshot_without_ui_files(self):
+        """When no UI files are changed, ProofShot action should not be included."""
+        from riptide.companion import Companion
+        from riptide.diff_analyzer import DiffReport
+
+        companion = Companion.__new__(Companion)
+        companion.model = "test"
+        companion.client = MagicMock()
+
+        report = DiffReport(
+            verdict="pass",
+            summary="Test summary",
+            findings=[],
+            stats={"files": 1, "additions": 1, "deletions": 0},
+        )
+
+        body = companion._build_tier1_body(
+            emoji="✨",
+            author="testuser",
+            tldr="Test TL;DR",
+            deterministic_report=report,
+            depth="trivial",
+            ui_files=None,
+        )
+
+        assert "ProofShot" not in body

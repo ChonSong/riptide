@@ -292,3 +292,46 @@ class TestBuildTier1Body:
         assert "trivial" in body
         # Trivial footer says "no LLM enrichment needed" — that's expected
         assert "enrichment in progress" not in body
+
+
+class TestBuildTier1BodyCheckboxSingleFooter:
+    """Regression test for the duplicate checkbox footer bug."""
+
+    def _make_companion(self):
+        """Create a minimal Companion instance for testing."""
+        from riptide.companion import Companion
+        with patch.object(Companion, '__init__', lambda self, *a, **kw: None):
+            c = Companion.__new__(Companion)
+            c.enable_deterministic = True
+        return c
+
+    def _make_report(self, verdict="review", findings=None):
+        """Create a mock deterministic report."""
+        from riptide.diff_analyzer import DiffReport, Finding
+        return DiffReport(
+            verdict=verdict,
+            findings=findings or [Finding(category="structure", severity="warning", message="Test finding")],
+        )
+
+    def test_build_tier1_body_single_checkbox_footer(self):
+        """_build_tier1_body produces exactly one checkbox footer.
+
+        Regression test: earlier code had a duplicate checkbox block
+        at the end of _build_tier1_body that would add a second footer
+        without ui_files. The duplicate was removed — verify only one
+        checkbox block appears.
+        """
+        c = self._make_companion()
+        report = self._make_report()
+        body = c._build_tier1_body(
+            emoji="🤖", author="testuser", tldr="Test TLDR",
+            deterministic_report=report, ui_files=None,
+        )
+
+        # Count checkbox blocks — should be exactly one per action
+        checkbox_count = body.count("- [ ]")
+        actions = c._get_checkbox_actions(ui_files=None)
+        expected_count = len(actions)
+        assert checkbox_count == expected_count, (
+            f"Expected {expected_count} checkboxes (one per action), got {checkbox_count}"
+        )

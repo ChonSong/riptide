@@ -1197,10 +1197,6 @@ ELI5:"""
                 elapsed_str = f"{elapsed / 60:.1f}m"
             body += f"\n\n---\n<sub>⏱️ Review posted in {elapsed_str}</sub>"
 
-        # Checkbox footer — interactive button system
-        checkbox_actions = self._get_checkbox_actions()
-        body += f"\n\n{self._build_checkbox_footer(checkbox_actions)}"
-
         return body
 
     def _get_checkbox_actions(self, ui_files=None):
