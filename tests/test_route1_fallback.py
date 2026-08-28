@@ -268,6 +268,12 @@ class TestBuildTier1Body:
         )
         assert "Review" in body
         assert "testuser" in body
+        # Checkbox footer must be present
+        assert "[ ] 🔍 Trigger review" in body
+        assert "[ ] 🛠 Fix issues" in body
+        assert "[ ] 🏷️ Relabel" in body
+        # Without UI files, "visual" should NOT be in actions
+        assert "visual" not in body
 
     def test_build_tier1_body_with_ui_files(self):
         """_build_tier1_body works when ui_files is provided."""
@@ -280,6 +286,8 @@ class TestBuildTier1Body:
         )
         assert "Review" in body
         assert "testuser" in body
+        # With UI files, "visual" action MUST be added (as ProofShot)
+        assert "[ ] 📸 ProofShot" in body
 
     def test_build_tier1_body_trivial_depth(self):
         """_build_tier1_body with trivial depth doesn't promise enrichment."""
