@@ -484,7 +484,10 @@ class TestSpawnSelfHeal:
 class TestDeterministicAnalysis:
     """Tests for the deterministic analysis integration in Companion."""
 
-    def test_skip_comment_when_no_actionable_findings(self, mock_ollama):
+    def test_posts_pass_confirmation_when_no_actionable_findings(self, mock_ollama):
+        """No findings still posts a pass confirmation carrying the CI gate
+        marker (`## Review:`), otherwise 'Riptide Review Required' deadlocks
+        every clean PR. Regression: the body previously lacked that marker."""
         companion = make_companion()
         companion.enable_deterministic = True
         companion.enable_graphify = False
@@ -502,8 +505,15 @@ class TestDeterministicAnalysis:
                 "feat: trivial change", "author",
                 [{"filename": "README.md", "patch": "+# Hello", "additions": 1, "deletions": 0, "status": "modified"}]
             )
-        # Should NOT post a comment when no actionable findings
-        companion.client.post_pr_comment.assert_not_called()
+        # Exactly one comment, and it must satisfy the CI gate's marker check
+        companion.client.post_pr_comment.assert_called_once()
+        body = companion.client.post_pr_comment.call_args[0][4]
+        assert "## Review:" in body
+        assert "No findings" in body
+        assert "Verdict:** pass" in body
+        # No table rows with 🔴/🟡 — the gate treats this as clean
+        assert "🔴" not in body
+        assert "🟡" not in body
 
     def test_fallback_to_llm_when_analyzer_raises(self, mock_ollama):
         companion = make_companion()
@@ -678,7 +688,8 @@ class TestTwoTierResponse:
         companion._set_last_sha.assert_not_called()
 
     def test_two_tier_skips_when_no_actionable_findings(self, mock_ollama):
-        """When deterministic report has no findings, neither Tier 1 nor Tier 2 runs."""
+        """When deterministic report has no findings, Tier 2 enrichment never runs.
+        Only the single pass-confirmation comment is posted (no Tier 1 PATCH)."""
         companion = make_companion()
         companion.enable_deterministic = True
         companion.enable_graphify = False
@@ -698,7 +709,8 @@ class TestTwoTierResponse:
                 [{"filename": "README.md", "patch": "+# Hello", "additions": 1, "deletions": 0, "status": "modified"}]
             )
 
-        companion.client.post_pr_comment.assert_not_called()
+        # Pass confirmation posted, but no enrichment PATCH (no two-tier flow)
+        companion.client.post_pr_comment.assert_called_once()
         companion.client.update_pr_comment.assert_not_called()
 
     def test_two_tier_not_used_when_deterministic_disabled(self, mock_ollama):
