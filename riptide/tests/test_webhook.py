@@ -8,6 +8,33 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 
+class FakeGhCliClient:
+    """Fake gh CLI client that validates method signatures match GhCliClient."""
+
+    def __init__(self):
+        self.posted = []
+
+    def post_pr_comment(self, installation_id, owner, repo, pr_number, body):
+        self.posted.append(
+            {
+                "installation_id": installation_id,
+                "owner": owner,
+                "repo": repo,
+                "pr_number": pr_number,
+                "body": body,
+            }
+        )
+        return {"id": 1, "html_url": "https://example.com"}
+
+    def post_inline_comment(
+        self, installation_id, owner, repo, pr_number, body, commit_id, path, line, side="RIGHT"
+    ):
+        return {"id": 2}
+
+    def get_installation_repos(self, installation_id):
+        return []
+
+
 def _make_payload(pr_number=42, merged=True, base_ref="main"):
     """Create a test payload with all required fields."""
     return {
@@ -178,3 +205,77 @@ class TestDefaultBranch:
         result = asyncio.run(handle_pull_request(payload, "test-delivery-id"))
 
         mock_popen.assert_not_called()
+
+
+class TestRoute2GhCliFallback:
+    """Tests for Route 2 @riptide-bot command gh CLI fallback."""
+
+    def _make_issue_comment_payload(self, body, installation_id=None):
+        """Create a test issue_comment payload."""
+        return {
+            "action": "created",
+            "comment": {
+                "id": 123,
+                "body": body,
+                "user": {"login": "testuser", "type": "User"},
+            },
+            "issue": {
+                "number": 185,
+                "pull_request": {"href": "https://api.github.com/repos/ChonSong/riptide/pulls/185"},
+            },
+            "repository": {"full_name": "ChonSong/riptide", "name": "riptide"},
+            "installation": {"id": installation_id} if installation_id else {},
+            "sender": {"login": "testuser"},
+        }
+
+    @patch("riptide.interaction_handler.handle_command")
+    @patch("riptide.webhook.get_gh_cli_client")
+    def test_route2_gh_cli_fallback(self, mock_gh_cli, mock_handle):
+        """Route 2 falls back to gh CLI when installation_id is None."""
+        from riptide.webhook import handle_issue_comment
+
+        mock_gh_cli.return_value = FakeGhCliClient()
+        mock_handle.return_value = "🧠 Review triggered"
+
+        payload = self._make_issue_comment_payload("@riptide-bot review")
+        result = asyncio.run(handle_issue_comment(payload, "test-delivery-id"))
+
+        mock_handle.assert_called_once()
+        assert result.status_code == 200
+        assert len(mock_gh_cli.return_value.posted) == 1
+        assert mock_gh_cli.return_value.posted[0]["body"] == "🧠 Review triggered"
+
+    @patch("riptide.interaction_handler.handle_command")
+    def test_route2_skipped_no_installation_no_gh_cli(self, mock_handle):
+        """Route 2 skipped when no installation and gh CLI unavailable."""
+        from riptide.webhook import handle_issue_comment
+
+        with patch("riptide.webhook.get_gh_cli_client", return_value=None):
+            payload = self._make_issue_comment_payload("@riptide-bot review")
+            result = asyncio.run(handle_issue_comment(payload, "test-delivery-id"))
+
+        mock_handle.assert_not_called()
+        assert result.status_code == 200
+
+    @patch("riptide.webhook.get_gh_cli_client")
+    @patch("riptide.webhook.github_client")
+    def test_route1_app_api_failure_falls_back_to_gh_cli(self, mock_gh_api, mock_gh_cli):
+        """Route 1 companion reply falls back to gh CLI when App API fails."""
+        from riptide.webhook import handle_issue_comment
+
+        fake_cli = FakeGhCliClient()
+        mock_gh_cli.return_value = fake_cli
+        mock_gh_api.return_value.post_pr_comment.side_effect = RuntimeError("App API 500")
+
+        companion_mock = MagicMock()
+        companion_mock.handle_comment.return_value = "🤖 Companion reply"
+        with patch("riptide.webhook.get_companion", return_value=companion_mock):
+            payload = self._make_issue_comment_payload(
+                "@riptide-bot skip", installation_id=12345
+            )
+            result = asyncio.run(handle_issue_comment(payload, "test-delivery-id"))
+
+        assert result.status_code == 200
+        mock_gh_api.return_value.post_pr_comment.assert_called_once()
+        assert len(fake_cli.posted) == 1
+        assert fake_cli.posted[0]["body"] == "🤖 Companion reply"
