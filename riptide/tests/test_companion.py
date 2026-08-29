@@ -959,8 +959,12 @@ class TestHealProbePlacement:
         assert acquire_order == ["acquire", "execute"]
 
 
-class TestBuildTier1Body:
-    """Tests for Companion._build_tier1_body — verifies single checkbox footer behavior."""
+class TestBuildTier1BodyFooter:
+    """Tests for Companion._build_tier1_body checkbox footer behavior.
+
+    Verifies single footer rendering and ProofShot conditional inclusion.
+    These are separate from the ui_files parameter tests in test_route1_fallback.py.
+    """
 
     def test_single_checkbox_footer_no_duplication(self):
         """The checkbox footer should appear exactly once in the body.

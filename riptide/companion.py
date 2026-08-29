@@ -742,10 +742,23 @@ class Companion:
 
         # 1.4: Only post when there's something actionable to say
         if deterministic_report and not deterministic_report.has_actionable:
+            # Post a "no findings" confirmation so the review gate can verify completion
             logger.info(
-                "No actionable findings for %s#%d — skipping comment",
+                "No actionable findings for %s#%d — posting pass confirmation",
                 full_name, pr_number,
             )
+            try:
+                if installation_id and self.client:
+                    body = (
+                        f"✅ **Riptide Review Complete — No findings**\n\n"
+                        f"Deterministic analysis found no issues with this PR.\n\n"
+                        f"**Depth:** {getattr(self, '_depth', 'standard')} | "
+                        f"**Verdict:** pass"
+                    )
+                    self.client.post_pr_comment(installation_id, owner, repo, pr_number, body)
+                    logger.info("Posted pass confirmation for %s#%d", full_name, pr_number)
+            except Exception as e:
+                logger.error("Failed to post pass confirmation: %s", e)
             return
 
         # Detect UI files for ProofShot section
