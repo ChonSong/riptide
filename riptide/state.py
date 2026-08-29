@@ -85,7 +85,7 @@ class StateStore:
             id TEXT PRIMARY KEY, pr_number INTEGER, tier TEXT, status TEXT,
             created_at REAL, completed_at REAL)""")
         conn.execute("""CREATE TABLE IF NOT EXISTS deliveries (
-            delivery_id TEXT PRIMARY KEY, received_at REAL, status TEXT NOT NULL DEFAULT 'processing')""")
+            delivery_id TEXT PRIMARY KEY, received_at REAL)""")
         conn.execute("""CREATE TABLE IF NOT EXISTS processed_comments (
             comment_id INTEGER PRIMARY KEY, processed_at TEXT NOT NULL,
             result TEXT, pending_response TEXT)""")
@@ -137,11 +137,6 @@ class StateStore:
             except sqlite3.OperationalError as e:
                 if "duplicate column name" not in str(e):
                     raise
-            try:
-                conn.execute("ALTER TABLE deliveries ADD COLUMN status TEXT NOT NULL DEFAULT 'processing'")
-            except sqlite3.OperationalError as e:
-                if "duplicate column name" not in str(e):
-                    raise
 
         if version < self.SCHEMA_VERSION:
             conn.execute("DELETE FROM schema_version")
@@ -172,11 +167,11 @@ class StateStore:
                 "SELECT status, received_at FROM deliveries WHERE delivery_id = ?",
                 (delivery_id,),
             ).fetchone()
-            if row and row[0] == 'processing' and (time.time() - row[1]) > DELIVERY_STALE_TTL:
+            if row and row[0] == 'processing' and (now - row[1]) > DELIVERY_STALE_TTL:
                 # Stale — re-reserve by updating received_at
                 conn.execute(
                     "UPDATE deliveries SET received_at = ?, status = 'processing' WHERE delivery_id = ?",
-                    (time.time(), delivery_id),
+                    (now, delivery_id),
                 )
                 conn.commit()
                 return True
@@ -186,36 +181,6 @@ class StateStore:
                 log.warning(f"Database locked during delivery reservation: {delivery_id}")
                 return False
             raise
-        finally:
-            self._release_lock()
-
-    @retry_db_fast
-    def mark_delivery_done(self, delivery_id: str):
-        conn = self._get_conn()
-        self._acquire_lock()
-        try:
-            cur = conn.execute(
-                "UPDATE deliveries SET status = 'done' WHERE delivery_id = ?",
-                (delivery_id,),
-            )
-            if cur.rowcount == 0:
-                log.warning("mark_delivery_done: delivery %s not found", delivery_id)
-            conn.commit()
-        finally:
-            self._release_lock()
-
-    @retry_db_fast
-    def mark_delivery_failed(self, delivery_id: str):
-        conn = self._get_conn()
-        self._acquire_lock()
-        try:
-            cur = conn.execute(
-                "UPDATE deliveries SET status = 'failed' WHERE delivery_id = ?",
-                (delivery_id,),
-            )
-            if cur.rowcount == 0:
-                log.warning(f"mark_delivery_failed: delivery {delivery_id} not found")
-            conn.commit()
         finally:
             self._release_lock()
 
@@ -308,20 +273,6 @@ class StateStore:
             (time.time(), cutoff),
         )
         conn.commit()
-
-    def cleanup_old_deliveries(self, max_age_seconds: int = 86400):
-        """Remove completed/folder deliveries older than max_age_seconds."""
-        conn = self._get_conn()
-        cutoff = time.time() - max_age_seconds
-        self._acquire_lock()
-        try:
-            conn.execute(
-                "DELETE FROM deliveries WHERE status IN ('done', 'failed') AND received_at < ?",
-                (cutoff,),
-            )
-            conn.commit()
-        finally:
-            self._release_lock()
 
     def recover_pending_work(self) -> list[dict]:
         """Recover pending work after process restart.
