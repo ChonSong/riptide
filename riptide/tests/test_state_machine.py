@@ -154,7 +154,7 @@ class TestDeliveryStateMachine:
         with patch("logging.Logger.warning") as mock_warn:
             store.mark_delivery_done("nonexistent-delivery")
             mock_warn.assert_called_once()
-            assert "not found" in mock_warn.call_args[0][1]
+            assert "not found" in mock_warn.call_args[0][0]
 
     def test_mark_delivery_failed(self, store):
         """A delivery can be marked failed."""
@@ -169,7 +169,7 @@ class TestDeliveryStateMachine:
         with patch("logging.Logger.warning") as mock_warn:
             store.mark_delivery_failed("nonexistent-delivery")
             mock_warn.assert_called_once()
-            assert "not found" in mock_warn.call_args[0][1]
+            assert "not found" in mock_warn.call_args[0][0]
 
     def test_stale_delivery_rereservable(self, store):
         """A delivery stuck in 'processing' becomes re-reservable after TTL."""
