@@ -258,9 +258,8 @@ async def github_webhook(request: Request) -> Response:
         return Response(status_code=200)
 
     if not verify_webhook_signature(body, signature, WEBHOOK_SECRET):
-        # Graceful failure: log warning, return 200, let cron poller cover
-        log.warning(f"[{delivery_id}] Invalid webhook signature from {request.client} — returning 200, cron poller will pick up PR")
-        return Response(status_code=200)
+        log.warning(f"[{delivery_id}] Invalid webhook signature from {request.client}")
+        raise HTTPException(status_code=401, detail="Invalid signature")
 
     payload = json.loads(body)
     log.info(f"[{delivery_id}] {event} event received")
@@ -544,44 +543,21 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
     # Route 1: Companion skip/resume commands
     companion = get_companion()
     if companion:
-        try:
-            result = companion.handle_comment(
-                installation_id, owner, repo_name, pr_number, body, commenter
-            )
-            if result:
-                if installation_id:
-                    try:
-                        github_client().post_pr_comment(
-                            installation_id, owner, repo_name, pr_number, result
-                        )
-                    except Exception as e:
-                        log.exception(f"[{delivery_id}] Could not post companion reply via App API — trying gh CLI fallback")
-                        gh_cli = get_gh_cli_client()
-                        if gh_cli:
-                            try:
-                                gh_cli.post_pr_comment(
-                                    installation_id, owner, repo_name, pr_number, result
-                                )
-                            except Exception as e2:
-                                log.exception(f"[{delivery_id}] gh CLI fallback also failed: {e2}")
-                        else:
-                            log.warning(f"[{delivery_id}] No gh CLI client available for fallback")
-                return Response(status_code=200)
-        except Exception as e:
-            log.exception(f"[{delivery_id}] Companion error (non-fatal)")
-            # Fall through to Route 2 — companion crash must not block review commands
+        result = companion.handle_comment(
+            installation_id, owner, repo_name, pr_number, body, commenter
+        )
+        if result:
+            if installation_id:
+                try:
+                    github_client().post_pr_comment(
+                        installation_id, owner, repo_name, pr_number, result
+                    )
+                except Exception as e:
+                    log.warning(f"[{delivery_id}] Could not post companion reply: {e}")
+            return Response(status_code=200)
 
     # Route 2: Unified @riptide-bot command router
-    # Support gh CLI fallback for repos without App installation
-    route2_gh_cli = None
-    if not installation_id and body and "@riptide-bot" in body.lower():
-        repo_full = repo.get("full_name", "")
-        if repo_full in WATCHED_REPOS:
-            route2_gh_cli = get_gh_cli_client()
-            if route2_gh_cli:
-                log.info(f"[{delivery_id}] Route 2: no installation ID for {repo_full} — using gh CLI fallback")
-
-    if (installation_id or route2_gh_cli) and body and "@riptide-bot" in body.lower():
+    if installation_id and body and "@riptide-bot" in body.lower():
         from riptide.interaction_handler import handle_command
 
         try:
@@ -597,17 +573,12 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
                 commenter=commenter,
             )
             if response:
-                if installation_id:
-                    client = github_client()
-                    client.post_pr_comment(
-                        installation_id, owner, repo_name, pr_number, response
-                    )
-                elif route2_gh_cli:
-                    route2_gh_cli.post_pr_comment(
-                        installation_id, owner, repo_name, pr_number, response
-                    )
+                client = github_client()
+                client.post_pr_comment(
+                    installation_id, owner, repo_name, pr_number, response
+                )
         except Exception as e:
-            log.exception(f"[{delivery_id}] Command handler failed")
+            log.error(f"[{delivery_id}] Command handler failed: {e}")
 
     return Response(status_code=200)
 
