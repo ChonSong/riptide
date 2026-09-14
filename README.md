@@ -30,25 +30,40 @@ python3 -m pytest riptide/tests/ -q
 ### Data Flow
 
 ```text
-GitHub Webhook → FastAPI /webhook → verify_signature()
-                                          │
-                                          ▼
-                              StateStore.reserve_delivery() (dedup)
-                                          │
-                          ┌───────────────┼───────────────┐
-                          ▼               ▼               ▼
-                   handle_pull_request()  handle_issue_comment()  cron poll
-                          │               │               │
-                          ▼               ▼               ▼
-                   Companion          Hermes cron      Hermes cron
-                   posts TL;DR        deep-think       deep-think
+riptide/
+├── webhook.py         # FastAPI server, GitHub webhook handler
+├── companion.py       # Bot 1: TL;DR + ELI5 + timing footer
+├── deepthink.py       # Bot 2: Cron + @riptide-bot review spawner
+├── proofshotter.py    # Bot 3: Visual verification (GIF/screenshots)
+├── fixer.py           # Bot 2b: Autonomous fix via @riptide-bot fix
+├── poller.py          # Cron entry point for Bot 2/3 discovery
+├── state.py           # SQLite-backed state (dedup, jobs, reservations)
+├── labeler.py         # GitHub label engine
+├── assemble_review.py # Structured findings assembly + sign-off
+├── diff_analyzer.py   # Deterministic complexity/defect scan
+├── depth.py           # ReviewDepth enum + classifier
+├── pipeline/          # Conductor review pipeline, one module per role
+│   ├── conductor.py   #   workstream orchestration, canonical output paths
+│   ├── probe.py       #   ws-1 PR context
+│   ├── judge.py       #   ws-2 findings (stamps `judged: true`)
+│   ├── artisan.py     #   ws-3 diagram
+│   ├── engine.py      #   ws-4 artifact upload
+│   ├── scribe.py      #   ws-5 posts the review
+│   └── warden.py      #   verification
+├── grafiphy/          # Excalidraw diagram rendering (imported by deepthink)
+├── graphify_ingest/   # Graph ingestion (imported by pipeline/artisan)
+├── docs/REVIEW-CONTRACT.md  # What a review is; gate/reservation/attribution rules
+└── docs/archive/      # Superseded planning docs (historical)
 ```
 
 ### Review Command
 
 Comment `@riptide-bot review` on any PR to trigger an on-demand deep-think session.
 
-**Dedup logic:** Same commit SHA within 24h → blocked. New commit → always allowed.
+**Dedup logic:** an on-demand `review` always spawns; the poller skips a PR only when the
+same SHA was reviewed in the last 24h **and** a review comment was actually delivered.
+A stale reservation is released automatically, so a failed spawn never blocks the next
+trigger. See [docs/REVIEW-CONTRACT.md](docs/REVIEW-CONTRACT.md).
 
 ## Fix Command
 
@@ -73,16 +88,20 @@ The session always posts a summary comment with per-finding verdicts, test resul
 
 ## Configuration
 
+Authoritative source: [`.env.example`](.env.example) for the key set, and the deployed `.env`
+for the live values — check it rather than assuming, since the reviewing model is printed in
+each review's sign-off. Code defaults are fallbacks for a missing `.env` only.
+
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `GITHUB_APP_ID` | — | GitHub App ID |
 | `GITHUB_PRIVATE_KEY_PATH` | — | App private key |
 | `RIPTIDE_POLLER_REPOS` | — | Comma-separated repos to poll |
 | `RIPTIDE_DEPLOY_BRANCH` | `main` | Branch that triggers auto-deploy |
-| `RIPTIDE_DEEPTHINK_MODEL` | `LongCat-2.0` | Model for deep-think sessions |
-| `RIPTIDE_DEEPTHINK_PROVIDER` | `longcat` | Provider for deep-think |
-| `RIPTIDE_FIX_MODEL` | `LongCat-2.0` | Model for fix sessions |
-| `RIPTIDE_FIX_PROVIDER` | `longcat` | Provider for fix |
+| `RIPTIDE_DEEPTHINK_MODEL` | deployed `.env` (`deepseek-v4-flash`) | Model for deep-think sessions |
+| `RIPTIDE_DEEPTHINK_PROVIDER` | deployed `.env` (`deepseek`) | Provider for deep-think |
+| `RIPTIDE_FIX_MODEL` | deployed `.env` (`deepseek-v4-flash`) | Model for fix sessions |
+| `RIPTIDE_FIX_PROVIDER` | deployed `.env` (`deepseek`) | Provider for fix |
 | `RIPTIDE_WORKSPACE_ROOT` | `/home/sc/workspace` | Root path inserted into spawned session PYTHONPATH |
 | `RIPTIDE_OUR_USERNAME` | `ChonSong` | GitHub username for push eligibility / auth gate |
 | `RIPTIDE_OUR_ORG` | `ChonSong` | GitHub org for ownership checks |
@@ -122,12 +141,14 @@ riptide/
 
 ## Docs
 
-- [HANDOFF.md](HANDOFF.md) — Session continuity, current state, next steps
-- [VISION-ROADMAP.md](VISION-ROADMAP.md) — Long-term roadmap and pillars
-- [COMPETITOR-PATTERNS.md](COMPETITOR-PATTERNS.md) — Analysis of CodeRabbit/Greptile patterns
+- [docs/REVIEW-CONTRACT.md](docs/REVIEW-CONTRACT.md) — Review markers, CI gate, reservations, model attribution
 - [AGENTS.md](AGENTS.md) — Rules for AI agents editing this codebase
+- [.env.example](.env.example) — Authoritative environment key set
+- [skills/](skills/README.md) — Agent skills driving review/fix behaviour (symlinked into `~/.hermes/skills`)
+- [COMPETITOR-PATTERNS.md](COMPETITOR-PATTERNS.md) — Analysis of CodeRabbit/Greptile patterns
 - [CHANGELOG.md](CHANGELOG.md) — Recent changes
 - [SECURITY.md](SECURITY.md) — Security policy and vulnerability reporting
+- [docs/archive/](docs/archive/README.md) — Superseded planning docs (PLAN, HANDOFF, VISION-ROADMAP, …)
 
 
 

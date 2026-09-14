@@ -2,14 +2,51 @@
 
 ## [Unreleased]
 
-### Added
-- SHA-aware dedup guard: `@riptide-bot review` blocked only if same commit SHA reviewed in last 24h
-- Honest messaging: distinguishes "already pending" from spawn failures
-- Post-deploy smoke test in `scripts/deploy.sh`
+### Fixed (2026-09-14)
 
-### Changed
-- Simplified `riptide-review-required` CI gate to single rule: findings → require follow-up commit
-- Deep-think prompts written to temp file to bypass Hermes safety filter
+- **Reviews could not satisfy the CI gate.** Findings-bearing reviews now lead with
+  `## Review:` and include the 🔴/🟡 severity table; previously the gate found no
+  recognised marker and failed every such review.
+- **Stale review reservations blocked all re-reviews.** `_release_finished_reservations()`
+  releases when the job completed/vanished, has no further runs, or the PR already
+  carries a delivered review. Symptom: every `@riptide-bot review` answered
+  "Already pending" and spawned nothing.
+- **Wrong model attribution in review sign-offs.** The reviewing model/provider travels
+  with the pipeline into the scribe instead of being read from the spawned session's
+  environment (spawned sessions have no `.env`), so sign-offs named `custom:LongCat-2.0`
+  on reviews that ran `deepseek-v4-flash`.
+- **Conductor workstreams shared `/tmp` paths**, so concurrent reviews could post one
+  PR's findings to another; every workstream now writes a canonical per-PR path.
+- **False-clean reviews.** The judge fails loudly on a missing context file and stamps
+  `judged: true`; the scribe refuses to post empty findings as a clean pass.
+- **Nesting false positives in `diff_analyzer`** — depth now comes from statement lines
+  with bracket-aware continuation detection, not raw indentation.
+- **Cron poller scripts** now source the repo `.env` (they were pinning the code
+  defaults instead of the configured provider).
+- **`@riptide-bot fix`** reads the current review format (`## Review:` + severity table)
+  and no longer treats a Companion pass as findings.
+
+### Added (2026-09-14)
+
+- `docs/REVIEW-CONTRACT.md` — review markers, gate behaviour, reservation lifecycle,
+  model attribution, and how to verify each.
+- Tests for pipeline wiring, model attribution and the diff analyzer (+31 tests, no
+  regressions against the ~53 pre-existing failures).
+
+### Changed (2026-09-14)
+
+- Documentation audit: superseded planning docs moved to `docs/archive/` with banners;
+  corrected model/provider, Ollama port, and path drift in `README.md`, `AGENTS.md`,
+  `.env.example` and `skills/`; removed the duplicate root `SKILL.md` and archived the
+  Huey ops guide for a subsystem that was never implemented.
+
+### Earlier unreleased work
+
+- Post-deploy smoke test in `scripts/deploy.sh`.
+- `riptide-review-required` gate reduced to the single follow-up-commit rule.
+- Deep-think prompts written to a temp file to bypass the Hermes safety filter.
+- (Superseded) a blanket "same SHA within 24h" block for `@riptide-bot review`: the
+  manual command now always spawns, and delivered-review verification governs the poller.
 
 ## [0.14.0] - 2026-08-13
 
