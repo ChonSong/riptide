@@ -98,22 +98,32 @@ def assemble_review_body(
     # Build parts
     parts = []
 
-    # 1. Verdict line (first)
-    parts.append(_build_verdict(criticals, warnings))
+    # 1. Verdict line (first), carrying the CI gate marker. The
+    # `riptide-review-required` workflow only counts a comment as a review when
+    # the body contains '## 🔍 Findings', '## 🎯 Summary' or '## Review:' —
+    # without the marker a findings-bearing review could not gate a merge.
+    parts.append(f"## Review: {_build_verdict(criticals, warnings)}")
 
-    # 2. Numbered findings (cap at 5 visible)
+    # 2. Numbered findings (cap at 5 visible) — human-readable first
     numbered = _build_numbered_findings(findings, time_estimates)
     parts.extend(numbered)
 
-    # 3. Diagram link (if any)
+    # 3. Severity table — the gate reads 🔴/🟡 table rows to decide whether a
+    # follow-up commit is required before merge. Kept below the readable
+    # findings, and omitted entirely when there is nothing to gate on.
+    severity_table = _build_severity_table(criticals, warnings)
+    if severity_table:
+        parts.append(f"\n{severity_table}")
+
+    # 4. Diagram link (if any)
     if diagram_url:
         parts.append(f"\n[Diagram]({diagram_url})")
 
-    # 4. Next action footer
+    # 5. Next action footer
     next_action = _build_next_action(findings, time_estimates)
     parts.append(f"\n{next_action}")
 
-    # 5. Sign-off with timing
+    # 6. Sign-off with timing
     signoff = _build_signoff(model, provider, triggered_at, pr_created_at)
     parts.append(signoff)
 
@@ -133,7 +143,13 @@ def _build_success_footer(
     pr_created_at: Optional[str],
 ) -> str:
     """Build a clean-PR success message."""
-    lines = ["✅ No critical or warning findings. Ready to merge.", "", "Next: Merge when ready."]
+    lines = [
+        "## Review: ✅ No findings",
+        "",
+        "✅ No critical or warning findings. Ready to merge.",
+        "",
+        "Next: Merge when ready.",
+    ]
 
     elapsed_str = _compute_elapsed(triggered_at, pr_created_at)
     if elapsed_str:
@@ -173,6 +189,28 @@ def _build_verdict(criticals: list[dict], warnings: list[dict]) -> str:
         verdict += f" Fix: {reason}."
 
     return verdict
+
+
+def _build_severity_table(criticals: list[dict], warnings: list[dict]) -> str:
+    """Build a 🔴/🟡 severity table for the critical/warning findings.
+
+    The `riptide-review-required` CI gate scans the review body for table rows
+    containing 🔴 or 🟡 to decide whether the PR needs a follow-up commit before
+    merge, so those findings must appear as rows. Returns "" when there are
+    none — a clean review must not trip the gate.
+    """
+    rows: list[tuple[str, dict]] = [("🔴", f) for f in criticals]
+    rows += [("🟡", f) for f in warnings]
+    if not rows:
+        return ""
+
+    lines = ["| | Finding | File |", "|---|---|---|"]
+    for emoji, finding in rows:
+        title = str(finding.get("title") or "issue").replace("|", "\\|")
+        ref = _format_file_ref(finding)
+        cell = f"`{ref}`" if ref else "—"
+        lines.append(f"| {emoji} | {title} | {cell} |")
+    return "\n".join(lines)
 
 
 def _build_numbered_findings(

@@ -279,6 +279,60 @@ class TestComplexity:
         complexity_findings = [f for f in report.findings if f.category == "complexity"]
         assert any("nesting" in f.message.lower() for f in complexity_findings)
 
+    def test_multiline_literal_is_not_nesting(self, analyzer):
+        """Regression: continuation lines inside a literal were counted as nesting.
+
+        A function holding a multi-line dict/list literal (the shape reported as
+        "nesting depth 5" on real code) must not be flagged; the literal's
+        indentation is formatting, not control-flow nesting.
+        """
+        patch = (
+            "+def build():\n"
+            "+    mapping = {\n"
+            '+        "a": 1,\n'
+            '+        "b": [\n'
+            "+            2,\n"
+            "+        ],\n"
+            "+    }\n"
+            "+    if mapping:\n"
+            "+        return mapping\n"
+        )
+        files = [make_file("literal.py", patch, additions=9)]
+        report = analyzer.analyze(files)
+        nesting = [
+            f for f in report.findings
+            if f.category == "complexity" and "nesting" in f.message.lower()
+        ]
+        assert nesting == [], [f.message for f in nesting]
+
+    def test_visual_continuation_is_not_nesting(self, analyzer):
+        """A line that continues an expression must not add a nesting level."""
+        patch = (
+            "+def total(items):\n"
+            "+    value = (\n"
+            "+        1\n"
+            "+        + 2\n"
+            "+    )\n"
+            "+    if value:\n"
+            "+        return value\n"
+        )
+        files = [make_file("cont.py", patch, additions=7)]
+        report = analyzer.analyze(files)
+        nesting = [
+            f for f in report.findings
+            if f.category == "complexity" and "nesting" in f.message.lower()
+        ]
+        assert nesting == [], [f.message for f in nesting]
+
+    def test_bracket_delta_ignores_strings_and_comments(self, analyzer):
+        # The ')' inside the string must not close the brace: balanced input
+        # yields 0 (without quote handling it would be -1).
+        assert analyzer._bracket_delta("x = {'a': ')'}") == 0
+        assert analyzer._bracket_delta("y = (1, 2)") == 0
+        assert analyzer._bracket_delta("    # ( [ {") == 0
+        assert analyzer._bracket_delta("z = foo(") == 1
+        assert analyzer._bracket_delta(")") == -1
+
     def test_short_function_no_warning(self, analyzer):
         files = [make_file("small.py", SIMPLE_PATCH, additions=2)]
         report = analyzer.analyze(files)

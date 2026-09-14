@@ -750,7 +750,7 @@ class Companion:
             try:
                 if installation_id and self.client:
                     body = (
-                        f"## Review: ✅ No findings\n\n"
+                        f"## Riptide Pass: ✅ No findings\n\n"
                         f"**Riptide Review Complete — No findings**\n\n"
                         f"Deterministic analysis found no issues with this PR.\n\n"
                         f"**Depth:** {getattr(self, '_depth', 'standard')} | "

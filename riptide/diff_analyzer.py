@@ -94,6 +94,13 @@ MAX_NESTING_DEPTH = 4        # Warn at 4+ levels
 MAX_FUNCTION_LINES = 50      # Warn at 50+ line functions
 MAX_CONDITIONS = 5           # Warn at 5+ conditions in one block
 
+# Line starts that continue an expression rather than open a new block, so they
+# must not be counted as extra nesting depth. Punctuation only: keywords like
+# `if`/`else`/`return` start real statements (and real nesting).
+CONTINUATION_PREFIXES = (
+    ")", "]", "}", ",", ".", ":", "=", "+", "-", "*", "/", "%", "|", "&", "~",
+)
+
 
 # ── Error handling patterns ─────────────────────────────────────────────────
 
@@ -231,11 +238,20 @@ class DiffAnalyzer:
         func_start = 0
         func_lines = []
         nesting_stack = []
+        bracket_depth = 0  # carried across lines: >0 means we are inside a literal/call
 
         for i, line in enumerate(added_lines):
             stripped = line.strip()
+            bracket_delta = self._bracket_delta(line)
             if not stripped or stripped.startswith("#"):
+                bracket_depth = max(0, bracket_depth + bracket_delta)
                 continue
+
+            # A line is a continuation (not a new nesting level) when it starts
+            # inside an open bracket or is a visual continuation. Counting those
+            # as nesting is what made dict literals and multi-line calls look
+            # like "nesting depth 5".
+            continuation = bracket_depth > 0 or stripped.startswith(CONTINUATION_PREFIXES)
 
             # Detect function/def start
             if stripped.startswith("def ") or stripped.startswith("async def "):
@@ -250,6 +266,7 @@ class DiffAnalyzer:
                 func_lines = [line]
                 nesting_stack = [self._nesting_level(line)]
                 func_start = i
+                bracket_depth = max(0, bracket_depth + bracket_delta)
                 continue
 
             if current_func:
@@ -267,12 +284,13 @@ class DiffAnalyzer:
                     current_func = None
                     func_lines = []
                     nesting_stack = []
+                    bracket_depth = max(0, bracket_depth + bracket_delta)
                     continue
 
                 func_lines.append(line)
 
-                # Track nesting depth
-                if level > 0:
+                # Track nesting depth from statement lines only
+                if level > 0 and not continuation:
                     if nesting_stack and level > nesting_stack[-1]:
                         nesting_stack.append(level)
                     elif nesting_stack and level < nesting_stack[-1]:
@@ -290,6 +308,8 @@ class DiffAnalyzer:
                         # Don't re-report for same function
                         current_func = None
                         func_lines = []
+
+            bracket_depth = max(0, bracket_depth + bracket_delta)
 
         # Check final function
         if current_func and len(func_lines) >= MAX_FUNCTION_LINES:
@@ -426,6 +446,38 @@ class DiffAnalyzer:
             if line.startswith("+") and not line.startswith("+++"):
                 lines.append(line[1:])  # Strip the + prefix
         return lines
+
+    @staticmethod
+    def _bracket_delta(line: str) -> int:
+        """Net bracket change for one line, ignoring strings and comments.
+
+        Used to detect continuation lines: while a bracket is open, a line's
+        indentation reflects formatting, not nesting.
+        """
+        depth = 0
+        quote = None
+        escaped = False
+        for ch in line:
+            if escaped:
+                escaped = False
+                continue
+            if ch == "\\":
+                escaped = True
+                continue
+            if quote:
+                if ch == quote:
+                    quote = None
+                continue
+            if ch in "\"'":
+                quote = ch
+                continue
+            if ch == "#":
+                break
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth -= 1
+        return depth
 
     @staticmethod
     def _nesting_level(line: str) -> int:

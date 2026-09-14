@@ -7,6 +7,7 @@ verifies outputs, and updates state.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from datetime import datetime, timezone
@@ -29,6 +30,37 @@ from .engine import Engine
 from .warden import Warden
 from .scribe import Scribe
 from .ci_verifier import CIVerifier
+
+
+def _canonical_output_path(pr_number: int, role: str, track_id: str = "") -> str:
+    """Per-workstream output path for one review run.
+
+    Producers and consumers must agree on exactly one path per artifact, so the
+    path is derived from (pr_number, role) rather than left to each builder.
+    When the PR number is unknown the track id is used instead: never fall back
+    to a shared "0" path, or concurrent reviews overwrite each other's findings.
+    """
+    suffix = {
+        "probe": "context.json",
+        "judge": "findings.json",
+        "artisan": "review.excalidraw",
+        "engine": "upload.json",
+        "warden": "verification.json",
+        "scribe": "scribe.json",
+        "ci_verifier": "ci.json",
+    }.get(role, f"{role}.json")
+    if pr_number:
+        run = f"pr-{pr_number}"
+    else:
+        digest = hashlib.sha1((track_id or "unknown").encode()).hexdigest()[:10]
+        run = f"track-{digest}"
+    return f"/tmp/riptide-review-{run}-{suffix}"
+
+
+# Roles that publish a file at output_protocol["path"] and can therefore be
+# verified by its existence. artisan/engine/scribe report results in-band, so
+# checking for a file they never write marked successful work as failed.
+_FILE_ARTIFACT_ROLES = {"probe", "judge", "warden", "ci_verifier"}
 
 
 class Conductor:
@@ -64,6 +96,21 @@ class Conductor:
         if not track:
             raise ValueError(f"Track {self.track_id} disappeared during run")
         return track
+
+    def _track_pr_number(self) -> int:
+        """Resolve this track's PR number from any workstream or repo metadata."""
+        for ws_state in (self.track.get("workstreams") or {}).values():
+            pn = ((ws_state or {}).get("inputs") or {}).get("pr_number")
+            if pn:
+                try:
+                    return int(pn)
+                except (TypeError, ValueError):
+                    continue
+        for repo_meta in (self.track.get("repos") or {}).values():
+            pr = (repo_meta or {}).get("pr")
+            if isinstance(pr, int) and pr:
+                return pr
+        return 0
     
     def _run_workstream(self, ws_id: str, ws: dict) -> dict:
         """Run a single workstream."""
@@ -76,7 +123,34 @@ class Conductor:
         # Determine which worker to dispatch
         pipeline = ws.get("pipeline", [])
         role = ws.get("role", "engine")
-        
+
+        # Merge the outputs of workstreams that already ran into this brief's
+        # inputs, so downstream roles read the paths their upstream actually
+        # wrote (context_path, findings_path, ...) instead of a hardcoded path.
+        # Propagated outputs win over static inputs: the static paths in the
+        # pipeline builders are defaults, not fresh values.
+        ws_inputs = dict(ws.get("inputs", {}) or {})
+        propagated: dict = {}
+        for ws_state in (self.track.get("workstreams") or {}).values():
+            outs = (ws_state or {}).get("outputs")
+            if isinstance(outs, dict):
+                propagated.update(outs)
+        inputs = {**ws_inputs, **propagated}
+
+        # Every workstream gets its own output path. Sharing one path made the
+        # probe's output overwrite the judge's (or vice versa), and the Warden
+        # then verified the wrong file.
+        #
+        # The PR number is taken from this workstream's inputs when present, and
+        # otherwise resolved from the track: only the probe/scribe declare it, so
+        # resolving per-workstream would collapse every PR onto the "0" paths
+        # and let concurrent reviews overwrite each other's findings.
+        pr_number = inputs.get("pr_number") or self._track_pr_number()
+        output_path = (
+            inputs.get("output_path")
+            or _canonical_output_path(pr_number, role, self.track_id)
+        )
+
         # Build brief
         brief = WorkerBrief(
             role=role,
@@ -86,22 +160,32 @@ class Conductor:
             pipeline=" → ".join(pipeline),
             position=f"workstream {ws_id}",
             key_facts=self.track.get("key_facts", {}),
-            inputs=ws.get("inputs", {}),
+            inputs=inputs,
             acceptance=ws.get("acceptance", {}),
             recovery=ws.get("recovery", {}),
-            output_protocol={"path": ws.get("inputs", {}).get("output_path", "/tmp/output.json")},
+            output_protocol={"path": output_path},
         )
         
         # Dispatch worker
         output = self._dispatch(role, brief)
         
-        # Verify output
+        # Verify output. Only roles that publish a file are checked by its
+        # existence; others report in-band, so requiring a file at their
+        # protocol path marked successful posts as failures.
         warden = Warden()
-        verification = warden.verify_all([
-            {"method": "check_file_exists", "args": {"path": brief.output_protocol["path"]}},
-        ])
+        if role in _FILE_ARTIFACT_ROLES:
+            verification = warden.verify_all([
+                {"method": "check_file_exists", "args": {"path": brief.output_protocol["path"]}},
+            ])
+            passed = bool(verification["pass"])
+        else:
+            passed = bool(
+                isinstance(output, dict)
+                and not output.get("error")
+                and output.get("posted", True) is not False
+            )
         
-        if verification["pass"]:
+        if passed:
             update_workstream(self.track_id, ws_id, status="done", outputs=output)
             return {"workstream": ws_id, "status": "done", "output": output}
         else:
@@ -146,17 +230,38 @@ class Conductor:
     def _run_judge(self, brief: WorkerBrief) -> dict:
         """Run Judge worker."""
         context_path = brief.inputs.get("context_path", "")
+        if not context_path or not Path(context_path).exists():
+            # Fail loudly: judging without the probe's context is what produced
+            # false-clean reviews. Never silently emit zero findings.
+            return {
+                "error": f"judge: context file missing ({context_path or 'unset'})",
+                "failed": True,
+                "context_path": context_path,
+            }
+
         with open(context_path) as f:
             context = json.load(f)
         
         judge = Judge(context)
         result = judge.evaluate()
-        
+
+        # Stamp the verdict so the scribe can tell "judged clean" apart from
+        # "the judge produced nothing" — the latter must never render as a clean
+        # "✅ No findings" review.
+        if isinstance(result, dict):
+            result.setdefault("judged", True)
+
         output_path = brief.output_protocol.get("path", "/tmp/findings.json")
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, 'w') as f:
             json.dump(result, f, indent=2)
-        
-        return {"findings_path": output_path, "findings_count": len(result.get("findings", []))}
+
+        return {
+            "findings_path": output_path,
+            "findings_count": len((result or {}).get("findings", [])),
+            "judged": bool((result or {}).get("judged")),
+            "already_reviewed": bool((result or {}).get("already_reviewed")),
+        }
     
     def _run_artisan(self, brief: WorkerBrief) -> dict:
         """Run Artisan worker."""
@@ -193,6 +298,46 @@ class Conductor:
         
         return {"verification_path": output_path, "pass": result["pass"]}
     
+    def _resolve_findings(self, brief: WorkerBrief):
+        """Resolve the judge's findings for the scribe.
+
+        Returns (findings, error). Findings are taken from the brief when given,
+        otherwise loaded from the judge's `findings_path`. The judge's payload is
+        only accepted when it is explicitly marked `judged`, so an empty or
+        `already_reviewed` result cannot render as a clean "✅ No findings"
+        review. If nothing usable is available the caller must refuse to post.
+        """
+        findings = brief.inputs.get("findings")
+        if findings is not None:
+            return findings, None
+
+        findings_path = brief.inputs.get("findings_path")
+        if not (findings_path and Path(findings_path).exists()):
+            return None, (
+                "scribe: neither findings nor findings_path available — refusing to "
+                "post a possibly false-clean review"
+            )
+
+        try:
+            payload = json.loads(Path(findings_path).read_text())
+        except Exception as e:  # unreadable/corrupt findings must not be "clean"
+            return None, f"scribe: findings file unreadable ({findings_path}): {e}"
+
+        if isinstance(payload, dict):
+            if not payload.get("judged"):
+                return None, (
+                    f"scribe: judge output at {findings_path} is not marked judged — "
+                    "refusing to post a possibly false-clean review"
+                )
+            if payload.get("already_reviewed") and not payload.get("findings"):
+                return None, (
+                    "scribe: judge reported already_reviewed with no findings — "
+                    "refusing to post a clean review"
+                )
+            return payload.get("findings", []), None
+
+        return payload, None
+
     def _run_scribe(self, brief: WorkerBrief) -> dict:
         """Run Scribe worker."""
         scribe = Scribe()
@@ -207,18 +352,26 @@ class Conductor:
                 brief.inputs.get("outputs"),
             )
         elif action == "post_review":
+            findings, err = self._resolve_findings(brief)
+            if err:
+                return {"posted": False, "error": err}
             return scribe.post_review_with_assembler(
                 brief.inputs.get("owner", "ChonSong"),
                 brief.inputs.get("repo", "riptide"),
                 brief.inputs.get("pr_number", 0),
-                brief.inputs.get("findings", []),
+                findings,
                 brief.inputs.get("diagram_url"),
+                model=brief.inputs.get("model"),
+                provider=brief.inputs.get("provider"),
             )
         elif action == "record_review":
+            findings, err = self._resolve_findings(brief)
+            if err:
+                return {"recorded": False, "error": err}
             return scribe.record_review_complete(
                 self.track_id,
                 brief.inputs.get("pr_number", 0),
-                brief.inputs.get("findings", []),
+                findings,
                 brief.inputs.get("diagram_url"),
             )
         
@@ -288,7 +441,7 @@ def create_pr_review_pipeline(
     create_workstream(
         track_id,
         "ws-2-judge",
-        inputs={"context_path": f"/tmp/pr-{pr_number}-context.json"},
+        inputs={"context_path": _canonical_output_path(pr_number, "probe")},
         acceptance={"findings_valid": True},
         role="judge",
         pipeline=["diff_analyzer", "dedup", "score"],
@@ -297,7 +450,7 @@ def create_pr_review_pipeline(
     create_workstream(
         track_id,
         "ws-3-artisan",
-        inputs={"findings_path": "/tmp/findings.json"},
+        inputs={"findings_path": _canonical_output_path(pr_number, "judge")},
         acceptance={"diagram_created": True},
         role="artisan",
         pipeline=["excalidraw", "upload"],
@@ -323,6 +476,8 @@ def create_deepthink_review_pipeline(
     pr_number: int,
     pr_details: dict,
     files: list[dict],
+    model: str | None = None,
+    provider: str | None = None,
 ) -> dict:
     """Create a review pipeline for the deepthink cron path.
 
@@ -361,7 +516,7 @@ def create_deepthink_review_pipeline(
     create_workstream(
         track_id,
         "ws-2-judge",
-        inputs={"context_path": f"/tmp/pr-{pr_number}-context.json"},
+        inputs={"context_path": _canonical_output_path(pr_number, "probe")},
         acceptance={"findings_valid": True},
         role="judge",
         pipeline=["diff_analyzer", "dedup", "score"],
@@ -370,7 +525,7 @@ def create_deepthink_review_pipeline(
     create_workstream(
         track_id,
         "ws-3-artisan",
-        inputs={"findings_path": "/tmp/findings.json"},
+        inputs={"findings_path": _canonical_output_path(pr_number, "judge")},
         acceptance={"diagram_created": True},
         role="artisan",
         pipeline=["excalidraw", "upload"],
@@ -394,6 +549,11 @@ def create_deepthink_review_pipeline(
             "repo": repo,
             "action": "post_review",
             "head_sha": head_sha,
+            # The reviewing model/provider must travel with the pipeline: the
+            # spawned session's environment does not carry the app's .env, so
+            # without this the sign-off falls back to the wrong model name.
+            "model": model,
+            "provider": provider,
         },
         acceptance={"posted": True},
         role="scribe",
@@ -409,6 +569,8 @@ def create_webhook_review_pipeline(
     pr_number: int,
     pr_details: dict,
     files: list[dict],
+    model: str | None = None,
+    provider: str | None = None,
 ) -> dict:
     """Create a review pipeline for the on-demand webhook path.
 
@@ -445,7 +607,7 @@ def create_webhook_review_pipeline(
     create_workstream(
         track_id,
         "ws-2-judge",
-        inputs={"context_path": f"/tmp/pr-{pr_number}-context.json"},
+        inputs={"context_path": _canonical_output_path(pr_number, "probe")},
         acceptance={"findings_valid": True},
         role="judge",
         pipeline=["diff_analyzer", "dedup", "score"],
@@ -454,7 +616,7 @@ def create_webhook_review_pipeline(
     create_workstream(
         track_id,
         "ws-3-artisan",
-        inputs={"findings_path": "/tmp/findings.json"},
+        inputs={"findings_path": _canonical_output_path(pr_number, "judge")},
         acceptance={"diagram_created": True},
         role="artisan",
         pipeline=["excalidraw", "upload"],
@@ -477,6 +639,11 @@ def create_webhook_review_pipeline(
             "owner": owner,
             "repo": repo,
             "action": "post_review",
+            # Carried explicitly: the spawned session's environment does not
+            # include the app's .env, so the sign-off would otherwise name the
+            # code default instead of the model that actually reviewed.
+            "model": model,
+            "provider": provider,
         },
         acceptance={"posted": True},
         role="scribe",

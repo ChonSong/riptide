@@ -423,6 +423,24 @@ class StateStore:
         finally:
             self._release_lock()
 
+    def list_pending_jobs(self, name_prefix: str) -> list[dict]:
+        """Return pending jobs whose id starts with ``<name_prefix>-`` (newest first).
+
+        Used to release reservations whose spawned cron job already finished:
+        a reservation must not outlive the job it was made for.
+        """
+        conn = self._get_conn()
+        escaped = f"{self._escape_like(name_prefix)}-%"
+        rows = conn.execute(
+            "SELECT id, pr_number, tier, created_at FROM jobs "
+            "WHERE id LIKE ? ESCAPE '\\' AND status='pending' ORDER BY created_at DESC",
+            (escaped,),
+        ).fetchall()
+        return [
+            {"id": r[0], "pr_number": r[1], "tier": r[2], "created_at": r[3]}
+            for r in rows
+        ]
+
     def get_job_status(self, pr_number: int) -> Optional[dict]:
         conn = self._get_conn()
         row = conn.execute(

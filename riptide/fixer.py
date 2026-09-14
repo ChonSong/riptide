@@ -513,8 +513,13 @@ HEAD: {head_sha[:12]} (branch: {head_ref}) · Changes: {total_loc} LOC
    `graphify path <fileA> <fileB>` for callers of anything you will change.
 
 ## Verification gate (run BEFORE any edit — one finding at a time, sequential)
-Parse the latest @riptide-bot review comment's `## 🔍 Findings` section
-plus inline review threads (`gh api repos/{owner}/{repo}/pulls/{pr_number}/comments`).
+Read the latest Riptide review comment on the PR:
+`gh api repos/{owner}/{repo}/issues/{pr_number}/comments --paginate` (take the last body that
+starts with `## Review:` or contains `## 🔍 Findings`), plus inline review threads
+(`gh api repos/{owner}/{repo}/pulls/{pr_number}/comments`).
+Current reviews lead with `## Review: <verdict>`, then numbered findings, then a 🔴/🟡 severity
+table; older reviews use a `## 🔍 Findings` section. Read whichever is present — a `## Riptide Pass:
+✅ No findings` comment is NOT a review and carries no findings.
 For EACH finding, verify it against the CURRENT code at {head_sha[:12]}:
   - Fetch the file at the PR HEAD (never trust stale line numbers — match by code context).
   - Verdict: `valid` (still present) | `skip-already-addressed` | `skip-stale-false-positive`.
@@ -531,7 +536,8 @@ SURFACE → EXPLORE (graphify) → CHALLENGE → SYNTHESIZE → VALIDATE
 - Run `python -m py_compile` on every changed .py file.
 - Conventional Commits (fix(scope): ...).
 - Model attribution footer REQUIRED on the summary comment:
-  <sub>🤖 Riptide Fix via Hermes · model: <model_name></sub>
+  <sub>🤖 Riptide Fix via Hermes · model: {FIX_MODEL} · provider: {FIX_PROVIDER}</sub>
+  (use exactly this string — do not guess or substitute another model name)
 
 ## Execution (sequential subagents — one at a time, never parallel)
 1. Verification subagent → per-finding verdicts (above).
