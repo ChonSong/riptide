@@ -9,6 +9,10 @@ import os
 import pathlib
 import subprocess
 
+# Captured at import time: several test modules monkeypatch subprocess.run, and a
+# test that shells out must not be at the mercy of whatever else is running.
+_REAL_RUN = subprocess.run
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 WATCHDOG = REPO_ROOT / "watchdog.sh"
 
@@ -42,14 +46,16 @@ def _run(tmp_path, local, remote, ancestor_exit):
     env = dict(os.environ)
     env.update(
         {
-            "PATH": f"{bin_dir}:{env['PATH']}",
+            # Fixed PATH: inheriting the suite's PATH lets another test's
+            # mutation decide whether the shims are found at all.
+            "PATH": f"{bin_dir}:/usr/bin:/bin",
             "FAKE_LOCAL": local,
             "FAKE_REMOTE": remote,
             "FAKE_ANCESTOR_EXIT": str(ancestor_exit),
             "SYSTEMCTL_LOG": str(log),
         }
     )
-    proc = subprocess.run(
+    proc = _REAL_RUN(
         ["bash", str(WATCHDOG)], capture_output=True, text=True, env=env
     )
     return proc, (log.read_text() if log.exists() else "")
@@ -57,9 +63,7 @@ def _run(tmp_path, local, remote, ancestor_exit):
 
 def test_script_exists_and_is_valid_shell():
     assert WATCHDOG.exists()
-    syntax = subprocess.run(
-        ["bash", "-n", str(WATCHDOG)], capture_output=True, text=True
-    )
+    syntax = _REAL_RUN(["bash", "-n", str(WATCHDOG)], capture_output=True, text=True)
     assert syntax.returncode == 0, syntax.stderr
 
 
