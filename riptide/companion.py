@@ -748,7 +748,13 @@ class Companion:
                 full_name, pr_number,
             )
             try:
-                if installation_id and self.client:
+                # Use the caller-selected client. The poller supplies a
+                # GhCliClient with installation_id=None (GhCliClient accepts the
+                # id for API compatibility and ignores it), so guarding on
+                # installation_id silently suppressed every pass confirmation
+                # from the poller — leaving 'Riptide Review Required' red on
+                # clean PRs.
+                if active_client:
                     body = (
                         f"## Review: ✅ No findings\n\n"
                         f"**Riptide Review Complete — No findings**\n\n"
@@ -756,8 +762,13 @@ class Companion:
                         f"**Depth:** {getattr(self, '_depth', 'standard')} | "
                         f"**Verdict:** pass"
                     )
-                    self.client.post_pr_comment(installation_id, owner, repo, pr_number, body)
+                    active_client.post_pr_comment(installation_id, owner, repo, pr_number, body)
                     logger.info("Posted pass confirmation for %s#%d", full_name, pr_number)
+                    # Record the reviewed SHA: without it the same revision is
+                    # re-analysed (duplicate pass comments) and the next delta
+                    # review compares against a stale base.
+                    if current_sha:
+                        self._set_last_sha(owner, repo, pr_number, current_sha)
             except Exception as e:
                 logger.error("Failed to post pass confirmation: %s", e)
             return

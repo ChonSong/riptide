@@ -515,6 +515,89 @@ class TestDeterministicAnalysis:
         assert "🔴" not in body
         assert "🟡" not in body
 
+    def test_pass_confirmation_uses_the_poller_client(self, mock_ollama):
+        """The poller supplies a GhCliClient with installation_id=None.
+
+        `_execute`'s own contract says so, but the pass branch guarded on
+        `installation_id and self.client` — so from the poller path it never
+        posted, leaving 'Riptide Review Required' red on every clean PR it
+        reviewed. It must use the caller-selected client and pass
+        installation_id through unchanged (GhCliClient accepts and ignores it).
+        """
+        companion = make_companion()
+        companion.enable_deterministic = True
+        companion.enable_graphify = False
+        companion.client.post_pr_comment = MagicMock()
+        poller_client = MagicMock()
+        poller_client.get_pr_details.return_value = {"head": {"sha": "poller-sha"}}
+
+        mock_report = MagicMock()
+        mock_report.has_actionable = False
+        mock_report.findings = []
+        mock_report.verdict = "pass"
+        with patch("riptide.companion.build_context_bundle", return_value={"report": mock_report}):
+            companion._execute(
+                None, "owner", "repo", 42,
+                "feat: trivial change", "author",
+                [{"filename": "README.md", "patch": "+# Hello", "additions": 1, "deletions": 0, "status": "modified"}],
+                client=poller_client,
+            )
+
+        poller_client.post_pr_comment.assert_called_once()
+        assert poller_client.post_pr_comment.call_args[0][0] is None
+        assert "## Review:" in poller_client.post_pr_comment.call_args[0][4]
+        companion.client.post_pr_comment.assert_not_called()
+
+    def test_pass_confirmation_records_the_reviewed_sha(self, mock_ollama):
+        """A delivered pass must record the SHA.
+
+        Otherwise the same revision is re-analysed on the next webhook/poll
+        (duplicate pass comments) and the following delta review compares
+        against a stale base.
+        """
+        companion = make_companion()
+        companion.enable_deterministic = True
+        companion.enable_graphify = False
+        companion.client.post_pr_comment = MagicMock()
+        companion.client.get_pr_details.return_value = {"head": {"sha": "abc123"}}
+        companion._set_last_sha = MagicMock()
+
+        mock_report = MagicMock()
+        mock_report.has_actionable = False
+        mock_report.findings = []
+        mock_report.verdict = "pass"
+        with patch("riptide.companion.build_context_bundle", return_value={"report": mock_report}):
+            companion._execute(
+                123, "owner", "repo", 42,
+                "feat: trivial change", "author",
+                [{"filename": "README.md", "patch": "+# Hello", "additions": 1, "deletions": 0, "status": "modified"}],
+            )
+
+        companion.client.post_pr_comment.assert_called_once()
+        companion._set_last_sha.assert_called_once_with("owner", "repo", 42, "abc123")
+
+    def test_failed_pass_post_does_not_record_the_sha(self, mock_ollama):
+        """A failed post must not claim the revision was reviewed."""
+        companion = make_companion()
+        companion.enable_deterministic = True
+        companion.enable_graphify = False
+        companion.client.post_pr_comment = MagicMock(side_effect=Exception("boom"))
+        companion.client.get_pr_details.return_value = {"head": {"sha": "abc123"}}
+        companion._set_last_sha = MagicMock()
+
+        mock_report = MagicMock()
+        mock_report.has_actionable = False
+        mock_report.findings = []
+        mock_report.verdict = "pass"
+        with patch("riptide.companion.build_context_bundle", return_value={"report": mock_report}):
+            companion._execute(
+                123, "owner", "repo", 42,
+                "feat: trivial change", "author",
+                [{"filename": "README.md", "patch": "+# Hello", "additions": 1, "deletions": 0, "status": "modified"}],
+            )
+
+        companion._set_last_sha.assert_not_called()
+
     def test_fallback_to_llm_when_analyzer_raises(self, mock_ollama):
         companion = make_companion()
         companion.enable_deterministic = True
