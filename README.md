@@ -31,29 +31,33 @@ python3 -m pytest riptide/tests/ -q
 
 ```text
 riptide/
-├── webhook.py         # FastAPI server, GitHub webhook handler
-├── companion.py       # Bot 1: TL;DR + ELI5 + timing footer
-├── deepthink.py       # Bot 2: Cron + @riptide-bot review spawner
-├── proofshotter.py    # Bot 3: Visual verification (GIF/screenshots)
-├── fixer.py           # Bot 2b: Autonomous fix via @riptide-bot fix
-├── poller.py          # Cron entry point for Bot 2/3 discovery
-├── state.py           # SQLite-backed state (dedup, jobs, reservations)
-├── labeler.py         # GitHub label engine
-├── assemble_review.py # Structured findings assembly + sign-off
-├── diff_analyzer.py   # Deterministic complexity/defect scan
-├── depth.py           # ReviewDepth enum + classifier
-├── pipeline/          # Conductor review pipeline, one module per role
-│   ├── conductor.py   #   workstream orchestration, canonical output paths
-│   ├── probe.py       #   ws-1 PR context
-│   ├── judge.py       #   ws-2 findings (stamps `judged: true`)
-│   ├── artisan.py     #   ws-3 diagram
-│   ├── engine.py      #   ws-4 artifact upload
-│   ├── scribe.py      #   ws-5 posts the review
-│   └── warden.py      #   verification
-├── grafiphy/          # Excalidraw diagram rendering (imported by deepthink)
-├── graphify_ingest/   # Graph ingestion (imported by pipeline/artisan)
-├── docs/REVIEW-CONTRACT.md  # What a review is; gate/reservation/attribution rules
-└── docs/archive/      # Superseded planning docs (historical)
+├── riptide/                    # the application package
+│   ├── webhook.py              # FastAPI server, GitHub webhook handler
+│   ├── companion.py            # Bot 1: TL;DR + ELI5 + timing footer
+│   ├── deepthink.py            # Bot 2: Cron + @riptide-bot review spawner
+│   ├── proofshotter.py         # Bot 3: Visual verification (GIF/screenshots)
+│   ├── fixer.py                # Bot 2b: Autonomous fix via @riptide-bot fix
+│   ├── poller.py               # Cron entry point for Bot 2/3 discovery
+│   ├── state.py                # SQLite-backed state (dedup, jobs, reservations)
+│   ├── labeler.py              # GitHub label engine
+│   ├── assemble_review.py      # Structured findings assembly + sign-off
+│   ├── diff_analyzer.py        # Deterministic complexity/defect scan
+│   ├── depth.py                # ReviewDepth enum + classifier
+│   ├── pipeline/               # Conductor review pipeline, one module per role
+│   │   ├── conductor.py        #   workstream orchestration, canonical output paths
+│   │   ├── probe.py            #   ws-1 PR context
+│   │   ├── judge.py            #   ws-2 findings (stamps `judged: true`)
+│   │   ├── artisan.py          #   ws-3 diagram
+│   │   ├── engine.py           #   ws-4 artifact upload
+│   │   ├── scribe.py           #   ws-5 posts the review
+│   │   └── warden.py           #   verification
+│   ├── grafiphy/               # Excalidraw diagram rendering (imported by deepthink)
+│   └── graphify_ingest/        # Graph ingestion (imported by pipeline/artisan)
+├── docs/REVIEW-CONTRACT.md     # What a review is; gate/reservation/attribution rules
+├── docs/archive/               # Superseded planning docs (historical)
+├── scripts/deploy.sh           # Auto-deploy on merge to the default branch
+├── watchdog.sh                 # Restart only when origin/main is genuinely ahead
+└── start.sh                    # Entry point (git pull on main, then serve)
 ```
 
 ### Review Command

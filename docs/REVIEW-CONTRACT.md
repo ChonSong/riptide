@@ -13,18 +13,29 @@ gate are held to.
 
 ## 1. Comment markers
 
-Riptide writes four kinds of PR comment. Only the first two count as a review.
+Riptide writes four kinds of PR comment. Two different consumers care about
+them, and they do **not** answer the same question — see the notes below the
+table.
 
-| Marker | Written by | Means | Counts as a review? |
-|---|---|---|---|
-| `## Review: <verdict>` | `assemble_review.py` (Conductor scribe) | Verdict + numbered findings + 🔴/🟡 severity table | **Yes** |
-| `## 🔍 Findings` / `## 🎯 Summary` | legacy `assemble_review` output | Older review formats, still accepted | **Yes** |
-| `Riptide Review ·` (sign-off) | `assemble_review.py` sign-off line | Present on every real review, absent on passes | **Yes** |
-| `## Riptide Pass: ✅ No findings` | `companion.py` deterministic pass | "The deterministic pass ran and found nothing" — not a review | **No** |
+| Marker | Written by | Means | Gate? | Poller skip? |
+|---|---|---|---|---|
+| `## Review: <verdict>` | `assemble_review.py` (Conductor scribe) | Verdict + numbered findings + 🔴/🟡 severity table | **No** | **Yes** |
+| `## 🔍 Findings` / `## 🎯 Summary` | legacy `assemble_review` output | Older review formats, still accepted | **Yes** | **Yes** |
+| `Riptide Review ·` (sign-off) | `assemble_review.py` sign-off | Emitted on every real review *and* on clean ones | **Yes** | **Yes** |
+| `## Riptide Pass: ✅ No findings` | `companion.py` deterministic pass | "The deterministic pass ran and found nothing" — not a review | **Yes** | **No** |
 
-The distinction matters: `deepthink._has_riptide_review()` decides whether the
-poller may skip a PR, and the Companion's pass confirmation must not satisfy it —
-otherwise a PR whose deep-think review never landed looks reviewed forever.
+- **The CI gate** matches a body containing `## 🔍 Findings`, `## 🎯 Summary`,
+  `Riptide Review ·`, `## Riptide Pass:`, or the words `critical` and `warning`
+  (`.github/workflows/riptide-review-required.yml`). It does **not** test for
+  `## Review:` — that header is presentational. What carries a real review past
+  the gate is the `Riptide Review ·` sign-off, which `assemble_review.py` always
+  writes (both `_build_signoff()` and `_build_success_footer()`).
+- **The poller's skip decision** uses `deepthink.RIPTIDE_REVIEW_MARKERS`, which
+  deliberately excludes `## Riptide Pass:`. A deterministic pass must not make a
+  PR look deep-reviewed, or a PR whose review never landed looks reviewed forever.
+
+Never "clean up" the sign-off on the grounds that the `## Review:` header is
+enough: dropping it silently un-gates every findings review.
 
 ## 2. The CI gate (`riptide-review-required`)
 
@@ -40,9 +51,11 @@ can be stale — re-run it or push a commit).
    the review (the follow-up-commit rule).
 4. Match without those rows → pass.
 
-So a findings-bearing review must emit the severity table (`_build_severity_table`
-in `assemble_review.py`) and the body must lead with `## Review:` — that is what
-makes review findings actually block a merge.
+So a findings-bearing review must emit the 🔴/🟡 severity table
+(`_build_severity_table` in `assemble_review.py`) **and** carry the
+`Riptide Review ·` sign-off: the table rows are what keep the gate red until a
+follow-up commit lands, and the sign-off is what makes the comment match at all.
+The `## Review:` header is for humans — the gate never looks at it.
 
 ## 3. Review pipeline (Conductor)
 
