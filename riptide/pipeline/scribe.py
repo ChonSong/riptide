@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from .work_state import read_state, write_state, now
+from .work_state import modify_state, now
 
 
 class Scribe:
@@ -26,12 +26,19 @@ class Scribe:
     # ── Work state ─────────────────────────────────────────────────────────
     
     def record_review_start(self, track_id: str, pr_number: int) -> dict:
-        """Record that a review has started."""
-        state = read_state()
-        track = state.get("tracks", {}).get(track_id, {})
-        track.setdefault("last_review", {})["pr"] = pr_number
-        track["last_review"]["started_at"] = now()
-        write_state(state)
+        """Record that a review has started.
+
+        Runs as one atomic read→mutate→write under the work-state lock so a
+        concurrent review in another process cannot drop this update.
+        """
+        def _do(state):
+            track = state.get("tracks", {}).get(track_id)
+            if track is None:
+                return
+            track.setdefault("last_review", {})["pr"] = pr_number
+            track["last_review"]["started_at"] = now()
+
+        modify_state(_do)
         return {"recorded": True}
     
     def record_review_complete(
@@ -41,24 +48,26 @@ class Scribe:
         findings: list[dict],
         diagram_url: Optional[str] = None,
     ) -> dict:
-        """Record review completion in work-state.json."""
-        state = read_state()
-        track = state.get("tracks", {}).get(track_id, {})
-        
-        track.setdefault("last_review", {}).update({
-            "pr": pr_number,
-            "completed_at": now(),
-            "findings_count": len(findings),
-            "diagram_url": diagram_url,
-        })
-        
-        # Store findings for dedup
-        track.setdefault("reviewed_prs", {})[str(pr_number)] = {
-            "findings": findings,
-            "reviewed_at": now(),
-        }
-        
-        write_state(state)
+        """Record review completion in work-state.json under the cross-process lock."""
+        def _do(state):
+            track = state.get("tracks", {}).get(track_id)
+            if track is None:
+                return
+
+            track.setdefault("last_review", {}).update({
+                "pr": pr_number,
+                "completed_at": now(),
+                "findings_count": len(findings),
+                "diagram_url": diagram_url,
+            })
+
+            # Store findings for dedup
+            track.setdefault("reviewed_prs", {})[str(pr_number)] = {
+                "findings": findings,
+                "reviewed_at": now(),
+            }
+
+        modify_state(_do)
         return {"recorded": True, "findings_count": len(findings)}
     
     def update_workstream(
