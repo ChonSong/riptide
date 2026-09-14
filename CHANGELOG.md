@@ -31,7 +31,8 @@
 - `docs/REVIEW-CONTRACT.md` — review markers, gate behaviour, reservation lifecycle,
   model attribution, and how to verify each.
 - Tests for pipeline wiring, model attribution and the diff analyzer (+31 tests, no
-  regressions against the ~53 pre-existing failures).
+  regressions against the 28 pre-existing failures — see AGENTS.md for the
+  measured baseline and its per-module distribution).
 
 ### Changed (2026-09-14)
 

@@ -10,9 +10,13 @@ Repo-scoped rules for AI agents reviewing or editing this codebase.
 python -m compileall -q riptide
 
 # There is NO pytest workflow in CI — run the suite locally before pushing.
-# ~53 tests fail on a clean main (websocket/endpoint, review-memory v7 schema,
-# test-oracle, pipeline thread-safety); compare against that baseline, don't
-# assume your change caused them.
+# Measured baseline for that exact command (28 failed / 1096 passed, ~7 min):
+#   test_fixer.py 12, test_review_state_migration.py 4, test_webhook_endpoint.py 3,
+#   test_fixer_ephemeral.py 3, then one each in test_trace_context, test_review_timing,
+#   test_pipeline, test_entrypoints, test_companion, test_ci_verifier.
+# All 28 are pre-existing. Compare against that list rather than a failure count,
+# and re-measure before changing this comment: an inflated baseline hides
+# regressions (a change adding 20 failures still sits under a loose "~50").
 /home/sc/.hermes/hermes-agent/venv/bin/python3 -m pytest riptide/tests -q
 ```
 
