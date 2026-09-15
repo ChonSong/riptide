@@ -1,5 +1,6 @@
 """Tests for riptide/fixer.py — @riptide-bot fix command."""
 import os
+import shutil
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -243,6 +244,12 @@ class TestIsCronAvailable:
 # ── _spawn_fix ───────────────────────────────────────────────────────────────
 
 
+@pytest.mark.skipif(
+    shutil.which("hermes") is None,
+    reason="exercises the real spawn path, which needs the hermes CLI on PATH "
+           "(fixer.py deliberately refuses to spawn without it; the CI runner "
+           "has no hermes install)",
+)
 class TestSpawnFix:
     def _kwargs(self, **overrides) -> dict:
         base: dict = dict(

@@ -43,12 +43,17 @@ def _run(tmp_path, local, remote, ancestor_exit):
         script.chmod(0o755)
 
     log = tmp_path / "systemctl.log"
+    # The script cd's into its repo dir; point it at a temp dir so the test can
+    # never read or act on the developer's real checkout.
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
     env = dict(os.environ)
     env.update(
         {
             # Fixed PATH: inheriting the suite's PATH lets another test's
             # mutation decide whether the shims are found at all.
             "PATH": f"{bin_dir}:/usr/bin:/bin",
+            "RIPTIDE_WATCHDOG_REPO": str(repo),
             "FAKE_LOCAL": local,
             "FAKE_REMOTE": remote,
             "FAKE_ANCESTOR_EXIT": str(ancestor_exit),

@@ -1,0 +1,24 @@
+# Riptide known-failure baseline.
+#
+# A NEW failure — one not listed here — means the change under review broke
+# something, and the gate fails. A baseline entry that has started passing is
+# reported as stale but does NOT fail the build: a passing test is not a
+# regression, and timing-sensitive tests can pass on a quiet machine and fail
+# under load, so failing on those would make the gate itself flaky.
+#
+# One failing pytest node ID per line, sorted (LC_ALL=C). Add a line only for a
+# failure that is genuinely known and tracked; prefer fixing the test. Delete
+# lines once they pass.
+#
+# Empty is the goal, and it is where this file stands.
+#
+# Measured: 2026-09-15, on main after the remediation that fixed the last known
+# failures — from 11 failing to none:
+#   python3 -m pytest riptide/tests -q  →  1175 passed, 3 skipped, 0 failed
+# (the 3 skips are the opt-in Docker E2E; set RIPTIDE_EPHEMERAL_DOCKER=1 to run
+# them). If CI disagrees with a local run, the difference is environmental:
+# record what CI actually fails, per this file's format, rather than widening
+# the gate.
+#
+# Regenerate locally with: python3 scripts/check_test_baseline.py --write-baseline
+# Enforced by scripts/check_test_baseline.py via .github/workflows/pytest.yml

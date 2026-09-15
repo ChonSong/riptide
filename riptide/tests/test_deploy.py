@@ -42,6 +42,15 @@ def tmp_repo(tmp_path):
     subprocess.run(
         ["git", "commit", "-m", "init"], cwd=repo, capture_output=True, check=True
     )
+    # deploy.sh runs `git pull origin main --ff-only`; give the temp repo a real
+    # origin with a main branch so that step exercises the script instead of
+    # failing on a missing remote. (It used to reach the developer's real
+    # checkout, because deploy.sh hardcoded REPO_DIR.)
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-b", "main", str(bare)], capture_output=True, check=True)
+    subprocess.run(["git", "remote", "add", "origin", str(bare)], cwd=repo, capture_output=True, check=True)
+    subprocess.run(["git", "push", "-u", "origin", "HEAD:main"], cwd=repo, capture_output=True, check=True)
+    subprocess.run(["git", "branch", "-M", "main"], cwd=repo, capture_output=True, check=True)
     return repo
 
 
@@ -71,7 +80,17 @@ class TestDeployLock:
             text=True,
             timeout=30,
             cwd=str(tmp_repo),
-            env={**os.environ, "RIPTIDE_DEPLOY_LOCK": str(tmp_repo / "deploy.lock"), "RIPTIDE_DEPLOY_LOG": str(log_file)},
+            env={
+                **os.environ,
+                "RIPTIDE_DEPLOY_LOCK": str(tmp_repo / "deploy.lock"),
+                "RIPTIDE_DEPLOY_LOG": str(log_file),
+                # Keep the test off the developer's checkout, the real systemd
+                # service, and the live webhook: deploy.sh defaults to those.
+                "RIPTIDE_DEPLOY_REPO": str(tmp_repo),
+                "RIPTIDE_DEPLOY_RESTART_CMD": "true",
+                "RIPTIDE_DEPLOY_STATUS_CMD": "true",
+                "RIPTIDE_WEBHOOK_URL": "http://127.0.0.1:9/closed",
+            },
         )
         assert result.returncode == 0
         assert log_file.exists()
@@ -94,7 +113,17 @@ class TestDeployNoWait:
             text=True,
             timeout=30,
             cwd=str(tmp_repo),
-            env={**os.environ, "RIPTIDE_DEPLOY_LOCK": str(tmp_repo / "deploy.lock"), "RIPTIDE_DEPLOY_LOG": str(log_file)},
+            env={
+                **os.environ,
+                "RIPTIDE_DEPLOY_LOCK": str(tmp_repo / "deploy.lock"),
+                "RIPTIDE_DEPLOY_LOG": str(log_file),
+                # Keep the test off the developer's checkout, the real systemd
+                # service, and the live webhook: deploy.sh defaults to those.
+                "RIPTIDE_DEPLOY_REPO": str(tmp_repo),
+                "RIPTIDE_DEPLOY_RESTART_CMD": "true",
+                "RIPTIDE_DEPLOY_STATUS_CMD": "true",
+                "RIPTIDE_WEBHOOK_URL": "http://127.0.0.1:9/closed",
+            },
         )
         elapsed = time.monotonic() - start
         assert result.returncode == 0

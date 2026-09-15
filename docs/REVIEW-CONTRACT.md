@@ -25,7 +25,8 @@ table.
 | `## Riptide Pass: ✅ No findings` | `companion.py` deterministic pass | "The deterministic pass ran and found nothing" — not a review | **Yes** | **No** |
 
 - **The CI gate** matches a body containing `## 🔍 Findings`, `## 🎯 Summary`,
-  `Riptide Review ·`, `## Riptide Pass:`, or the words `critical` and `warning`
+  `Riptide Review ·`, or `## Riptide Pass:`, and ignores the Companion's
+  complexity pre-pass (`## ✨ Review Required`)
   (`.github/workflows/riptide-review-required.yml`). It does **not** test for
   `## Review:` — that header is presentational. What carries a real review past
   the gate is the `Riptide Review ·` sign-off, which `assemble_review.py` always
@@ -44,8 +45,9 @@ opened/synchronize/reopened (it does **not** re-run on comments, so a gate resul
 can be stale — re-run it or push a commit).
 
 1. Selects the **latest** comment whose body contains `## 🔍 Findings`,
-   `## 🎯 Summary`, `Riptide Review ·`, `## Riptide Pass:`, or the words
-   `critical` **and** `warning`.
+   `## 🎯 Summary`, `Riptide Review ·`, or `## Riptide Pass:`, skipping the
+   Companion's `## ✨ Review Required` pre-pass (it posts before the review and
+   carries 🟡 rows, so counting it would redden clean PRs).
 2. No match → fail: *"No Riptide review found on this PR."*
 3. Match with a `| 🔴` or `| 🟡` table row → **fail** until a commit lands after
    the review (the follow-up-commit rule).

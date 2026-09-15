@@ -4,7 +4,10 @@
 # Run via cron every 5 minutes
 
 set -e
-cd /home/sc/workspace/riptide
+# Overridable so the watchdog can be tested against a temp repo, and so it can
+# never depend on whichever branch a dev checkout happens to have checked out.
+WATCHDOG_REPO="${RIPTIDE_WATCHDOG_REPO:-/home/sc/workspace/riptide-prod}"
+cd "$WATCHDOG_REPO"
 
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
 if [ "$CURRENT_BRANCH" != "main" ]; then

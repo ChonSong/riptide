@@ -451,7 +451,7 @@ async def handle_pull_request(payload: dict, delivery_id: str) -> Response:
         base_ref = pr.get("base", {}).get("ref", "")
         if base_ref == default_branch:
             log.info(f"[{delivery_id}] PR #{pr_number} merged into {default_branch} — triggering auto-deploy")
-            deploy_script = os.environ.get("RIPTIDE_DEPLOY_SCRIPT", "/home/sc/workspace/riptide/scripts/deploy.sh")
+            deploy_script = os.environ.get("RIPTIDE_DEPLOY_SCRIPT", "/home/sc/workspace/riptide-prod/scripts/deploy.sh")
             if not Path(deploy_script).exists():
                 log.error(
                     f"[{delivery_id}] Auto-deploy skipped — script not found: {deploy_script}"
