@@ -113,6 +113,31 @@ def get_track(track_id: str) -> Optional[dict]:
     return state.get("tracks", {}).get(track_id)
 
 
+def _new_track(
+    track_id: str,
+    name: Optional[str] = None,
+    phase: Optional[str] = None,
+    repos: Optional[dict] = None,
+    key_facts: Optional[dict] = None,
+) -> dict:
+    """Build a track record — single source of truth for the track shape.
+
+    Used by create_track() and by create_workstream(), which auto-creates a
+    missing track so that the whole create is one self-contained
+    read-modify-write (see modify_state()).
+    """
+    return {
+        "name": name or track_id,
+        "phase": phase or "",
+        "status": "active",
+        "current_ws": None,
+        "workstreams": {},
+        "key_facts": key_facts or {},
+        "repos": repos or {},
+        "last_updated": now(),
+    }
+
+
 def create_track(
     track_id: str,
     name: str,
@@ -121,17 +146,9 @@ def create_track(
     key_facts: Optional[dict] = None,
 ) -> Optional[dict]:
     def _do(state):
-        track = {
-            "name": name,
-            "phase": phase,
-            "status": "active",
-            "current_ws": None,
-            "workstreams": {},
-            "key_facts": key_facts or {},
-            "repos": repos,
-            "last_updated": now(),
-        }
-        state.setdefault("tracks", {})[track_id] = track
+        state.setdefault("tracks", {})[track_id] = _new_track(
+            track_id, name, phase, repos, key_facts
+        )
     modify_state(_do)
     return get_track(track_id)
 
@@ -176,8 +193,17 @@ def create_workstream(
             "recovery": recovery or {},
             "completed_at": None,
         }
-        state["tracks"][track_id]["workstreams"][ws_id] = ws
-        state["tracks"][track_id]["last_updated"] = now()
+        # Build the whole track→workstream path inside this single locked
+        # transaction. Indexing state["tracks"][track_id] directly made
+        # create_workstream() raise KeyError for any track that did not exist
+        # yet, so callers had to remember to call create_track() first; the
+        # operation was neither self-contained nor safe when two threads
+        # created workstreams for the same not-yet-created track.
+        track = state.setdefault("tracks", {}).setdefault(
+            track_id, _new_track(track_id)
+        )
+        track.setdefault("workstreams", {})[ws_id] = ws
+        track["last_updated"] = now()
     modify_state(_do)
     return get_workstream(track_id, ws_id)
 
