@@ -133,10 +133,16 @@ curl -s localhost:11434/api/tags
 grep OLLAMA_BASE_URL /home/sc/workspace/riptide/.env
 ```
 
-**When auditing for wrong default port, grep ALL of these:**
-1. `companion.py` — `os.environ.get("OLLAMA_BASE_URL", "http://localhost:43311")`
-2. `labeler.py` — TWO places
-3. `riptide/resources/label-definitions.json` — resource JSON overrides code default
+**Port drift is fixed in code and guarded by regression tests.** All code defaults
+are now `11434` (`companion.py:368`, `ollama_heal.py:26`,
+`labeler.py:30,90`), and `test_companion.py` / `test_labeler.py` fail if `43311`
+returns. `43311` now survives only in stale docs/config and in those test fixtures,
+so audit **docs, resources and `.env`** — not the code:
+
+```bash
+grep -rn "43311" --include="*.md" --include="*.json" --include="*.example" . | grep -v graphify-out
+grep OLLAMA_BASE_URL /home/sc/workspace/riptide/.env   # must be :11434
+```
 
 ## Graphify
 
