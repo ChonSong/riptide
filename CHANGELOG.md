@@ -4,9 +4,9 @@
 
 ### Fixed (2026-09-14)
 
-- **Reviews could not satisfy the CI gate.** Findings-bearing reviews now lead with
-  `## Review:` and include the 🔴/🟡 severity table; previously the gate found no
-  recognised marker and failed every such review.
+- **Reviews could not satisfy the CI gate.** Findings-bearing reviews now carry the
+  `Riptide Review ·` sign-off and the 🔴/🟡 severity table; previously the gate found
+  no recognised marker and failed every such review.
 - **Stale review reservations blocked all re-reviews.** `_release_finished_reservations()`
   releases when the job completed/vanished, has no further runs, or the PR already
   carries a delivered review. Symptom: every `@riptide-bot review` answered

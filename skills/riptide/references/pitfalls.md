@@ -209,13 +209,19 @@ carries 🟡 rows), and only *requires a follow-up commit* when the body has a
 
 ### Reviews are not always authored by the App
 
-The Scribe posts through the GitHub App when it can and **falls back to the `gh`
-CLI** (authenticated as the operator) when it cannot — so a genuine review can be
-authored by `ChonSong`, not `riptide-review[bot]`. Filtering comments by author
-therefore misses real reviews and reads as "nothing was posted", and counting the
-App's own posts as the only signal makes a landed review look lost. Select review
-comments by their **body markers**; if you need the author, accept either
-`<app-slug>[bot]` or the operator. (This has cost real debugging time twice.)
+The Scribe posts reviews through the **`gh` CLI** — `assemble_review.post_review()`
+runs `gh pr comment`, and nothing under `riptide/pipeline/` imports `github_app`.
+So every `## Review:` review is authored by the **operator** (`ChonSong`) and never
+by `riptide-review[bot]`. The Companion's marker comments and the `@riptide-bot`
+acks do go through the GitHub App, which falls back to the `gh` CLI when it cannot
+post (`webhook.py`). That split is why `🧠 Riptide Review triggered`,
+`## ✨ Review Required` and `## Riptide Pass:` show as the App while the reviews
+show as the operator.
+
+Either way: select review comments by their **body markers**, not by author.
+Filtering by author misses real reviews and reads as "nothing was posted", and
+treating the App's posts as the only signal makes a landed review look lost.
+(This has cost real debugging time twice.)
 
 ### "Already pending" — stale review reservations
 
