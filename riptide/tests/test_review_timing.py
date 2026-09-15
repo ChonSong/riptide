@@ -45,6 +45,17 @@ class TestDeepthinkPromptArgs:
 class TestAssembleReviewTiming:
     """Verify assemble_review accepts and forwards triggered_at."""
 
+    @pytest.fixture
+    def critical_finding(self):
+        """One critical finding — the findings path is where the diagram is wired."""
+        return {
+            "severity": "critical",
+            "title": "Race condition",
+            "detail": "work queue claim races on restart",
+            "file": "webhook.py",
+            "line": 344,
+        }
+
     def test_triggered_at_included_in_body(self):
         from riptide.assemble_review import assemble_review_body
 
@@ -65,12 +76,21 @@ class TestAssembleReviewTiming:
 
         assert "Review posted in" not in body
 
-    def test_diagram_url_included_in_body(self):
+    def test_diagram_url_included_in_body(self, critical_finding):
+        """The diagram link is emitted on the findings-bearing path.
+
+        A clean pass returns early through _build_success_footer
+        (assemble_review.py:91-92, commit a597b79) and deliberately carries no
+        preamble/diagram, so the wiring can only be proven with a finding
+        present — hence the critical_finding fixture (same pattern as
+        test_adhd_formatting.py). Whether a clean pass *should* carry the
+        diagram is a product decision, not a test expectation.
+        """
         from riptide.assemble_review import assemble_review_body
 
         body = assemble_review_body(
-            findings=[], owner="ChonSong", repo="riptide", pr_number=42,
+            findings=[critical_finding], owner="ChonSong", repo="riptide", pr_number=42,
             diagram_url="https://excalidraw.com/#json=abc123",
         )
 
-        assert "https://excalidraw.com/#json=abc123" in body
+        assert "[Diagram](https://excalidraw.com/#json=abc123)" in body
