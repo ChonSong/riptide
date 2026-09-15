@@ -986,6 +986,23 @@ def run():
 
 
 if __name__ == "__main__":
+    # `python3 riptide/deepthink.py` (direct file execution) is the WRONG
+    # invocation: sys.path[0] becomes the package directory, so `from riptide.X
+    # import Y` cannot resolve. That raises ModuleNotFoundError when the package
+    # is not installed, but when it IS installed (editable dev venv) the import
+    # resolves and this module silently starts real work (polling GitHub, `gh`
+    # network calls, StateStore) instead of failing.
+    # `__package__` is falsy only for direct file execution; `python -m
+    # riptide.deepthink` sets it to "riptide", so the documented module-mode
+    # entry point keeps working. Refuse before any work, deterministically.
+    if not __package__:
+        print(
+            "riptide.deepthink must be imported and run as a module: "
+            "python -m riptide.deepthink or `from riptide.deepthink import run`",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
     run()
 
 
