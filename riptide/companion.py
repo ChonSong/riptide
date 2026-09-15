@@ -742,10 +742,35 @@ class Companion:
 
         # 1.4: Only post when there's something actionable to say
         if deterministic_report and not deterministic_report.has_actionable:
+            # Post a "no findings" confirmation so the review gate can verify completion
             logger.info(
-                "No actionable findings for %s#%d — skipping comment",
+                "No actionable findings for %s#%d — posting pass confirmation",
                 full_name, pr_number,
             )
+            try:
+                # Use the caller-selected client. The poller supplies a
+                # GhCliClient with installation_id=None (GhCliClient accepts the
+                # id for API compatibility and ignores it), so guarding on
+                # installation_id silently suppressed every pass confirmation
+                # from the poller — leaving 'Riptide Review Required' red on
+                # clean PRs.
+                if active_client:
+                    body = (
+                        f"## Review: ✅ No findings\n\n"
+                        f"**Riptide Review Complete — No findings**\n\n"
+                        f"Deterministic analysis found no issues with this PR.\n\n"
+                        f"**Depth:** {getattr(self, '_depth', 'standard')} | "
+                        f"**Verdict:** pass"
+                    )
+                    active_client.post_pr_comment(installation_id, owner, repo, pr_number, body)
+                    logger.info("Posted pass confirmation for %s#%d", full_name, pr_number)
+                    # Record the reviewed SHA: without it the same revision is
+                    # re-analysed (duplicate pass comments) and the next delta
+                    # review compares against a stale base.
+                    if current_sha:
+                        self._set_last_sha(owner, repo, pr_number, current_sha)
+            except Exception as e:
+                logger.error("Failed to post pass confirmation: %s", e)
             return
 
         # Detect UI files for ProofShot section

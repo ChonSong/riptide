@@ -542,7 +542,12 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
     commenter = comment.get("user", {}).get("login", "unknown")
 
     # Route 1: Companion skip/resume commands
-    companion = get_companion()
+    try:
+        companion = get_companion()
+    except Exception as e:
+        log.exception(f"[{delivery_id}] get_companion() failed: {e}")
+        companion = None
+    
     if companion:
         try:
             result = companion.handle_comment(
@@ -567,9 +572,12 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
                         else:
                             log.warning(f"[{delivery_id}] No gh CLI client available for fallback")
                 return Response(status_code=200)
-        except Exception as e:
-            log.exception(f"[{delivery_id}] Companion error (non-fatal)")
+        except (RuntimeError, ConnectionError, TimeoutError) as e:
+            log.exception(f"[{delivery_id}] Companion error (non-fatal): {e}")
             # Fall through to Route 2 — companion crash must not block review commands
+        except Exception as e:
+            log.exception(f"[{delivery_id}] Unexpected companion error (non-fatal): {e}")
+            # Fall through to Route 2
 
     # Route 2: Unified @riptide-bot command router
     # Support gh CLI fallback for repos without App installation
@@ -598,10 +606,20 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
             )
             if response:
                 if installation_id:
-                    client = github_client()
-                    client.post_pr_comment(
-                        installation_id, owner, repo_name, pr_number, response
-                    )
+                    try:
+                        client = github_client()
+                        client.post_pr_comment(
+                            installation_id, owner, repo_name, pr_number, response
+                        )
+                    except Exception as e:
+                        log.exception(f"[{delivery_id}] Route 2: App API post failed — trying gh CLI fallback")
+                        gh_cli = get_gh_cli_client()
+                        if gh_cli:
+                            gh_cli.post_pr_comment(
+                                installation_id, owner, repo_name, pr_number, response
+                            )
+                        else:
+                            log.warning(f"[{delivery_id}] Route 2: gh CLI fallback unavailable")
                 elif route2_gh_cli:
                     route2_gh_cli.post_pr_comment(
                         installation_id, owner, repo_name, pr_number, response
