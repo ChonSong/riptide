@@ -87,7 +87,8 @@ class TestVerdictFirst:
 
     def test_verdict_starts_with_count(self, critical_finding):
         body = assemble_review_body([critical_finding], "ChonSong", "riptide", 1)
-        assert body.startswith("1 critical")
+        # The CI gate marker leads the body with the verdict immediately after it
+        assert body.startswith("## Review: 1 critical")
 
     def test_verdict_includes_warning_count(self, critical_finding, warning_finding):
         body = assemble_review_body([critical_finding, warning_finding], "ChonSong", "riptide", 1)
@@ -505,8 +506,8 @@ class TestFullOutputStructure:
             [critical_finding, warning_finding], "ChonSong", "riptide", 1,
             model="LongCat-2.0"
         )
-        # Verdict first
-        assert body.startswith("1 critical, 1 warning(s)")
+        # Gate marker + verdict first
+        assert body.startswith("## Review: 1 critical, 1 warning(s)")
         # Numbered findings
         assert "1. **Race condition**" in body
         assert "2. **Missing retry**" in body

@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -123,22 +125,39 @@ class Scribe:
         pr_number: int,
         findings: list[dict],
         diagram_url: Optional[str] = None,
-        model: str = "custom:LongCat-2.0",
+        model: Optional[str] = None,
+        findings_path: Optional[str] = None,
+        provider: Optional[str] = None,
     ) -> dict:
-        """Post review using assemble_review.py."""
-        # Write findings to temp file
-        findings_path = "/tmp/findings.json"
+        """Post review using assemble_review.py.
+
+        The findings file is per-run: a single shared /tmp/findings.json let one
+        concurrent review's write be read and posted by another session's
+        assembler. The model attribution is threaded through so reviews are not
+        all signed with one hardcoded model name.
+        """
+        # Write findings to a per-run file (never the shared /tmp/findings.json)
+        if not findings_path:
+            findings_path = (
+                f"/tmp/riptide-review-findings-{owner}-{repo}-{pr_number}-"
+                f"{uuid.uuid4().hex[:8]}.json"
+            )
+        Path(findings_path).parent.mkdir(parents=True, exist_ok=True)
         with open(findings_path, 'w') as f:
             json.dump(findings, f, indent=2)
-        
+
         cmd = [
             "python", "-m", "riptide.assemble_review",
             "--findings", findings_path,
             "--owner", owner,
             "--repo", repo,
             "--pr", str(pr_number),
-            "--model", model,
+            "--model", model or os.environ.get("RIPTIDE_DEEPTHINK_MODEL", "custom:LongCat-2.0"),
         ]
+
+        provider_value = provider or os.environ.get("RIPTIDE_DEEPTHINK_PROVIDER")
+        if provider_value:
+            cmd.extend(["--provider", provider_value])
         
         if diagram_url:
             cmd.extend(["--diagram-url", diagram_url])

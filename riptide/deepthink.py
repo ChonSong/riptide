@@ -94,6 +94,140 @@ def _save_state(state: dict[str, dict]):
             store.set_pr_reviewed_at(pr_key, entry["reviewed_at"])
 
 
+# ── Review markers / reservation liveness ────────────────────────────────────
+
+# Markers that a *review* produced. Deliberately excludes the Companion's pass
+# confirmation ("## Review: ✅ No findings" / "Riptide Review Complete"), which
+# used to be counted as a review and hid PRs whose deep-think review never
+# landed. Real reviews carry one of these.
+RIPTIDE_REVIEW_MARKERS = (
+    "## 🔍 Findings",    # legacy review format
+    "## 🎯 Summary",     # review summary format
+    "Riptide Review ·",  # review sign-off (the Companion's pass confirmation has none)
+)
+
+CRON_JOBS_PATH = Path(
+    os.environ.get("RIPTIDE_CRON_JOBS_PATH", "~/.hermes/cron/jobs.json")
+).expanduser()
+
+
+def _cron_job_states() -> "dict[str, dict] | None":
+    """Map cron job name -> {state, last_status, enabled} from the Hermes store.
+
+    Returns None when the store cannot be read, which callers must treat as
+    "unknown" rather than "finished" (an empty dict means the store is readable
+    and simply has no such job).
+    """
+    try:
+        data = json.loads(CRON_JOBS_PATH.read_text())
+    except Exception as e:
+        log.warning("Could not read cron job store %s: %s", CRON_JOBS_PATH, e)
+        return None
+
+    states: dict[str, dict] = {}
+    for job in data.get("jobs", []) or []:
+        name = job.get("name")
+        if name:
+            # Later entries win: the store appends, so the newest job with a
+            # given name is the current one for that PR.
+            states[name] = {
+                "state": job.get("state"),
+                "last_status": job.get("last_status"),
+                "enabled": job.get("enabled"),
+            }
+    return states
+
+
+def _release_finished_reservations(
+    state: StateStore,
+    name_prefix: str,
+    owner: str = "",
+    repo: str = "",
+    pr_number: int = 0,
+) -> int:
+    """Release review reservations that have already served their purpose.
+
+    ``reserve_job`` refuses a new review while a ``pending`` row exists, and the
+    fallback TTL is two hours — so without this, a review that ran (or crashed,
+    or whose session outlived its job record) blocked every later
+    ``@riptide-bot review`` on that PR. A reservation is finished when the cron
+    job reports completion, has vanished, has no further runs scheduled, or when
+    the PR already carries a delivered review (which is the outcome the lock was
+    protecting).
+    """
+    states = _cron_job_states()
+    if states is None:
+        return 0  # unknown store state — fall back to the age-based cleanup
+
+    info = states.get(name_prefix)
+    job_finished = (
+        info is None  # job vanished from the store
+        or info.get("state") == "completed"
+        or info.get("enabled") is False
+        or (info.get("last_run_at") and not info.get("next_run_at"))
+    )
+
+    # The job record can lag a long-running or already-delivered session, so
+    # check the outcome the reservation exists to protect.
+    if not job_finished and owner and repo and pr_number:
+        job_finished = _has_riptide_review(owner, repo, pr_number)
+
+    if not job_finished:
+        return 0
+
+    released = 0
+    for job in state.list_pending_jobs(name_prefix):
+        state.mark_failed(job["id"])
+        released += 1
+        log.info(
+            "Released stale review reservation %s (job state=%s, review_delivered=%s)",
+            job["id"], (info or {}).get("state", "absent"), job_finished,
+        )
+    return released
+
+
+def _has_riptide_review(owner: str, repo: str, pr_number: int) -> bool:
+    """True when the PR already carries a Riptide review comment.
+
+    SHA bookkeeping alone is not proof of a review: a spawn that failed or was
+    dropped still recorded a SHA, and treating that as "already processed" is
+    what stopped the poller from ever re-reviewing those PRs. Fails closed
+    (returns True) when the check itself fails, so an API outage cannot cause
+    review spam.
+    """
+    try:
+        proc = subprocess.run(
+            [
+                "gh", "api",
+                f"repos/{owner}/{repo}/issues/{pr_number}/comments",
+                "--paginate", "--jq", "[.[].body]",
+            ],
+            capture_output=True, text=True, timeout=90,
+        )
+    except Exception as e:
+        log.warning("  #%d review-exists check error: %s", pr_number, e)
+        return True
+
+    if proc.returncode != 0:
+        log.warning(
+            "  #%d review-exists check failed: %s",
+            pr_number, (proc.stderr or "").strip()[:120],
+        )
+        return True
+
+    try:
+        bodies = json.loads(proc.stdout or "[]")
+    except Exception as e:
+        log.warning("  #%d review-exists parse error: %s", pr_number, e)
+        return True
+
+    return any(
+        marker in (body or "")
+        for body in bodies
+        for marker in RIPTIDE_REVIEW_MARKERS
+    )
+
+
 def _was_reviewed_today(owner: str, repo: str, pr_number: int) -> bool:
     """Check if this PR was reviewed in the last 24 hours (StateStore-backed)."""
     pr_key = f"{owner}/{repo}#{pr_number}"
@@ -182,6 +316,8 @@ def handle_review_command(
             pr_number=pr_number,
             pr_details=pr_details,
             files=files,
+            model=DEEPTHINK_MODEL,
+            provider=DEEPTHINK_PROVIDER,
         )
         log.info(
             "Conductor webhook review pipeline created for %s/%s#%d: %s (phase=%s, workstreams=%d)",
@@ -259,6 +395,9 @@ def _spawn_deepthink(
     for _retry in range(3):
         try:
             state.cleanup_stale_pending()
+            # A reservation whose cron job already finished (or whose review was
+            # already delivered) must not block this spawn.
+            _release_finished_reservations(state, name, owner, repo, pr_number)
             break  # Success — proceed to reserve
         except Exception as e:
             if "locked" in str(e).lower() and _retry < 2:
@@ -332,6 +471,8 @@ def _spawn_deepthink(
             pr_number=pr_number,
             pr_details=pr_details,
             files=files_changed,
+            model=DEEPTHINK_MODEL,
+            provider=DEEPTHINK_PROVIDER,
         )
         log.info(
             "Conductor track created for %s/%s#%d: %s (phase=%s, workstreams=%d)",
@@ -806,9 +947,17 @@ def run():
             pr_key = f"{repo_full}#{pr_number}"
             h = state_store.get_pr_heuristics(pr_key)
             if h["last_sha"] == head_sha:
-                log.info(f"  #{pr_number} skip — already processed (SHA {head_sha[:12]})")
-                skipped_dedup += 1
-                continue
+                if _has_riptide_review(owner, repo_name, pr_number):
+                    log.info(f"  #{pr_number} skip — already processed (SHA {head_sha[:12]})")
+                    skipped_dedup += 1
+                    continue
+                # A recorded SHA is not proof of a review: the spawn may have
+                # failed or been dropped. Fall through and review it properly
+                # instead of skipping the PR forever.
+                log.info(
+                    f"  #{pr_number} recorded SHA {head_sha[:12]} has no review "
+                    f"comment — re-triggering"
+                )
 
             if _was_reviewed_today(owner, repo_name, pr_number):
                 log.info(f"  #{pr_number} skip — reviewed in last 24h")

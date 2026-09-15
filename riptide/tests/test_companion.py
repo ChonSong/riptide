@@ -485,9 +485,10 @@ class TestDeterministicAnalysis:
     """Tests for the deterministic analysis integration in Companion."""
 
     def test_posts_pass_confirmation_when_no_actionable_findings(self, mock_ollama):
-        """No findings still posts a pass confirmation carrying the CI gate
-        marker (`## Review:`), otherwise 'Riptide Review Required' deadlocks
-        every clean PR. Regression: the body previously lacked that marker."""
+        """No findings still posts a pass confirmation carrying the gate marker
+        (`## Riptide Pass:`), otherwise 'Riptide Review Required' deadlocks
+        every clean PR. The marker is deliberately distinct from the review
+        markers so the poller can tell a pass from a review."""
         companion = make_companion()
         companion.enable_deterministic = True
         companion.enable_graphify = False
@@ -508,7 +509,7 @@ class TestDeterministicAnalysis:
         # Exactly one comment, and it must satisfy the CI gate's marker check
         companion.client.post_pr_comment.assert_called_once()
         body = companion.client.post_pr_comment.call_args[0][4]
-        assert "## Review:" in body
+        assert "## Riptide Pass:" in body
         assert "No findings" in body
         assert "Verdict:** pass" in body
         # No table rows with 🔴/🟡 — the gate treats this as clean
@@ -545,7 +546,10 @@ class TestDeterministicAnalysis:
 
         poller_client.post_pr_comment.assert_called_once()
         assert poller_client.post_pr_comment.call_args[0][0] is None
-        assert "## Review:" in poller_client.post_pr_comment.call_args[0][4]
+        # Marker-agnostic on purpose: the exact gate marker differs between the
+        # branches in this stack (it is asserted exactly by the sibling test).
+        body = poller_client.post_pr_comment.call_args[0][4]
+        assert "No findings" in body and "Verdict:** pass" in body
         companion.client.post_pr_comment.assert_not_called()
 
     def test_pass_confirmation_records_the_reviewed_sha(self, mock_ollama):
