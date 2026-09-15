@@ -188,6 +188,34 @@ class TestCrossProcessLostUpdate:
             )
             _assert_no_tmp_leftovers(tmp_path)
 
+    def test_scribe_reports_a_missing_track_instead_of_succeeding(self):
+        """A dropped record must not read as a successful one.
+
+        ``record_review_*`` render their return value into the workstream's
+        outputs, so silently no-oping on a missing track would look like a
+        successful record to the caller.
+        """
+        from riptide.pipeline import work_state
+        from riptide.pipeline.scribe import Scribe
+
+        scribe = Scribe()
+        ghost = "track-that-was-never-created"
+
+        started = scribe.record_review_start(ghost, 1)
+        completed = scribe.record_review_complete(ghost, 1, [{"severity": "low"}])
+
+        assert started == {"recorded": False, "reason": "track not found"}, started
+        assert completed["recorded"] is False, completed
+        assert completed["reason"] == "track not found", completed
+
+        # The real path still reports success, and still writes.
+        real = "track-scribe-report"
+        work_state.create_track(real, "scribe report", "review", {"ChonSong/riptide": {}})
+        assert scribe.record_review_start(real, 7) == {"recorded": True}
+        done = scribe.record_review_complete(real, 7, [{"severity": "low"}])
+        assert done == {"recorded": True, "findings_count": 1}, done
+        assert work_state.get_track(real)["last_review"]["pr"] == 7
+
     def test_state_file_always_parseable_while_processes_write(self, tmp_path):
         """A reader must never observe a truncated or half-written state file."""
         state_path = tmp_path / "atomic.json"

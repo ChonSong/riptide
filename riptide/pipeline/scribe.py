@@ -30,15 +30,25 @@ class Scribe:
 
         Runs as one atomic read→mutate→write under the work-state lock so a
         concurrent review in another process cannot drop this update.
+
+        A missing track is reported as ``recorded: False`` rather than
+        silently succeeding: the caller renders this dict into the workstream's
+        outputs, so an invisible no-op would read as a successful record.
         """
+        found = False
+
         def _do(state):
+            nonlocal found
             track = state.get("tracks", {}).get(track_id)
             if track is None:
                 return
+            found = True
             track.setdefault("last_review", {})["pr"] = pr_number
             track["last_review"]["started_at"] = now()
 
         modify_state(_do)
+        if not found:
+            return {"recorded": False, "reason": "track not found"}
         return {"recorded": True}
     
     def record_review_complete(
@@ -48,11 +58,19 @@ class Scribe:
         findings: list[dict],
         diagram_url: Optional[str] = None,
     ) -> dict:
-        """Record review completion in work-state.json under the cross-process lock."""
+        """Record review completion in work-state.json under the cross-process lock.
+
+        Reports ``recorded: False`` when the track is absent, so a dropped
+        update cannot be mistaken for a successful one by the caller.
+        """
+        found = False
+
         def _do(state):
+            nonlocal found
             track = state.get("tracks", {}).get(track_id)
             if track is None:
                 return
+            found = True
 
             track.setdefault("last_review", {}).update({
                 "pr": pr_number,
@@ -68,6 +86,8 @@ class Scribe:
             }
 
         modify_state(_do)
+        if not found:
+            return {"recorded": False, "reason": "track not found"}
         return {"recorded": True, "findings_count": len(findings)}
     
     def update_workstream(
