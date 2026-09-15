@@ -16,17 +16,32 @@ class TestWebhookEndpoint:
         assert resp.status_code == 200
         assert resp.json()["status"] == "ok"
 
-    def test_invalid_signature_returns_401(self, client, invalid_signature, webhook_body):
-        resp = client.post(
-            "/webhook/github",
-            content=webhook_body,
-            headers={
-                "X-Hub-Signature-256": invalid_signature,
-                "X-GitHub-Event": "pull_request",
-                "X-GitHub-Delivery": "delivery-invalid-sig",
-            },
-        )
-        assert resp.status_code == 401
+    def test_invalid_signature_returns_200_and_processes_nothing(
+        self, client, invalid_signature, webhook_body
+    ):
+        """A bad signature is a deliberate soft drop, not a 401.
+
+        webhook.py:260-263 logs "Invalid webhook signature … returning 200,
+        cron poller will pick up PR" (commit ae01b62) so GitHub does not enter a
+        retry storm against a request we never intend to serve from here; the
+        cron poller covers the PR instead. This asserts the current contract and
+        that the request was dropped — no downstream work may be started.
+        """
+        with patch("riptide.webhook.handle_pull_request") as mock_handler, \
+             patch("riptide.webhook.get_companion") as mock_companion:
+            resp = client.post(
+                "/webhook/github",
+                content=webhook_body,
+                headers={
+                    "X-Hub-Signature-256": invalid_signature,
+                    "X-GitHub-Event": "pull_request",
+                    "X-GitHub-Delivery": "delivery-invalid-sig",
+                },
+            )
+        assert resp.status_code == 200
+        # Nothing downstream ran: the unauthenticated body was never dispatched.
+        mock_handler.assert_not_called()
+        mock_companion.assert_not_called()
 
     def test_valid_signature_routes_to_handler(self, client, valid_signature, webhook_body):
         with patch("riptide.webhook.handle_pull_request") as mock_handler:
@@ -395,7 +410,14 @@ class TestWorkQueueRecovery:
     """Tests for work_queue startup recovery."""
 
     def test_recover_pending_work_marks_old_items_failed(self):
-        """recover_pending_work() marks items older than 5 minutes as failed."""
+        """recover_pending_work() marks items older than 5 minutes as failed.
+
+        The stale error string is the tunable, documented default from
+        state.py:341 — ``RIPTIDE_RECOVERY_STALE_ERROR`` / "startup_recovery"
+        (commit 34d4e23); "stale" is the unrelated literal used by
+        cleanup_stale_work(). Canonical coverage of this and of the PID filter:
+        test_work_queue_recovery.py::TestRecoverPendingWork.
+        """
         from riptide.state import StateStore
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -422,18 +444,31 @@ class TestWorkQueueRecovery:
                 ("old-review-123",),
             ).fetchone()
             assert row[0] == "failed"
-            assert row[1] == "stale"
+            assert row[1] == "startup_recovery"
 
     def test_recover_pending_work_returns_recent_items(self):
-        """recover_pending_work() returns items younger than 5 minutes."""
+        """recover_pending_work() returns items younger than 5 minutes.
+
+        Recovery only ever claims items left behind by a *previous* process, so
+        the row must first be re-stamped with a dead PID: enqueue_work() writes
+        pid=os.getpid() (state.py:263-265) and the claim query excludes the
+        current PID (state.py:353). Without that the test would model no
+        restart at all, which is the entire point of the contract.
+        """
         from riptide.state import StateStore
 
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "test_state.db")
             store = StateStore(db_path)
 
-            # Insert a recent item
+            # Insert a recent item, then simulate the restart that dropped it
             store.enqueue_work("recent-review-456", "review", {"pr_number": 2})
+            conn = store._get_conn()
+            conn.execute(
+                "UPDATE work_queue SET pid = 999999 WHERE id = ?",
+                ("recent-review-456",),
+            )
+            conn.commit()
 
             # Recover should return it
             pending = store.recover_pending_work()
