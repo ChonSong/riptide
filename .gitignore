@@ -22,10 +22,14 @@ bun.lock
 docker-compose.build.yml
 docker-compose.ollama.yml
 docker-compose.selfhost.yml
-docs/
+# docs/ and scripts/ were ignored by a leftover Node/terraform template block, but
+# both hold tracked, load-bearing files (docs/huey-operations.md historically;
+# scripts/deploy.sh — the webhook's auto-deploy path). Keeping them ignored meant a
+# newly added doc/script was silently untracked. Track them.
+# docs/
 infra/
 package.json
-scripts/
+# scripts/
 terraform/
 turbo.json
 .octopusignore

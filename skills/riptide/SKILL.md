@@ -64,15 +64,18 @@ RIPTIDE_DATA_DIR=/home/sc/.local/share/riptide
 RIPTIDE_WATCHED_REPOS=ChonSong/riptide,ChonSong/hermes-webui
 RIPTIDE_OUR_USERNAME=ChonSong
 RIPTIDE_OUR_ORG=ChonSong
-OLLAMA_BASE_URL=http://localhost:43311
+OLLAMA_BASE_URL=http://localhost:11434
 
 # Companion
 RIPTIDE_COMPANION_MODEL=qwen2.5-coder:7b
 COMPANION_ENABLE_GRAPHIFY=1
 COMPANION_ENABLE_DETERMINISTIC=1
 
-# Review (Bot 2)
-RIPTIDE_DEEPTHINK_MODEL=LongCat-2.0
+# Review (Bot 2) — the .env pin is authoritative; check it, don't assume it:
+#   grep -E "RIPTIDE_(DEEPTHINK|FIX)_(MODEL|PROVIDER)" /home/sc/workspace/riptide/.env
+# Code defaults (LongCat-2.0/longcat) are fallbacks only — not what prod runs.
+RIPTIDE_DEEPTHINK_MODEL=<from .env>
+RIPTIDE_DEEPTHINK_PROVIDER=<from .env>
 RIPTIDE_STALENESS_MINUTES=30
 RIPTIDE_MIN_LOC_CHANGED=100
 
