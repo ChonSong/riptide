@@ -98,10 +98,14 @@ def assemble_review_body(
     # Build parts
     parts = []
 
-    # 1. Verdict line (first), carrying the CI gate marker. The
-    # `riptide-review-required` workflow only counts a comment as a review when
-    # the body contains '## 🔍 Findings', '## 🎯 Summary' or '## Review:' —
-    # without the marker a findings-bearing review could not gate a merge.
+    # 1. Verdict line (first). This header is human-facing. The
+    # `riptide-review-required` gate does NOT test for '## Review:' — it counts a
+    # comment as a review when the body contains '## 🔍 Findings', '## 🎯 Summary',
+    # '## Riptide Pass:', the 'Riptide Review ·' sign-off, or critical+warning.
+    # The sign-off added below is what actually carries a review past the gate,
+    # and the 🔴/🟡 rows below it are what hold the gate red until a follow-up
+    # commit lands. Never drop the sign-off on the grounds that this header is
+    # enough: doing so silently un-gates every findings review.
     parts.append(f"## Review: {_build_verdict(criticals, warnings)}")
 
     # 2. Numbered findings (cap at 5 visible) — human-readable first
