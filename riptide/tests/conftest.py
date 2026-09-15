@@ -2,6 +2,12 @@
 """
 Shared test infrastructure for Riptide.
 Mocks GitHub API, Ollama, Hermes cron, and external CLIs.
+
+Test runs are hermetic with respect to every ambient state path the package
+uses: the autouse ``hermetic_state`` fixture below (with ``hermetic_state_root``
+for the session root) keeps the suite from reading or writing the developer's
+real state, so the set of failing node IDs no longer depends on what happens to
+be in ``~/.hermes/state/riptide-work-state.json`` on this machine.
 """
 
 import os
@@ -9,9 +15,97 @@ import json
 import hmac
 import hashlib
 import pytest
-import tempfile
 from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
+
+from riptide.tests import _hermetic_state
+
+# ── Hermetic state isolation ────────────────────────────────────────────────
+#
+# The isolation itself lives in riptide/tests/_hermetic_state.py, which carries
+# the full inventory of ambient paths and why each one is reached.  Two facts
+# matter here:
+#
+# 1. It is applied at *import time*, not in a fixture.  Nearly every state path
+#    in the package is resolved from the ambient environment when the module is
+#    imported — as a module-level constant (work_state.WORK_STATE_PATH,
+#    state.DEFAULT_DB_PATH, state.POLLER_DB_PATH, deepthink.CRON_JOBS_PATH,
+#    webhook.DATA_DIR), as a class default (StateStore.__init__'s bound
+#    ``db_path=DEFAULT_DB_PATH``) or as a default argument.  A fixture runs after
+#    collection, i.e. after every test module has already imported riptide.*, so
+#    it could not fix those bindings.
+#
+# 2. It must therefore be applied before the first riptide import of the
+#    process.  That import does not happen in this file: pytest executes the
+#    package ``riptide/tests/__init__.py`` before this conftest, and that module
+#    does ``from riptide.webhook import app``, pulling in riptide.webhook →
+#    riptide.state → riptide.review_memory → riptide.orchestrator →
+#    riptide.labeler.  Hence ``_hermetic_state.apply()`` is called from
+#    ``riptide/tests/__init__.py`` first, and re-applied here (idempotent) as a
+#    belt-and-braces measure for anything that imports riptide even earlier.
+#
+# ``_hermetic_state.verify()`` below asserts that every already-imported module
+# constant really does point inside the session temp root, so a future change to
+# the import order fails loudly instead of silently leaking developer state
+# back into the suite.
+#
+# One class of leak cannot be prevented from here: ``test_deepthink_config.py``
+# (lines 16-35) and ``test_fixer.py`` (TestFixerDefaults, lines 62-94) reconfigure
+# their module by reloading it inside ``patch.dict(os.environ, {}, clear=True)``,
+# which re-binds its module-level paths from a *cleared* environment — i.e. back
+# to the developer's real defaults.  The autouse fixture therefore calls
+# ``_hermetic_state.heal()`` before each test to repoint any constant that
+# drifted outside the temp root; see that function for the details.
+#
+# Not redirected (documented in _hermetic_state.py too):
+#   * /tmp/custom_riptide_test.db — hardcoded in test_state_store_path.py:42; a
+#     fixed, machine-independent path, so it cannot make the failure set depend
+#     on ambient state.  Left untouched on purpose.
+#   * /tmp/riptide-review-<run>-<suffix> (conductor.py:57, scribe.py:142) — no
+#     env override exists for them, so they are not reachable from the test side
+#     without editing production code.
+#   * ``tests/`` at the repo root is outside ``pyproject.toml``'s ``testpaths``
+#     and is not collected by this suite.
+
+_hermetic_state.apply()
+_hermetic_state.verify()
+
+SESSION_TMP = _hermetic_state.SESSION_TMP
+_ISOLATED_HOME = _hermetic_state.ISOLATED_HOME
+
+
+@pytest.fixture(scope="session", autouse=True)
+def hermetic_state_root():
+    """Autouse: session-wide throwaway state root, deleted at session end.
+
+    Every state path the suite can touch (work-state JSON, state.db + .lock and
+    -wal/-shm sidecars, metadata.db, documentarian.db, the Hermes cron jobs.json,
+    DATA_DIR, the workspace roots) resolves inside this directory instead of the
+    developer's real HOME.  See riptide/tests/_hermetic_state.py.
+    """
+    _hermetic_state.apply()
+    yield SESSION_TMP
+    _hermetic_state.cleanup()
+
+
+@pytest.fixture(autouse=True)
+def hermetic_state(hermetic_state_root):
+    """Autouse: re-assert state isolation around every test.
+
+    The binding happens at import time (see the header note); this guard
+    re-applies the environment per test, repairs any module constant that a
+    previous test's ``importlib.reload(...)`` under ``clear=True`` re-bound to a
+    developer default (see ``_hermetic_state.heal``), and then verifies that
+    every already-imported state path resolves inside the session temp root.
+    """
+    _hermetic_state.apply()
+    _hermetic_state.heal()
+    _hermetic_state.verify()
+    assert os.environ["HOME"] == str(_ISOLATED_HOME), (
+        "test run is not hermetic: HOME is not the session temp root"
+    )
+    yield hermetic_state_root
+
 
 # ── Webhook Fixtures ──────────────────────────────────────────────────────
 
