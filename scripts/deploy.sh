@@ -8,10 +8,13 @@
 #
 set -euo pipefail
 
-REPO_DIR="/home/sc/workspace/riptide"
+REPO_DIR="${RIPTIDE_DEPLOY_REPO:-/home/sc/workspace/riptide-prod}"
 LOG_FILE="${RIPTIDE_DEPLOY_LOG:-/tmp/riptide-deploy.log}"
 DEPLOY_BRANCH="${RIPTIDE_DEPLOY_BRANCH:-main}"
 LOCK_FILE="${RIPTIDE_DEPLOY_LOCK:-/tmp/riptide-deploy.lock}"
+# Overridable so the deploy flow can be tested without touching the real service.
+RESTART_CMD="${RIPTIDE_DEPLOY_RESTART_CMD:-systemctl --user restart riptide.service}"
+STATUS_CMD="${RIPTIDE_DEPLOY_STATUS_CMD:-systemctl --user is-active --quiet riptide.service}"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"; }
 
@@ -48,14 +51,14 @@ find . -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 
 # ── 3. Restart service ──────────────────────────────────────────────────────
 log "Restarting riptide.service..."
-if ! systemctl --user restart riptide.service >> "$LOG_FILE" 2>&1; then
-    log "ERROR: systemctl restart failed"
+if ! $RESTART_CMD >> "$LOG_FILE" 2>&1; then
+    log "ERROR: restart command failed ($RESTART_CMD)"
     exit 1
 fi
 
 # ── 4. Verify ───────────────────────────────────────────────────────────────
 sleep 3
-if systemctl --user is-active --quiet riptide.service; then
+if $STATUS_CMD; then
     log "=== Deploy complete — service active ==="
 else
     log "=== Deploy FAILED — service not active ==="

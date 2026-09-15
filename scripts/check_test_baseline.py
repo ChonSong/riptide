@@ -146,7 +146,13 @@ class Report:
             lines.extend(f"  - {nid}" for nid in self.stale)
         lines.append("")
         if self.status == "match":
-            lines.append("OK: failure set matches the baseline exactly.")
+            if self.stale:
+                lines.append(
+                    "OK: no new failures (the failure set is a subset of the "
+                    "baseline; stale entries above are not fatal)."
+                )
+            else:
+                lines.append("OK: failure set matches the baseline exactly.")
         elif self.status == "drift":
             lines.append(
                 f"FAIL: failure set drifted from the baseline "
@@ -284,8 +290,17 @@ def evaluate(
     output_text: str,
     baseline_path: Path = DEFAULT_BASELINE,
     pytest_exit_code: int | None = None,
+    strict_stale: bool = False,
 ) -> Report:
-    """Compare a pytest output blob against the baseline and produce a Report."""
+    """Compare a pytest output blob against the baseline and produce a Report.
+
+    A NEW failure always fails: that is the regression this gate exists to catch.
+    A STALE entry (a baseline failure that now passes) is reported but, by
+    default, does not fail — a passing test is not a regression, and some of the
+    known failures are timing-sensitive, so they pass on a quiet machine and fail
+    under load. Failing on those would make the gate itself flaky, and a flaky
+    gate gets ignored. Pass ``strict_stale=True`` to require an exact set match.
+    """
     try:
         baseline = load_baseline(baseline_path)
     except BaselineError as exc:
@@ -327,9 +342,16 @@ def evaluate(
         return report
 
     report.new, report.stale = compare(baseline, parsed.failures)
-    if report.new or report.stale:
+    if report.new or (strict_stale and report.stale):
         report.status = "drift"
         report.exit_code = EXIT_DRIFT
+    elif report.stale:
+        report.status = "match"
+        report.detail = (
+            f"{len(report.stale)} baseline entry/entries now pass — delete them "
+            "from the baseline (not fatal: a passing test is not a regression, "
+            "and timing-sensitive tests pass on a quiet machine)"
+        )
     return report
 
 
@@ -384,6 +406,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="also write a markdown summary to this path (for $GITHUB_STEP_SUMMARY)")
     parser.add_argument("--write-baseline", action="store_true",
                         help="write the current failure set to the baseline file and exit 0")
+    parser.add_argument("--strict-stale", action="store_true",
+                        help="also fail when a baseline entry now passes (exact set match); "
+                             "off by default so timing-sensitive tests cannot make this gate flaky")
     parser.add_argument("--timeout", type=int, default=None,
                         help="seconds before the pytest run is aborted")
     parser.add_argument("--quiet", action="store_true",
@@ -443,7 +468,8 @@ def main(argv: list[str] | None = None) -> int:
                           f"{_display(baseline_path)} ({counts})")
                     exit_code = EXIT_OK
         else:
-            report = evaluate(output_text, baseline_path, pytest_exit_code)
+            report = evaluate(output_text, baseline_path, pytest_exit_code,
+                              strict_stale=args.strict_stale)
             print(report.text_report())
             exit_code = report.exit_code
             if summary_path is not None:

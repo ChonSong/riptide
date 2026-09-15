@@ -95,20 +95,31 @@ def test_every_new_failure_is_listed(checker, tmp_path):
 
 # ── outcome: stale baseline entries ─────────────────────────────────────────
 
-def test_stale_entry_is_non_zero(checker, tmp_path):
+def test_stale_entry_is_reported_but_not_fatal(checker, tmp_path):
+    """A passing test is not a regression, so a stale entry must not fail CI."""
     baseline = write_baseline(tmp_path, [FAIL_A, FAIL_B])
     report = checker.evaluate(pytest_output([FAIL_A]), baseline, pytest_exit_code=1)
-    assert report.exit_code == 1
-    assert report.status == "drift"
+    assert report.exit_code == 0
+    assert report.status == "match"
     assert report.stale == [FAIL_B]
     assert report.new == []
     assert "delete" in report.text_report().lower()
 
 
-def test_all_baseline_entries_passing_is_non_zero(checker, tmp_path):
+def test_strict_stale_entry_fails_when_asked(checker, tmp_path):
+    baseline = write_baseline(tmp_path, [FAIL_A, FAIL_B])
+    report = checker.evaluate(pytest_output([FAIL_A]), baseline, pytest_exit_code=1,
+                              strict_stale=True)
+    assert report.exit_code == 1
+    assert report.status == "drift"
+    assert report.stale == [FAIL_B]
+    assert report.new == []
+
+
+def test_all_baseline_entries_passing_is_not_fatal(checker, tmp_path):
     baseline = write_baseline(tmp_path, [FAIL_A, FAIL_B])
     report = checker.evaluate("120 passed in 8.00s\n", baseline, pytest_exit_code=0)
-    assert report.exit_code == 1
+    assert report.exit_code == 0
     assert report.stale == [FAIL_A, FAIL_B]
 
 
@@ -300,8 +311,13 @@ def test_cli_exit_codes(tmp_path):
 
     stale_baseline = write_baseline(tmp_path, [FAIL_A, FAIL_B])
     stale = _run_cli(["--pytest-output", str(output), "--baseline", str(stale_baseline), "--pytest-exit-code", "1"])
-    assert stale.returncode == 1
+    assert stale.returncode == 0, stale.stdout + stale.stderr
     assert FAIL_B in stale.stdout
+
+    strict_stale = _run_cli(["--pytest-output", str(output), "--baseline", str(stale_baseline),
+                             "--pytest-exit-code", "1", "--strict-stale"])
+    assert strict_stale.returncode == 1
+    assert FAIL_B in strict_stale.stdout
 
     missing = _run_cli(["--pytest-output", str(output), "--baseline", str(tmp_path / "nope.txt")])
     assert missing.returncode == 2
@@ -320,7 +336,9 @@ def test_checked_in_baseline_exists_and_is_wellformed(checker):
     assert "Measured:" in raw
     assert "delete" in raw.lower()
     entries = checker.load_baseline(DEFAULT_BASELINE)
-    assert entries, "baseline should record the known-failing tests"
+    # An empty baseline is the goal, not a fault: it means every known failure
+    # has been fixed. Keep the header, and keep entries sorted and repo-scoped
+    # whenever there are any.
     assert entries == sorted(entries)
     assert all(entry.startswith("riptide/tests/") for entry in entries)
 

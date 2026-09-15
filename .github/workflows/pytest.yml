@@ -18,7 +18,7 @@ jobs:
   pytest:
     name: pytest baseline gate
     runs-on: ubuntu-latest
-    # Full suite is ~7 min locally; 25 min bounds a cold-cache CI run.
+    # The hermetic suite is ~40s locally; 25 min bounds a cold-cache CI run.
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
@@ -38,9 +38,10 @@ jobs:
       - name: Check test failures against the baseline
         run: |
           set -uo pipefail
-          # The checker exits 0 only when the failing set matches
-          # riptide/tests/baseline_failures.txt exactly. Capture the exit code
-          # so the summary is published even on a red run.
+          # Fails when the suite has a failure that is not in
+          # riptide/tests/baseline_failures.txt (or, with --strict-stale, when a
+          # baseline entry has started passing). Capture the exit code so the
+          # summary is published even on a red run.
           python scripts/check_test_baseline.py --summary /tmp/baseline-summary.md
           code=$?
           cat /tmp/baseline-summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true

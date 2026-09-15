@@ -9,14 +9,16 @@ Repo-scoped rules for AI agents reviewing or editing this codebase.
 # that reached production through the spawn path)
 python -m compileall -q riptide
 
-# There is NO pytest workflow in CI yet — run the suite locally before pushing.
-# The suite is ambient-sensitive on any branch that predates the hermetic
-# conftest, so get the value CI will see by using a fresh HOME:
-#   HOME=$(mktemp -d) /home/sc/.hermes/hermes-agent/venv/bin/python3 -m pytest riptide/tests -q
-# A leftover ~/.hermes/state/riptide-work-state.json masked four failures, so a
-# "clean" run in a dirty home is not evidence. Compare failing node IDs, not
-# counts, and re-measure before editing this comment — an inflated baseline hides
-# regressions.
+# CI runs the suite and compares the failures with riptide/tests/baseline_failures.txt
+# (.github/workflows/pytest.yml -> scripts/check_test_baseline.py). A NEW failure
+# fails the gate; a baseline entry that starts passing is reported as stale but
+# does not fail (a passing test is not a regression). The baseline is empty on
+# purpose — fix regressions instead of adding to it, and measure CI's answer, not
+# your machine's, if the two ever disagree.
+#
+# The suite is hermetic (riptide/tests/conftest.py keeps every state path inside
+# a temp dir), so a run in a dirty home now gives the same answer as CI. Before
+# that, a leftover ~/.hermes/state/riptide-work-state.json masked four failures.
 /home/sc/.hermes/hermes-agent/venv/bin/python3 -m pytest riptide/tests -q
 ```
 
@@ -27,9 +29,10 @@ python -m compileall -q riptide
   exercise its own code**. Before/after comparisons must stash/restore the files
   (`git checkout <base> -- <paths>`, then restore) or copy them aside — a
   worktree run silently tests the main checkout.
-- **Get CI's answer with `HOME=$(mktemp -d)`** until the hermetic conftest lands.
-  Ambient state changes which tests fail; tests also used to write the live
-  `~/.hermes/cron/jobs.json` and the live SQLite DB.
+- **Get CI's answer with the hermetic conftest in place** (`riptide/tests/`).
+  Ambient state used to change which tests failed: the suite wrote the live
+  `~/.hermes/cron/jobs.json`, the live SQLite DB, and read the developer's
+  `graphify-out/graph.json`.
 - **`riptide/tests/test_fixer_ephemeral.py` is opt-in** — `setup_class` builds a
   Docker image and starts a container, so it is skipped unless
   `RIPTIDE_EPHEMERAL_DOCKER=1`. It used to raise `NameError` (no `import pytest`)
