@@ -1057,6 +1057,50 @@ class TestHealProbePlacement:
 
         assert acquire_order == ["acquire", "execute"]
 
+    def test_heal_probe_runs_exactly_once_per_pr(self, mock_ollama):
+        """The probe lives in _execute only: once per PR, never on the skip path.
+
+        Regression: the probe was duplicated at the top of run_for_pr (before
+        the semaphore) and again inside _execute, so the normal path probed
+        twice, discarded the first result and silently overwrote the
+        ollama_healthy argument. A PR skipped because the pool is busy still
+        probed, and heal() is not a read — it can restart ollama (systemctl,
+        up to 30s).
+        """
+        import inspect
+
+        companion = make_companion()
+        companion.enable_deterministic = False
+        companion.enable_graphify = False
+        companion._get_last_sha = MagicMock(return_value=None)
+        companion.client.post_pr_comment = MagicMock(return_value={"id": 999})
+        companion.client.update_pr_comment = MagicMock(return_value={"id": 999})
+        files = [{"filename": "src/main.py", "patch": "+x = 1", "additions": 1, "deletions": 0, "status": "modified"}]
+
+        with patch("riptide.ollama_heal.heal", return_value=0) as mock_heal:
+            # Skip path: semaphore already held → return without probing.
+            companion._semaphore.acquire()
+            companion.run_for_pr(123, "owner", "repo", 42, "feat: change", "author", files)
+            skip_calls = mock_heal.call_count
+            companion._semaphore.release()
+
+            # Normal path: semaphore free → exactly the one probe in _execute.
+            companion.run_for_pr(123, "owner", "repo", 42, "feat: change", "author", files)
+            normal_calls = mock_heal.call_count
+
+        # Both counts are collected before asserting so one regression reports
+        # both phases: the skip path must probe 0x (heal can restart ollama),
+        # the normal path exactly 1x (a second probe is discarded work).
+        assert (skip_calls, normal_calls) == (0, 1), (
+            f"heal must probe 0x when the semaphore is held and 1x on the normal "
+            f"path; got {skip_calls}x and {normal_calls}x"
+        )
+        mock_heal.assert_called_once_with(base_url=companion.ollama_base)
+
+        # The parameter is gone rather than silently overwritten: a caller can
+        # no longer pass a value that _execute would discard.
+        assert "ollama_healthy" not in inspect.signature(Companion._execute).parameters
+
 
 class TestBuildTier1BodyFooter:
     """Tests for Companion._build_tier1_body checkbox footer behavior.
