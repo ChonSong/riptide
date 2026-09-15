@@ -19,6 +19,24 @@ import time
 import socket
 from pathlib import Path
 
+import pytest
+
+# Ephemeral Docker E2E: setup_class builds an image and starts a container, so it
+# is opt-in and excluded from the default suite. Run it deliberately with:
+#   RIPTIDE_EPHEMERAL_DOCKER=1 python3 -m pytest riptide/tests/test_fixer_ephemeral.py
+#
+# (Before this, the module called pytest.skip/pytest.main without importing
+# pytest, so every test raised NameError instead of skipping.)
+_EPHEMERAL_ENABLED = os.environ.get("RIPTIDE_EPHEMERAL_DOCKER") == "1"
+
+pytestmark = pytest.mark.skipif(
+    not _EPHEMERAL_ENABLED,
+    reason=(
+        "ephemeral Docker E2E is opt-in (set RIPTIDE_EPHEMERAL_DOCKER=1): "
+        "it builds an image and starts a container"
+    ),
+)
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
