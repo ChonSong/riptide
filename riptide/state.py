@@ -106,6 +106,16 @@ class StateStore:
             pr_key TEXT PRIMARY KEY, skip INTEGER NOT NULL DEFAULT 0,
             last_sha TEXT, reviewed_at TEXT, tier1_comment_id INTEGER)""")
 
+        # v6: tier1_comment_id — the canonical Tier-1 comment thread per PR so
+        # re-syncs PATCH in place instead of re-POSTing. The ALTER is required
+        # for DBs whose pr_heuristics was created at v5, and for any DB whose
+        # version row drifted ahead of its table: CREATE TABLE IF NOT EXISTS
+        # never adds a column to an existing table.
+        heuristics_cols = {row[1] for row in conn.execute("PRAGMA table_info(pr_heuristics)").fetchall()}
+        if "tier1_comment_id" not in heuristics_cols:
+            conn.execute("ALTER TABLE pr_heuristics ADD COLUMN tier1_comment_id INTEGER")
+            log.info("pr_heuristics: added tier1_comment_id column (v6)")
+
         # v7: checkbox trigger dedup
         conn.execute("""CREATE TABLE IF NOT EXISTS checkbox_triggers (
             pr_key TEXT NOT NULL, label TEXT NOT NULL, triggered_at REAL NOT NULL,
@@ -160,7 +170,51 @@ class StateStore:
             log.warning(f"Startup recovery failed (non-fatal): {e}")
 
     def _migrate_poller_comments(self):
-        pass
+        """One-time migration from poller's metadata.db into the new state.db.
+
+        The poller (riptide/poller.py) still tracks processed comment IDs in
+        ~/.local/share/riptide/metadata.db; without this copy an upgrading
+        install loses its dedup history and re-processes old fix commands.
+
+        Called from _init_db() *before* schema_version is bumped (v<2), so a
+        failure here must propagate: that leaves the version low and makes the
+        migration retryable on the next start instead of silently dropping
+        history. INSERT OR IGNORE keeps re-runs idempotent.
+        """
+        if not POLLER_DB_PATH.exists():
+            return
+        with sqlite3.connect(str(POLLER_DB_PATH)) as src:
+            table_check = src.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='poller_processed_comments'"
+            ).fetchone()
+            if not table_check:
+                log.info(f"No poller_processed_comments table found in {POLLER_DB_PATH}")
+                return
+
+            old_columns = {row[1] for row in src.execute("PRAGMA table_info(poller_processed_comments)").fetchall()}
+
+            if "pending_response" in old_columns:
+                rows = src.execute(
+                    "SELECT comment_id, processed_at, result, pending_response FROM poller_processed_comments"
+                ).fetchall()
+            else:
+                rows = src.execute(
+                    "SELECT comment_id, processed_at, result, '' FROM poller_processed_comments"
+                ).fetchall()
+
+        conn = self._get_conn()
+        try:
+            for comment_id, processed_at, result, pending_response in rows:
+                conn.execute(
+                    "INSERT OR IGNORE INTO processed_comments (comment_id, processed_at, result, pending_response) VALUES (?, ?, ?, ?)",
+                    (comment_id, processed_at, result, pending_response),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            log.error(f"Poller migration from {POLLER_DB_PATH} failed; retrying on next start")
+            raise
+        log.info(f"Migrated {len(rows)} comment records from {POLLER_DB_PATH}")
 
     @retry_db_fast
     def reserve_delivery(self, delivery_id: str) -> bool:
