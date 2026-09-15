@@ -52,6 +52,40 @@ export GRAPHIFY_BIN=/home/sc/.hermes/hermes-agent/venv/bin/graphify
 export PYTHONPATH="/home/sc/workspace:$PYTHONPATH"
 ```
 
+## Testing Pitfalls
+
+### Before/After Comparisons in a Git Worktree Test the Wrong Code
+
+The dev venv has `riptide` installed **editable**, so `import riptide` resolves to
+`/home/sc/workspace/riptide` no matter what the cwd is. Running a script or test
+from a `git worktree` checkout of another branch therefore exercises the *main*
+checkout's code — a "before" run can pass while testing the fixed code, and a fix
+can look verified when it was never loaded.
+
+Do this instead:
+
+```bash
+# temporarily restore the pre-fix files in the main checkout, run, then restore
+git checkout <base-sha> -- riptide/<file>.py
+<run the reproducer or test>
+git checkout HEAD -- riptide/<file>.py   # restore the fix
+git status --short                       # must be clean
+```
+
+### The Suite's Result Depends on Ambient State
+
+`~/.hermes/state/riptide-work-state.json`, the live `state.db` and even the live
+`~/.hermes/cron/jobs.json` are reachable from tests on branches that predate the
+hermetic conftest. A leftover state file has masked four failures at once. Get the
+answer CI will see with a fresh home:
+
+```bash
+HOME=$(mktemp -d) /home/sc/.hermes/hermes-agent/venv/bin/python3 -m pytest riptide/tests -q
+```
+
+`riptide/tests/test_fixer_ephemeral.py` builds a Docker image, so it is opt-in
+(`RIPTIDE_EPHEMERAL_DOCKER=1`) and skips otherwise.
+
 ## Webhook Pitfalls
 
 ### Falsy pull_request in Test Fixtures

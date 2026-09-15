@@ -9,16 +9,33 @@ Repo-scoped rules for AI agents reviewing or editing this codebase.
 # that reached production through the spawn path)
 python -m compileall -q riptide
 
-# There is NO pytest workflow in CI — run the suite locally before pushing.
-# Measured baseline for that exact command (28 failed / 1096 passed, ~7 min):
-#   test_fixer.py 12, test_review_state_migration.py 4, test_webhook_endpoint.py 3,
-#   test_fixer_ephemeral.py 3, then one each in test_trace_context, test_review_timing,
-#   test_pipeline, test_entrypoints, test_companion, test_ci_verifier.
-# All 28 are pre-existing. Compare against that list rather than a failure count,
-# and re-measure before changing this comment: an inflated baseline hides
-# regressions (a change adding 20 failures still sits under a loose "~50").
+# There is NO pytest workflow in CI yet — run the suite locally before pushing.
+# The suite is ambient-sensitive on any branch that predates the hermetic
+# conftest, so get the value CI will see by using a fresh HOME:
+#   HOME=$(mktemp -d) /home/sc/.hermes/hermes-agent/venv/bin/python3 -m pytest riptide/tests -q
+# A leftover ~/.hermes/state/riptide-work-state.json masked four failures, so a
+# "clean" run in a dirty home is not evidence. Compare failing node IDs, not
+# counts, and re-measure before editing this comment — an inflated baseline hides
+# regressions.
 /home/sc/.hermes/hermes-agent/venv/bin/python3 -m pytest riptide/tests -q
 ```
+
+## Testing traps (each one cost real time)
+
+- **The dev venv has `riptide` installed editable.** `import riptide` resolves to
+  `/home/sc/workspace/riptide` regardless of cwd, so a git **worktree does not
+  exercise its own code**. Before/after comparisons must stash/restore the files
+  (`git checkout <base> -- <paths>`, then restore) or copy them aside — a
+  worktree run silently tests the main checkout.
+- **Get CI's answer with `HOME=$(mktemp -d)`** until the hermetic conftest lands.
+  Ambient state changes which tests fail; tests also used to write the live
+  `~/.hermes/cron/jobs.json` and the live SQLite DB.
+- **`riptide/tests/test_fixer_ephemeral.py` is opt-in** — `setup_class` builds a
+  Docker image and starts a container, so it is skipped unless
+  `RIPTIDE_EPHEMERAL_DOCKER=1`. It used to raise `NameError` (no `import pytest`)
+  instead of skipping.
+- **A full run is ~40s once hermetic** (it was ~7 min while 25 tests contended
+  with the running service for the real SQLite DB).
 
 Then confirm the service is healthy: `systemctl --user is-active riptide.service`
 and `curl -s localhost:8477/health`.
@@ -121,8 +138,11 @@ is not.
 `docs/REVIEW-CONTRACT.md` is the spec for what a review is and what CI accepts.
 The load-bearing rules:
 
-- A findings-bearing review must lead with `## Review:` and include the 🔴/🟡
-  severity table, or the `riptide-review-required` gate cannot block the merge.
+- A findings-bearing review must carry the `Riptide Review ·` sign-off (always
+  emitted by `assemble_review.py`) **and** the 🔴/🟡 severity table. The
+  `## Review:` header is human-facing — the gate does **not** test for it. The
+  table rows are what keep the gate red until a follow-up commit lands, and the
+  sign-off is what makes the comment match at all.
 - `## Riptide Pass: ✅ No findings` is the Companion's deterministic pass — **not**
   a review; code that looks for reviews must not match it.
 - Concurrent reviews share `/tmp`: every workstream writes to its own canonical
