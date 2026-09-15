@@ -1,3 +1,13 @@
+> **Archived 2026-09-14 — historical, not maintained.**
+> This document is superseded; do not treat it as current. Live docs:
+> [`README.md`](../../README.md), [`AGENTS.md`](../../AGENTS.md),
+> [`docs/REVIEW-CONTRACT.md`](../REVIEW-CONTRACT.md).
+
+> **This describes a subsystem that does not exist.** Riptide has no Huey
+> dependency: a repo-wide search for `huey` (excluding this file) returns nothing, and
+> the webhook handler still uses threads plus a semaphore. Kept only as a record of a
+> design that was never implemented.
+
 # Huey Task Queue — Operations Guide
 
 ## Overview

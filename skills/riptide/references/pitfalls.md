@@ -6,17 +6,20 @@
 
 **Symptom:** `Error: HTTPConnectionPool(host='localhost', port=43311): Failed to establish a new connection`
 
+Port 43311 is the *historical wrong* default: Ollama on this host listens on
+**11434**, and `.env` sets `OLLAMA_BASE_URL=http://localhost:11434`. A config
+still carrying 43311 fails silently (no comment posted, by design).
+
 **Causes:**
 - Ollama not running
-- Port mismatch: `.env` has `OLLAMA_BASE_URL=http://localhost:43311` but actual server is on `11434` (or vice versa)
+- A stale copy of the old 43311 default (code default, resource JSON, or docs)
 - Machine rebooted without Ollama auto-start
 
 **Diagnosis:**
 ```bash
 ss -tlnp | grep ollama
-curl -s http://localhost:11434/api/tags | head -1
-curl -s http://localhost:43311/api/tags | head -1
-grep OLLAMA_BASE_URL /home/sc/workspace/riptide/.env
+curl -s http://localhost:11434/api/tags | head -1     # the real endpoint
+grep OLLAMA_BASE_URL /home/sc/workspace/riptide/.env  # must match
 ```
 
 **Fix:**
@@ -124,13 +127,77 @@ hermes cron create "2026-07-28T15:08:00" --prompt "PR #N..."
 
 ### Model Pinning
 
-**CRITICAL:** Use `LongCat-2.0` with provider `longcat`. NEVER use `custom:` prefix.
+**The `.env` pin is authoritative — never assume a model/provider, check it:**
 
 ```bash
-hermes cron create "..." "..." \
-  --model "LongCat-2.0" \
-  --provider "longcat"
+grep -E "RIPTIDE_(DEEPTHINK|FIX)_(MODEL|PROVIDER)" /home/sc/workspace/riptide/.env
 ```
+
+The review and fix sessions are spawned with exactly those values
+(`deepthink.DEEPTHINK_MODEL/PROVIDER`, `fixer.FIX_MODEL/PROVIDER`). The code
+defaults (`LongCat-2.0` / `longcat`) are only fallbacks for a missing `.env` and
+are **not** what production runs.
+
+- Do **not** add a `custom:` prefix to the model name (e.g.
+  `custom:LongCat-2.0`): it is not a provider-qualified model here and produced
+  the wrong model attribution in review sign-offs.
+- A pin whose provider is out of quota does not fail cleanly: the session falls
+  through `fallback_providers` (observed: longcat HTTP 402 → opencode HTTP 401)
+  and the spawn dies with `HTTP 401: Insufficient balance`. Symptom: the job in
+  `~/.hermes/cron/jobs.json` shows `last_status: error` and **no review comment
+  appears**.
+- The reviewing model must travel with the pipeline into the scribe
+  (`create_*_review_pipeline(model=…, provider=…)`). Spawned sessions do **not**
+  inherit the app's `.env`, so anything read from the session environment falls
+  back to the code default and the sign-off names the wrong model.
+- Cron poller scripts must source the repo `.env` before invoking the poller
+  (`riptide-review-poll.sh`, `riptide-proofshot-poll.sh`); without it the poller
+  pins the code defaults and every poller-triggered review fails.
+
+See `docs/REVIEW-CONTRACT.md` for the full contract.
+
+### Review comment markers (gate deadlock and false passes)
+
+The CI gate (`riptide-review-required`) only recognises a comment carrying
+`## Review:`, `## 🔍 Findings`, `## 🎯 Summary`, `Riptide Review ·`, or
+`## Riptide Pass:`, and only *requires a follow-up commit* when the body has a
+`| 🔴` / `| 🟡` table row.
+
+- A findings-bearing review **must** lead with `## Review:` and emit the severity
+  table, or findings cannot block a merge.
+- The Companion's `## Riptide Pass: ✅ No findings` is **not** a review — the
+  poller deliberately does not treat it as one, so PRs whose deep-think review
+  never landed still get re-reviewed instead of looking reviewed forever.
+- The gate does not re-run on comments; a failing/passing result can be stale
+  (re-run it or push a commit).
+
+### "Already pending" — stale review reservations
+
+`reserve_job()` refuses a new review while a `pending` row exists, with a 2-hour
+TTL. A long-running or crashed session used to hold that row, so every later
+`@riptide-bot review` answered *"Already pending"* and spawned nothing.
+
+`_release_finished_reservations()` now releases when the job completed,
+vanished, has no further runs, **or the PR already carries a delivered review**
+(the job record lags long sessions, so the delivered review is the reliable
+signal). To inspect or clear by hand:
+
+```python
+from riptide.state import StateStore
+from riptide.deepthink import _release_finished_reservations
+st = StateStore()
+_release_finished_reservations(st, "riptide-review-<owner>-<repo>-<pr>", "<owner>", "<repo>", <pr>)
+```
+
+### Conductor artifacts are per-PR (never shared)
+
+Review sessions run concurrently and all use `/tmp`. Every workstream must write
+to its own canonical path: `/tmp/riptide-review-pr-<n>-<role>.json`
+(`conductor._canonical_output_path`). Never reintroduce `/tmp/output.json`,
+`/tmp/findings.json` or a shared `/tmp/pr-<n>-context.json`. The scribe refuses to
+post when it has no findings, and only when the judge payload is stamped
+`judged: true` — an empty result must never render as `## Review: ✅ No findings`.
+
 
 ### Stale State from Manual Runs
 

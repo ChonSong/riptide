@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import tempfile
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -17,7 +19,20 @@ WORK_STATE_PATH = os.environ.get(
 )
 
 # Thread-safe lock for read-modify-write operations
-_STATE_LOCK = threading.Lock()
+_STATE_LOCK = threading.RLock()
+
+# Process-safe counterpart: an exclusive fcntl.flock() on a sidecar lock file
+# next to the state file (same convention as riptide/state.py). Each review runs
+# in its own OS process, so a thread lock alone lets two processes load the same
+# snapshot and have the later write_state() silently drop the other's track.
+#
+# Re-entrancy: the flock is taken once per outermost acquire (tracked by
+# _lock_depth), and a nested critical section JOINS the outer transaction via
+# _current_state instead of re-reading the file — so a nested modify_state()
+# neither self-deadlocks nor has its write clobbered by the outer's snapshot.
+_lock_fds: dict[str, object] = {}
+_lock_depth = 0
+_current_state: Optional[dict] = None
 
 # ── Schema ──────────────────────────────────────────────────────────────────
 
@@ -50,31 +65,84 @@ WORK_STATE_SCHEMA = {
 # ── CRUD ────────────────────────────────────────────────────────────────────
 
 
-def read_state() -> dict:
-    """Read work-state.json, creating if missing (thread-safe)."""
+def _lock_fd():
+    """Return the cached lock file handle, creating the sidecar lock file."""
+    lock_path = WORK_STATE_PATH + ".lock"
+    fd = _lock_fds.get(lock_path)
+    if fd is None:
+        Path(WORK_STATE_PATH).parent.mkdir(parents=True, exist_ok=True)
+        Path(lock_path).touch()
+        fd = _lock_fds[lock_path] = open(lock_path, "w")
+    return fd
+
+
+@contextmanager
+def _state_guard(exclusive: bool = True):
+    """Hold the thread lock plus the cross-process flock for a critical section.
+
+    The flock() is taken only on the outermost entry (tracked by _lock_depth)
+    and released on the matching exit, so nested critical sections in the same
+    process reuse the held lock rather than blocking on it. When the outermost
+    section exits, the in-flight transaction state is discarded.
+    """
+    global _lock_depth, _current_state
     with _STATE_LOCK:
+        fd = _lock_fd()
+        if _lock_depth == 0:
+            fcntl.flock(fd.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        _lock_depth += 1
+        try:
+            yield
+        finally:
+            _lock_depth -= 1
+            if _lock_depth == 0:
+                _current_state = None
+                fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+
+
+def read_state() -> dict:
+    """Read work-state.json, creating if missing (thread- and process-safe).
+
+    Inside an active critical section this returns the in-flight state, so a
+    caller can read its own uncommitted changes.
+    """
+    with _state_guard(exclusive=False):
+        if _current_state is not None:
+            return _current_state
         return _read_state_unsafe()
 
 
 def write_state(state: dict) -> None:
-    """Write work-state.json atomically (thread-safe)."""
-    with _STATE_LOCK:
+    """Write work-state.json atomically (thread- and process-safe).
+
+    Takes the exclusive lock so a bare write cannot land in the middle of
+    another process's read→mutate→write transaction.
+    """
+    with _state_guard():
         _write_state_unsafe(state)
 
 
 def modify_state(fn) -> None:
     """Execute fn(state) under lock — atomic read-modify-write.
-    
+
     Use this for operations that need to read, modify, and write state
-    without another thread interleaving between the read and write.
-    
+    without another thread OR process interleaving between the read and
+    write. The exclusive flock is held across the whole transaction, so two
+    reviews running in separate processes cannot drop each other's tracks.
+
+    Re-entrant: calling modify_state() from inside fn joins the outer
+    transaction (same snapshot, written once) instead of deadlocking or
+    clobbering it.
+
     Example:
         modify_state(lambda s: s["tracks"]["t1"]["status"] = "done")
     """
-    with _STATE_LOCK:
-        state = _read_state_unsafe()
-        fn(state)
-        _write_state_unsafe(state)
+    global _current_state
+    with _state_guard():
+        if _current_state is None:
+            _current_state = _read_state_unsafe()
+        fn(_current_state)
+        _write_state_unsafe(_current_state)
 
 
 def _read_state_unsafe() -> dict:
@@ -113,6 +181,31 @@ def get_track(track_id: str) -> Optional[dict]:
     return state.get("tracks", {}).get(track_id)
 
 
+def _new_track(
+    track_id: str,
+    name: Optional[str] = None,
+    phase: Optional[str] = None,
+    repos: Optional[dict] = None,
+    key_facts: Optional[dict] = None,
+) -> dict:
+    """Build a track record — single source of truth for the track shape.
+
+    Used by create_track() and by create_workstream(), which auto-creates a
+    missing track so that the whole create is one self-contained
+    read-modify-write (see modify_state()).
+    """
+    return {
+        "name": name or track_id,
+        "phase": phase or "",
+        "status": "active",
+        "current_ws": None,
+        "workstreams": {},
+        "key_facts": key_facts or {},
+        "repos": repos or {},
+        "last_updated": now(),
+    }
+
+
 def create_track(
     track_id: str,
     name: str,
@@ -121,17 +214,9 @@ def create_track(
     key_facts: Optional[dict] = None,
 ) -> Optional[dict]:
     def _do(state):
-        track = {
-            "name": name,
-            "phase": phase,
-            "status": "active",
-            "current_ws": None,
-            "workstreams": {},
-            "key_facts": key_facts or {},
-            "repos": repos,
-            "last_updated": now(),
-        }
-        state.setdefault("tracks", {})[track_id] = track
+        state.setdefault("tracks", {})[track_id] = _new_track(
+            track_id, name, phase, repos, key_facts
+        )
     modify_state(_do)
     return get_track(track_id)
 
@@ -176,8 +261,17 @@ def create_workstream(
             "recovery": recovery or {},
             "completed_at": None,
         }
-        state["tracks"][track_id]["workstreams"][ws_id] = ws
-        state["tracks"][track_id]["last_updated"] = now()
+        # Build the whole track→workstream path inside this single locked
+        # transaction. Indexing state["tracks"][track_id] directly made
+        # create_workstream() raise KeyError for any track that did not exist
+        # yet, so callers had to remember to call create_track() first; the
+        # operation was neither self-contained nor safe when two threads
+        # created workstreams for the same not-yet-created track.
+        track = state.setdefault("tracks", {}).setdefault(
+            track_id, _new_track(track_id)
+        )
+        track.setdefault("workstreams", {})[ws_id] = ws
+        track["last_updated"] = now()
     modify_state(_do)
     return get_workstream(track_id, ws_id)
 
