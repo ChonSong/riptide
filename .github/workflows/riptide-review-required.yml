@@ -23,8 +23,14 @@ jobs:
           # ('## Riptide Pass:') also satisfies the gate — it means the
           # deterministic pass ran and found nothing — but it is deliberately
           # NOT a review marker, so the poller still asks for a real review.
+          #
+          # The Companion's complexity pre-pass ('## ✨ Review Required') is
+          # excluded on purpose: it posts BEFORE the deep-think review, carries
+          # 🟡 rows, and would otherwise be read as a findings-bearing review
+          # whenever the gate runs in the window between a push and the review
+          # landing — turning a clean PR red.
           REVIEW=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
-            --jq '[.[] | select(.body | (contains("## 🔍 Findings") or contains("## 🎯 Summary") or contains("Riptide Review ·") or contains("## Riptide Pass:") or (contains("critical") and contains("warning"))))] | sort_by(.created_at) | last')
+            --jq '[.[] | select((.body | contains("## ✨ Review Required")) | not) | select(.body | (contains("## 🔍 Findings") or contains("## 🎯 Summary") or contains("Riptide Review ·") or contains("## Riptide Pass:")))] | sort_by(.created_at) | last')
 
           REVIEW_ID=$(echo "${REVIEW}" | jq -r '.id // empty')
 

@@ -145,7 +145,9 @@ The load-bearing rules:
   emitted by `assemble_review.py`) **and** the 🔴/🟡 severity table. The
   `## Review:` header is human-facing — the gate does **not** test for it. The
   table rows are what keep the gate red until a follow-up commit lands, and the
-  sign-off is what makes the comment match at all.
+  sign-off is what makes the comment match at all. The gate also ignores the
+  Companion's `## ✨ Review Required` complexity pre-pass: it posts *before* the
+  review and carries 🟡 rows, so treating it as a review reddens clean PRs.
 - `## Riptide Pass: ✅ No findings` is the Companion's deterministic pass — **not**
   a review; code that looks for reviews must not match it.
 - Concurrent reviews share `/tmp`: every workstream writes to its own canonical
