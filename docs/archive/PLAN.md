@@ -1,3 +1,8 @@
+> **Archived 2026-09-14 — historical, not maintained.**
+> This document is superseded; do not treat it as current. Live docs:
+> [`README.md`](../../README.md), [`AGENTS.md`](../../AGENTS.md),
+> [`docs/REVIEW-CONTRACT.md`](../REVIEW-CONTRACT.md).
+
 # Riptide — Complete Implementation Plan
 
 **Date:** 2026-08-18
