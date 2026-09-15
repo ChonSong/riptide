@@ -15,6 +15,18 @@ git fetch --quiet origin main 2>/dev/null || exit 0
 LOCAL=$(git rev-parse main 2>/dev/null)
 REMOTE=$(git rev-parse origin/main 2>/dev/null)
 
-if [ "$LOCAL" != "$REMOTE" ]; then
+# No change: nothing to do.
+if [ "$LOCAL" = "$REMOTE" ]; then
+    exit 0
+fi
+
+# Restart only when origin/main is genuinely ahead (local main is an ancestor of
+# it). Raw SHA inequality is also true when local main is ahead or has diverged —
+# restarting then achieves nothing and hides a checkout an operator must fix.
+if git merge-base --is-ancestor "$LOCAL" "$REMOTE" 2>/dev/null; then
     systemctl --user restart riptide.service 2>/dev/null || true
+else
+    echo "watchdog: local main ($LOCAL) is not an ancestor of origin/main ($REMOTE)" >&2
+    echo "watchdog: checkout is ahead of or diverged from origin — operator action required" >&2
+    exit 1
 fi
