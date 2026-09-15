@@ -58,6 +58,14 @@ path (default)                                        how it is reached
                                                       companion.py:585
                                                       ``Path.home()/"workspace"``
                                                       ($RIPTIDE_REPO_DIR).
+``/home/sc/workspace/<repo>/graphify-out``            riptide/grafiphy/orchestrator.py:104,
+                                                      graphify_ingest/orchestrator.py:357
+                                                      — reads ``GRAPHIFY_CWD``, a path
+                                                      env var rather than a module
+                                                      constant, so it is isolated via
+                                                      ``HERMETIC_ENV`` (not
+                                                      ``_TEMP_VALUES``, which can
+                                                      only see module constants).
 ``/home/sc/workspace/proofshot/cli.py``               riptide/proofshotter.py:61
                                                       ``PROOFSHOT_CLI``
                                                       ($RIPTIDE_PROOFSHOT_CLI).
@@ -95,6 +103,7 @@ depending on what was already in the developer's work-state file.
 
 from __future__ import annotations
 
+import atexit
 import os
 import shutil
 import sys
@@ -103,6 +112,12 @@ from pathlib import Path
 
 # One throwaway root for the whole session.
 SESSION_TMP = Path(tempfile.mkdtemp(prefix="riptide-tests-"))
+
+# Removal is registered at import time, not only in cleanup(): the session
+# fixture's teardown does not run for `--collect-only`, an import error raised
+# before the fixture is set up, or SIGKILL — and each such invocation would
+# otherwise leak one /tmp root, unbounded across CI runs and developer shells.
+atexit.register(shutil.rmtree, SESSION_TMP, ignore_errors=True)
 
 ISOLATED_HOME = SESSION_TMP / "home"
 ISOLATED_DATA = SESSION_TMP / "data"
@@ -125,6 +140,12 @@ HERMETIC_ENV = {
     "RIPTIDE_CRON_JOBS_PATH": str(ISOLATED_HOME / ".hermes/cron/jobs.json"),
     "RIPTIDE_WORKSPACE_ROOT": str(ISOLATED_WORKSPACE),
     "RIPTIDE_REPO_DIR": str(ISOLATED_WORKSPACE),
+    # grafiphy/graphify_ingest resolve os.environ.get("GRAPHIFY_CWD",
+    # f"/home/sc/workspace/{repo}") at call time — a path read, not a module
+    # constant, so _TEMP_VALUES cannot see it. Without this the suite reads the
+    # developer's real graphify-out/graph.json (measured: 7 opens in a full run),
+    # which is gitignored and absent from a clean checkout.
+    "GRAPHIFY_CWD": str(ISOLATED_WORKSPACE),
     "RIPTIDE_PROOFSHOT_CLI": str(ISOLATED_WORKSPACE / "proofshot" / "cli.py"),
 }
 
