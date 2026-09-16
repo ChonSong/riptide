@@ -46,3 +46,16 @@ jobs:
           code=$?
           cat /tmp/baseline-summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
           exit "$code"
+      - name: Check the repo-root tests against their baseline
+        run: |
+          set -uo pipefail
+          # tests/ is a second pytest target with its own baseline. It is gated
+          # for the same reason: ungated, it sat 24 failures deep on main without
+          # anything noticing.
+          python scripts/check_test_baseline.py \
+            --tests tests \
+            --baseline tests/baseline_failures.txt \
+            --summary /tmp/root-baseline-summary.md
+          code=$?
+          cat /tmp/root-baseline-summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          exit "$code"

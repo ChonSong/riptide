@@ -1,0 +1,17 @@
+# Known-failure baseline for the repo-root tests/ suite.
+#
+# Same contract as riptide/tests/baseline_failures.txt: a NEW failure fails the
+# build; a baseline entry that starts passing is reported as stale but does not
+# fail. Separate file because this is a separate pytest target, run as its own
+# step of .github/workflows/pytest.yml.
+#
+# This suite was ungated, and that is exactly how it rotted: 24 of its tests sat
+# red on main (every tests/test_review_memory.py case, because the fa99b25 merge
+# dropped review_memory's CREATE TABLE from riptide/state.py) with nothing to
+# notice. Empty is the goal, and where it stands.
+#
+# Measured: 2026-09-15, after restoring the review_memory schema —
+#   python3 -m pytest tests -q  →  82 passed, 0 failed
+#
+# Regenerate with:
+#   python3 scripts/check_test_baseline.py --tests tests --baseline tests/baseline_failures.txt --write-baseline

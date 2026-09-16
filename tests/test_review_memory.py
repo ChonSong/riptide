@@ -469,10 +469,16 @@ class TestSchemaMigration:
         assert expected.issubset(cols)
 
     def test_v7_schema_version(self, tmp_db):
-        """Schema version is 7 after init."""
+        """A fresh database is stamped with the current schema version.
+
+        This used to assert ``== 7``; the schema has since moved on (v8 work
+        queue, v9 fix queue), so pinning the literal made a correct database
+        look wrong. Assert against the class's own contract instead.
+        """
         conn = tmp_db._get_conn()
         row = conn.execute("SELECT version FROM schema_version").fetchone()
-        assert row[0] == 7
+        assert row[0] == StateStore.SCHEMA_VERSION
+        assert row[0] >= 7, "the v7 review_memory tables must be covered by the stamp"
 
 
 class TestWebhookMergeStorage:

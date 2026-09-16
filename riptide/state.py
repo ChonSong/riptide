@@ -121,6 +121,43 @@ class StateStore:
             pr_key TEXT NOT NULL, label TEXT NOT NULL, triggered_at REAL NOT NULL,
             PRIMARY KEY (pr_key, label))""")
 
+        # v7: review_memory — persist review outcomes per PR for context injection,
+        # and review_profiles — per-repo aggregate stats for common-finding
+        # patterns. These CREATE statements were dropped from init() by the
+        # fa99b25 merge while the queries below (store_review_outcome,
+        # get_memory_context) survived, so a database created since then has had
+        # no review_memory table at all. IF NOT EXISTS keeps this idempotent for
+        # existing databases, which were created while the statements were still
+        # present.
+        conn.execute("""CREATE TABLE IF NOT EXISTS review_memory (
+            id TEXT PRIMARY KEY,
+            pr_key TEXT NOT NULL,
+            pr_number INTEGER,
+            owner TEXT,
+            repo TEXT,
+            head_sha TEXT,
+            findings_count INTEGER,
+            critical_count INTEGER,
+            warning_count INTEGER,
+            verdict TEXT,
+            user_feedback INTEGER,
+            created_at TEXT,
+            metadata TEXT
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS review_profiles (
+            repo TEXT PRIMARY KEY,
+            total_reviews INTEGER DEFAULT 0,
+            common_findings TEXT DEFAULT '[]',
+            last_review_at TEXT,
+            updated_at TEXT
+        )""")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_review_memory_pr_key ON review_memory (pr_key)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_review_memory_repo ON review_memory (repo)"
+        )
+
         # v8: durable work queue with PID-based recovery
         conn.execute("""CREATE TABLE IF NOT EXISTS work_queue (
             id TEXT PRIMARY KEY,
