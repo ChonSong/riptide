@@ -206,6 +206,15 @@ carries 🟡 rows), and only *requires a follow-up commit* when the body has a
   never landed still get re-reviewed instead of looking reviewed forever.
 - The gate does not re-run on comments; a failing/passing result can be stale
   (re-run it or push a commit).
+- The gate reads only the **newest** matching comment, so a Companion
+  `## Riptide Pass:` posted after a findings review would otherwise displace it
+  and green the check. The selector prefers the newest **non-pass** comment and
+  falls back to a pass only when there is nothing else — but if a findings review
+  ever looks ignored, check the ordering before assuming the review was missed.
+- The pre-pass exclusion is anchored to the comment's **first line**. A
+  whole-body substring test would also drop a real review that merely *quotes* the
+  heading — which silently hid a findings review once. Never reproduce the
+  heading verbatim in a review of the selector.
 
 ### Reviews are not always authored by the App
 
