@@ -25,12 +25,19 @@ jobs:
           # NOT a review marker, so the poller still asks for a real review.
           #
           # The Companion's complexity pre-pass ('## ✨ Review Required') is
-          # excluded on purpose: it posts BEFORE the deep-think review, carries
-          # 🟡 rows, and would otherwise be read as a findings-bearing review
-          # whenever the gate runs in the window between a push and the review
-          # landing — turning a clean PR red.
+          # excluded: it posts BEFORE the deep-think review, carries 🟡 rows, and
+          # would otherwise be read as a findings-bearing review whenever the gate
+          # runs in the window between a push and the review landing. The test is
+          # anchored to its FIRST LINE, not the whole body: a real review that
+          # merely quotes the heading (as a review of this selector does) must not
+          # be filtered out — that mistake silently hid a findings review.
+          #
+          # Ordering: a Companion pass ('## Riptide Pass:') posted after a review
+          # would otherwise shadow it, greening the check while findings stand. So
+          # prefer the newest non-pass comment and only fall back to a pass when
+          # there is nothing else.
           REVIEW=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
-            --jq '[.[] | select((.body | contains("## ✨ Review Required")) | not) | select(.body | (contains("## 🔍 Findings") or contains("## 🎯 Summary") or contains("Riptide Review ·") or contains("## Riptide Pass:")))] | sort_by(.created_at) | last')
+            --jq '[.[] | select(((.body | split("\n")[0]) | contains("Review Required")) | not) | select(.body | (contains("## 🔍 Findings") or contains("## 🎯 Summary") or contains("Riptide Review ·") or contains("## Riptide Pass:")))] | sort_by(.created_at) as $all | (($all | map(select((.body | contains("## Riptide Pass:")) | not)) | last) // ($all | last))')
 
           REVIEW_ID=$(echo "${REVIEW}" | jq -r '.id // empty')
 
