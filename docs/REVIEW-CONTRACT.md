@@ -111,7 +111,7 @@ Symptom → cause:
 | `⏭️ Already pending`, no review | stale reservation (above) |
 | `⚠️ Failed to spawn ... database is locked` | DB write-lock contention while a worker holds the DB |
 | spawn ok, no review posted | provider failed → fell through the fallback chain to an out-of-credit provider |
-| review posted, gate still failing | missing `## Review:` marker / 🔴🟡 rows, or a stale gate run |
+| review posted, gate still failing | missing the `Riptide Review ·` sign-off / 🔴🟡 rows, or a stale gate run |
 
 ## 5. Model attribution
 

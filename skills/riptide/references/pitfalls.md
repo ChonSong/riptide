@@ -193,17 +193,44 @@ See `docs/REVIEW-CONTRACT.md` for the full contract.
 ### Review comment markers (gate deadlock and false passes)
 
 The CI gate (`riptide-review-required`) only recognises a comment carrying
-`## Review:`, `## 🔍 Findings`, `## 🎯 Summary`, `Riptide Review ·`, or
-`## Riptide Pass:`, and only *requires a follow-up commit* when the body has a
+`## 🔍 Findings`, `## 🎯 Summary`, `Riptide Review ·`, or `## Riptide Pass:` —
+`## Review:` is human-facing and is **not** a marker. It also skips the
+Companion's `## ✨ Review Required` complexity pre-pass (which posts first and
+carries 🟡 rows), and only *requires a follow-up commit* when the body has a
 `| 🔴` / `| 🟡` table row.
 
-- A findings-bearing review **must** lead with `## Review:` and emit the severity
-  table, or findings cannot block a merge.
+- A findings-bearing review **must** emit the severity table and the
+  `Riptide Review ·` sign-off, or findings cannot block a merge.
 - The Companion's `## Riptide Pass: ✅ No findings` is **not** a review — the
   poller deliberately does not treat it as one, so PRs whose deep-think review
   never landed still get re-reviewed instead of looking reviewed forever.
 - The gate does not re-run on comments; a failing/passing result can be stale
   (re-run it or push a commit).
+- The gate reads only the **newest** matching comment, so a Companion
+  `## Riptide Pass:` posted after a findings review would otherwise displace it
+  and green the check. The selector prefers the newest **non-pass** comment and
+  falls back to a pass only when there is nothing else — but if a findings review
+  ever looks ignored, check the ordering before assuming the review was missed.
+- The pre-pass exclusion is anchored to the comment's **first line**. A
+  whole-body substring test would also drop a real review that merely *quotes* the
+  heading — which silently hid a findings review once. Never reproduce the
+  heading verbatim in a review of the selector.
+
+### Reviews are not always authored by the App
+
+The Scribe posts reviews through the **`gh` CLI** — `assemble_review.post_review()`
+runs `gh pr comment`, and nothing under `riptide/pipeline/` imports `github_app`.
+So every `## Review:` review is authored by the **operator** (`ChonSong`) and never
+by `riptide-review[bot]`. The Companion's marker comments and the `@riptide-bot`
+acks do go through the GitHub App, which falls back to the `gh` CLI when it cannot
+post (`webhook.py`). That split is why `🧠 Riptide Review triggered`,
+`## ✨ Review Required` and `## Riptide Pass:` show as the App while the reviews
+show as the operator.
+
+Either way: select review comments by their **body markers**, not by author.
+Filtering by author misses real reviews and reads as "nothing was posted", and
+treating the App's posts as the only signal makes a landed review look lost.
+(This has cost real debugging time twice.)
 
 ### "Already pending" — stale review reservations
 
