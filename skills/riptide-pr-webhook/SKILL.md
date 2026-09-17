@@ -1,11 +1,14 @@
 ---
 name: riptide-pr-webhook
-description: Riptide webhook spawns Hermes sessions for Need Action PRs.
+description: "Riptide webhook — GitHub App event routing into the companion, command handler and install sync."
 ---
 
 # Riptide PR Webhook
 
-Riptide is a FastAPI webhook server that receives GitHub App webhooks and spawns autonomous Hermes sessions to address PR review feedback.
+Riptide is a FastAPI webhook server that receives GitHub App webhooks and routes
+them into the companion, the on-demand command handler and the installation sync.
+This skill documents the *current* routing surface — `riptide/webhook.py` is
+canonical whenever the two disagree.
 
 ## Architecture
 
@@ -13,52 +16,61 @@ Riptide is a FastAPI webhook server that receives GitHub App webhooks and spawns
 GitHub App (riptide-review, ID 4262983)
   → Webhook: https://riptide.codeovertcp.com/webhook/github
   → Cloudflare Tunnel (codeovertcp) → localhost:8477
-  → Riptide server (FastAPI) →
-      - PR opened/reopened/sync → code review (via Ollama)
-      - PR merged → incremental index
-      - @mention → code review
-      - pull_request_review + "Need Action" label → Hermes cron session
+  → Riptide server (FastAPI), router in riptide/webhook.py
+      - pull_request (opened/reopened/synchronize) → companion TL;DR (+ labeler)
+      - pull_request (closed + merged to default branch) → auto-deploy
+      - issue_comment (created) → companion skip/resume + @riptide-bot commands
+      - issue_comment (edited)  → checkbox toggles
+      - installation / installation_repositories → sync installations + repos
+      - any other event → logged, acked
 ```
 
-## What was fixed
+Riptide Review (Bot 2) does **not** run from this endpoint — its cron poller
+lives in `riptide/deepthink.py`. Commands reach it indirectly:
+`issue_comment` → `interaction_handler.handle_command()` → `deepthink` /
+`fixer` / `visual`.
 
-The Riptide server was partially built but the server was down and no "Need Action" session spawner existed.
+Every delivery is deduplicated on `X-GitHub-Delivery` and signature-verified
+before routing. Internal errors still ack with HTTP 200 so GitHub does not
+retry-storm; the delivery is recorded as failed and the cron poller picks the
+PR up instead.
 
-### Changes made
-
-1. **Added `handle_pull_request_review` handler** in `webhook.py` — detects reviews with `state: changes_requested` or `state: commented` where the PR has a "Need Action" label (case-insensitive, supports variants like "needs action", "need-action", "action required")
-
-2. **Added `_spawn_hermes_session` helper** — calls `hermes cron create` with a timestamp 2 minutes in the future, loads the `github-pr-lifecycle` skill
-
-3. **Set up systemd service** — auto-starts on boot
+Repos without an App installation are served through the `gh` CLI fallback when
+they appear in `RIPTIDE_WATCHED_REPOS`.
 
 ## Management
 
 ```bash
-systemctl --user status riptide.service      # status
-journalctl --user -u riptide --no-pager -n 50 # logs
-systemctl --user restart riptide.service      # restart
+systemctl --user status riptide.service        # status
+journalctl --user -u riptide --no-pager -n 50  # logs
+systemctl --user restart riptide.service       # restart
 ```
 
-## One-time DNS fix needed
-
-The Cloudflare API token lacks DNS permissions, so the tunnel CNAME was never created. Go to Cloudflare dashboard → DNS → codeovertcp.com → add:
-
-- Type: **CNAME**
-- Name: `riptide`
-- Target: `ddaeb2d9-cb6c-4a25-8525-1f1454a80a4b.cfargotunnel.com`
-- Proxy: Proxied (orange cloud)
-
-Then verify: `curl https://riptide.codeovertcp.com/health`
+Health: `curl https://riptide.codeovertcp.com/health` → 200 when up.
 
 ## Files
 
 | Path | Purpose |
 |------|---------|
 | `~/workspace/riptide/server.py` | Entry point |
-| `~/workspace/riptide/riptide/webhook.py` | Webhook handlers (modified) |
+| `~/workspace/riptide/riptide/webhook.py` | Event routing (`/webhook/github`) |
+| `~/workspace/riptide/riptide/interaction_handler.py` | `@riptide-bot` command routing |
+| `~/workspace/riptide/riptide/checkbox_handler.py` | Checkbox-toggle routing |
+| `~/workspace/riptide/riptide/companion.py` | PR TL;DR companion |
+| `~/workspace/riptide/riptide/deepthink.py` | Bot 2 review (cron-driven) |
 | `~/workspace/riptide/riptide/github_app.py` | JWT auth + GitHub API client |
-| `~/workspace/riptide/riptide/review_worker.py` | Review pipeline |
 | `~/workspace/riptide/.env` | GitHub App credentials |
-| `~/workspace/riptide/start.sh` | Env loader script |
 | `~/.config/systemd/user/riptide.service` | Systemd unit |
+
+## Superseded — deleted in `92bd5bd` (do not implement)
+
+An earlier revision of this skill described a `pull_request_review` flow: a
+`handle_pull_request_review` handler that caught `changes_requested` /
+`commented` reviews on PRs carrying a "Need Action" label, plus a
+`_spawn_hermes_session` helper that shelled out to `hermes cron create`.
+
+Commit `92bd5bd` ("refactor(riptide): trim to two-bot architecture") deleted
+both. `webhook.py` has no `pull_request_review` branch and nothing in `riptide/`
+reads a "Need Action" label; ad-hoc reviews are requested with
+`@riptide-bot review` on `issue_comment`. The same revision's "One-time DNS fix
+needed" is done as well — the tunnel CNAME exists and `/health` answers 200.
