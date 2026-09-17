@@ -4,6 +4,12 @@
 
 ### Fixed (2026-09-14)
 
+- **`@riptide-bot fix` wrote a duplicate `fix_queue` row.** A spawned fix left its
+  `jobs` row pending for `FIX_TTL`, so the next trigger enqueued work already done
+  (#208: row 1, 71s after the commit pushed). The queue is written only when the
+  Hermes cron CLI is absent, and the ack names the spawned job so it can be chased.
+
+
 - **Reviews could not satisfy the CI gate.** Findings-bearing reviews now carry the
   `Riptide Review ·` sign-off and the 🔴/🟡 severity table; previously the gate found
   no recognised marker and failed every such review.

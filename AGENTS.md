@@ -120,6 +120,11 @@ is not.
 - Fork/foreign PRs get a comment-only patch with a "cannot push" note
 - Safety: no force-push, no secret edits, no push on red tests, Conventional Commits
 - Instant ack comment ("🛠 Riptide Fix triggered"), then summary with verdicts
+- Ack comment names the spawned Hermes job (`riptide-fix-<owner>-<repo>-<n>`,
+  from `_fix_job_name`) so it can be chased with `hermes cron list`
+- `fix_queue` is written only when spawning is impossible (Hermes cron CLI
+  absent); a spawned fix never also enqueues. `process_fix_queue` is still
+  unwired — it is not a second path for a spawned request
 
 ### Bot 1: Companion State Reporting
 - Companion TL;DR footer includes Bot 2 status when state file is present:
