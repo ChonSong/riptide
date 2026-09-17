@@ -195,6 +195,25 @@ it at the root to rot.
 - Conventional Commits: `feat(scope): …`, `fix(scope): …`, `chore(deps): …`
 - One change per PR
 - `fix:`/`feat:` commits must carry tests — the `test-required` gate enforces it
+- The gate is `scripts/check_test_required.sh` (tested by
+  `riptide/tests/test_test_required_gate.py`); `.github/workflows/test-required.yml`
+  only feeds it the PR's commits. A `fix:`/`feat:` commit passes when it touches a
+  test file **or** carries a `No-Tests: <reason>` trailer in the commit body. Use
+  that trailer only when there is genuinely no test to add, and say what you
+  checked in place of one — restoring code a merge dropped, or a CI/config-only
+  fix. A `fix:`/`feat:` commit with neither is still red, and an empty reason is
+  not an exemption:
+
+  ```text
+  fix(state): restore the review_memory schema
+
+  No-Tests: restores a hunk a merge dropped; riptide/tests/test_state.py already
+  covers the path, so there is no new behaviour to test.
+  ```
+
+  The trailer must be the trailing block of the commit body (a `No-Tests:` line in
+  the subject, or one followed by a later paragraph, is not a trailer), the token
+  is matched case-insensitively, and the reason must be non-empty.
 
 ## What not to do
 
