@@ -149,7 +149,13 @@ The load-bearing rules:
   Companion's `## ✨ Review Required` complexity pre-pass: it posts *before* the
   review and carries 🟡 rows, so treating it as a review reddens clean PRs.
 - `## Riptide Pass: ✅ No findings` is the Companion's deterministic pass — **not**
-  a review; code that looks for reviews must not match it.
+  a review; code that looks for reviews must not match it. Its first line is
+  byte-identical and load-bearing (the gate, the fixer's review detection and
+  `assemble_review.py` all key off it); the body below must state what ran
+  (diff heuristics, + graphify only when it returned context), the evidence
+  (files, +/− lines, file kinds, depth class *with* `depth.describe_depth()`),
+  and why no deep review was queued (thresholds from `deepthink.MIN_LOC_CHANGED` /
+  `STALENESS_MINUTES`, never literals here). See `docs/REVIEW-CONTRACT.md` §1a.
 - Concurrent reviews share `/tmp`: every workstream writes to its own canonical
   path (`conductor._canonical_output_path`). Never reintroduce `/tmp/output.json`,
   `/tmp/findings.json` or a shared `/tmp/pr-<n>-context.json`.
@@ -206,6 +212,9 @@ it at the root to rot.
 - Do not remove or bypass proofshot staleness check (5 min minimum before capture)
 - Do not hardcode a model/provider in code paths that a spawned session reads
 - Do not document a subsystem that does not exist (see `docs/archive/`)
+- Do not restore the old duplicate-headline pass body ("Riptide Review Complete —
+  No findings" / "Deterministic analysis found no issues" / bare `Depth:`): it
+  says nothing the marker did not and tells the reader nothing about the pass.
 
 ## graphify
 
