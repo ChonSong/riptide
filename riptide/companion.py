@@ -695,7 +695,7 @@ class Companion:
                     self._handle_degradation(installation_id, owner, repo, pr_number, full_name, client=active_client)
                     return
 
-                # Detect UI files for ProofShot section
+                # Detect UI files (drives the interactive ProofShot checkbox)
                 ui_extensions = {'.css', '.scss', '.less', '.html', '.jsx', '.tsx', '.vue', '.svelte', '.astro'}
                 ui_files = [f for f in files if any(f.get("filename", "").endswith(ext) for ext in ui_extensions)]
                 eli5 = self._generate_eli5(title, files, is_delta=is_delta, ollama_healthy=ollama_healthy)
@@ -762,7 +762,7 @@ class Companion:
                 logger.error("Failed to post pass confirmation: %s", e)
             return
 
-        # Detect UI files for ProofShot section
+        # Detect UI files (drives the interactive ProofShot checkbox)
         ui_extensions = {'.css', '.scss', '.less', '.html', '.jsx', '.tsx', '.vue', '.svelte', '.astro'}
         ui_files = [f for f in files if any(f.get("filename", "").endswith(ext) for ext in ui_extensions)]
 
@@ -949,17 +949,18 @@ class Companion:
         return ". ".join(parts) + ".", ui_files
 
     def _generate_tldr(self, title, author, files, graph_context, is_delta=False):
-        diff_analysis, ui_files = self._analyze_diffs(files)
+        diff_analysis, _ = self._analyze_diffs(files)
         impact = f"Blast radius: {graph_context['nodes']} code paths. " if graph_context and graph_context.get("nodes", 0) > 0 else ""
 
-        # ProofShot instruction for UI changes
-        proofshot_section = ""
-        if ui_files:
-            ui_list = ", ".join(f.get("filename", "").split("/")[-1] for f in ui_files[:5])
-            proofshot_section = f"""
-## 📸 ProofShot Required
-UI files changed: {ui_list}
-After applying fixes, run: proofshot start → verify UI → proofshot stop → proofshot pr <number>"""
+        # RETIRED: the proofshot-required claim is gone from the TL;DR prompt.
+        # Companion used to instruct the model to tell authors that ProofShot
+        # visual verification was required, and to hand it a screenshot header to
+        # paste in. Bot 3 cannot produce that evidence: the capture target
+        # (localhost:8788) is occupied by an unrelated application (Hermes WebUI),
+        # the Python entry point ~/workspace/proofshot/cli.py does not exist, and
+        # proofshotter would load `ProofshotSession` from that missing file at
+        # runtime. A claim that cannot be produced is a lie, so it is not asked
+        # for. Reintroduce it only once a capture target actually exists.
 
         if is_delta:
             prompt = f"""Write a 2-3 sentence TL;DR focusing on what CHANGED in this latest push to the PR.
@@ -978,7 +979,7 @@ Instructions:
 - Sentence 1: What files/functions/patterns were added or modified in this push
 - Sentence 2: How these new changes affect the codebase
 - Sentence 3: What to double-check before merging
-- If UI files changed: ProofShot visual verification required{proofshot_section}
+- Never claim visual evidence was captured or is required (proofshot is retired)
 
 TLDR:"""
         else:
@@ -997,7 +998,7 @@ Instructions:
 - Sentence 1: What changed (mention specific files/functions/patterns)
 - Sentence 2: Impact on codebase
 - Sentence 3: What to double-check before merging
-- If UI files changed: ProofShot visual verification required{proofshot_section}
+- Never claim visual evidence was captured or is required (proofshot is retired)
 
 TLDR:"""
 
@@ -1279,10 +1280,12 @@ ELI5:"""
         if eli5:
             parts.append(f"\n**🧒 ELI5**\n{eli5}")
 
-        # ProofShot section for UI changes
-        if ui_files:
-            ui_names = ", ".join(f.get("filename", "").split("/")[-1] for f in ui_files[:5])
-            parts.append(f"\n**📸 ProofShot Required**\nUI files changed: {ui_names}\nPlease run ProofShot visual verification before merging.")
+        # RETIRED: UI-file changes no longer append a proofshot-required flag to
+        # the posted body. Companion claimed visual verification was required on
+        # every UI change, but Bot 3 has no way to produce it (dead capture
+        # target, no Python `ProofshotSession` to import), so the flag promised
+        # evidence that does not exist. `ui_files` is still used below, for the
+        # interactive checkbox actions only.
 
         # GIF reaction
         gif_url = select_gif(emoji, title or "", files or [])
