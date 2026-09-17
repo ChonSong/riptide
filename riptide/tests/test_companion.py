@@ -1217,13 +1217,19 @@ class TestBuildTier1BodyFooter:
 class TestProofShotClaimRetired:
     """Companion must never claim proofshot visual verification again.
 
-    Bot 3 (proofshotter) cannot produce the evidence the flag promised: the
-    capture target defaults to localhost:8788 and that dev instance is dead,
-    there is no proofshot CLI on the host, and riptide/proofshotter.py imports a
-    Python ``ProofshotSession`` that has no implementation anywhere (upstream
-    AmElmo/proofshot is a Node CLI and cannot be imported). Flagging every UI
-    change with a demand for visual evidence was therefore a claim that could
-    not be honoured, so it was retired rather than shimmed.
+    Bot 3 (proofshotter) cannot produce the evidence the flag promised, for
+    reasons narrower than "the host has nothing":
+
+    * the capture target defaults to localhost:8788, which is not dead but
+      occupied by an unrelated application (Hermes WebUI). A capture there would
+      have posted that app's login page as evidence;
+    * the Python entry point ``~/workspace/proofshot/cli.py`` does not exist
+      (its parent directory does), so riptide/proofshotter.py's importlib load of
+      ``ProofshotSession`` fails as a missing file at runtime, not as a missing
+      module; upstream AmElmo/proofshot is a Node CLI and cannot be imported.
+
+    Flagging every UI change with a demand for visual evidence was therefore a
+    claim that could not be honoured, so it was retired rather than shimmed.
 
     RETIRED_CLAIMS below is the only place this file spells the retired text out:
     a guard has to name exactly what it forbids, and it is the literal that grep
@@ -1317,3 +1323,54 @@ class TestProofShotClaimRetired:
 
         source = _inspect.getsource(companion_module)
         self.assert_no_retired_claim(source, "riptide/companion.py source")
+
+    def test_leftover_proofshot_claim_literal_is_gated_and_confined(self):
+        """Pin why proofshotter.py's surviving claim literal is inert.
+
+        ``_post_proofshot_comment`` in riptide/proofshotter.py still appends a
+        claim of visual verification, and the source-level guard above greps
+        riptide/companion.py only - so nothing there would notice if that literal
+        moved into a live path. Two properties keep it inert, both pinned here:
+
+        1. no capture result without the CLI: ``_run_proofshot`` returns None
+           while PROOFSHOT_CLI is missing (the file does not exist; its parent
+           directory does), and both call sites bail on that None before posting;
+        2. the literal itself is confined to the poster function, so it cannot
+           appear in the poll loop, a review body, or the TL;DR prompt.
+
+        Restoring ~/workspace/proofshot/cli.py re-arms the whole path, so a
+        future rebuild has to re-validate the capture target: port 8788 is
+        another application (Hermes WebUI), and a capture there would post that
+        app's login page as evidence.
+        """
+        import inspect as _inspect
+
+        from riptide import proofshotter as proofshotter_module
+
+        # 1. Missing CLI -> no result for the callers to post.
+        with patch.object(
+            proofshotter_module, "PROOFSHOT_CLI",
+            Path("/nonexistent-proofshot-root/proofshot/cli.py"),
+        ):
+            result = proofshotter_module._run_proofshot(
+                1, "http://localhost:8788", None,
+                Path("/tmp/riptide-proofshot-test"), [],
+            )
+        assert result is None, "a missing CLI must leave the callers with nothing to post"
+
+        # 2. The literal must not escape the (unreachable) poster.
+        literal_lines = [
+            line
+            for line in _inspect.getsource(proofshotter_module).splitlines()
+            if "ProofShot visual verification" in line
+        ]
+        if not literal_lines:
+            return  # retired outright - nothing left to confine
+        poster_lines = _inspect.getsource(
+            proofshotter_module._post_proofshot_comment
+        ).splitlines()
+        escaped = [line for line in literal_lines if line not in poster_lines]
+        assert not escaped, (
+            "the retired proofshot claim escaped _post_proofshot_comment into a "
+            f"live path: {escaped!r}"
+        )

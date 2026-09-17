@@ -1282,9 +1282,17 @@ ELI5:"""
 
         # RETIRED: UI-file changes no longer append a proofshot-required flag to
         # the posted body. Companion claimed visual verification was required on
-        # every UI change, but Bot 3 has no way to produce it (dead capture
-        # target, no Python `ProofshotSession` to import), so the flag promised
-        # evidence that does not exist. `ui_files` is still used below, for the
+        # every UI change, but Bot 3 has no way to produce it, and the two
+        # reasons are not the ones first recorded here:
+        #   * the capture target (port 8788) is not dead — it is occupied by an
+        #     unrelated application (Hermes WebUI). A capture there would have
+        #     posted that app's login page as evidence for this PR's UI change;
+        #   * the Python entry point `~/workspace/proofshot/cli.py` does not
+        #     exist (its parent directory does), so proofshotter.py's importlib
+        #     load of `ProofshotSession` fails as a missing file at runtime, not
+        #     as a missing module.
+        # The flag promised evidence that cannot be produced; do not re-add it
+        # without a live capture target. `ui_files` is still used below, for the
         # interactive checkbox actions only.
 
         # GIF reaction
