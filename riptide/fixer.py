@@ -88,8 +88,9 @@ def handle_fix_command(
 
     Called from webhook.py when a user comments @riptide-bot fix on a PR.
     Fetches PR details via the GitHub API client, checks push eligibility,
-    spawns the fix session (or queues if busy), and returns a user-facing
-    confirmation message (or error message).
+    spawns the fix session, and returns a user-facing confirmation message
+    (or error message). fix_queue is written only when spawning is impossible
+    (Hermes cron CLI unavailable) — never as a second record of a spawned fix.
 
     description: optional free-text after `fix` (already stripped).
     delivery_id: trace ID from the originating webhook event (for log correlation).
@@ -152,47 +153,54 @@ def handle_fix_command(
 
     pr_key = f"{owner}/{repo}#{pr_number}"
 
-    # Check if there's already a fix running for this PR — with retry on lock contention
+    # Busy check — with retry on lock contention.
+    #
+    # This must NOT enqueue. A successful spawn reserves a `jobs` row for this
+    # PR and nothing marks it complete when the spawned session finishes, so
+    # `has_running_fix()` stays true for FIX_TTL (2h) after the fix has already
+    # pushed. The old unconditional enqueue therefore wrote a duplicate
+    # fix_queue row for a PR whose fix was already done (PR #208: row id 1,
+    # created 71s after the commit was pushed), and no production code drains
+    # the queue (process_fix_queue has no caller) — it only got auto-cancelled
+    # by cleanup_stale_queue_items. The queue is written in exactly one place
+    # now: the `not spawned` branch below, when the Hermes cron CLI is absent.
     from riptide.state import StateStore
 
-    def check_and_queue():
+    def check_busy():
         state = StateStore()
-        # Use global gate OR PR-specific queue (AND logic: must check both to avoid races)
-        if state.has_running_fix() or state.get_queue_length(pr_number, owner=owner, repo=repo) > 0:
-            queue_id = state.enqueue_fix(pr_number, pr_key, commenter, description.strip(), installation_id=installation_id, owner=owner, repo=repo)
-            position = state.get_queue_position(queue_id)
-            running_pr = state.get_running_fix_pr()
-            return queue_id, position, running_pr
-        return None, None, None
+        # Use global gate OR PR-specific queue (both, to avoid races)
+        busy = state.has_running_fix() or state.get_queue_length(pr_number, owner=owner, repo=repo) > 0
+        return busy, (state.get_running_fix_pr() if busy else None)
 
     try:
-        result = _with_db_retry(check_and_queue)
+        busy, running_pr = _with_db_retry(check_busy)
     except sqlite3.OperationalError:
         log.error(f"DB locked after retries for #{pr_number}")
         return f"⚠️ Database temporarily locked for #{pr_number}. Please retry in a few seconds."
-    
-    queue_id, position, running_pr = result
 
-    if queue_id is not None:
+    if busy:
+        log.info(
+            "Skipping fix for %s/%s#%d — a fix is already pending (running_pr=%s); not queueing a duplicate",
+            owner, repo, pr_number, running_pr,
+        )
         if running_pr and running_pr != pr_number:
-            # Another PR's fix is running — queue globally
+            # Another PR's fix is running — answer honestly instead of queueing
+            # a row that nothing ever drains.
             return (
-                f"⏳ **Fix queued for #{pr_number}.**\n\n"
-                f"Another fix is currently running for PR #{running_pr}. "
-                f"Your request has been added to the queue (position: {position}).\n\n"
-                f"**Scope:** {description.strip() or 'all outstanding review findings'}\n"
-                f"**Estimated start:** after the current fix completes (~5-15 min)."
+                f"⏳ **A fix is already running for PR #{running_pr}.**\n\n"
+                f"#{pr_number} was not queued: the fix queue has no drainer, so a row "
+                f"would sit there without starting. Re-comment `@riptide-bot fix` once "
+                f"that fix finishes.\n\n"
+                f"**Scope:** {description.strip() or 'all outstanding review findings'}"
             )
-        else:
-            # Same PR fix running or queued
-            return (
-                f"⏳ **Fix queued for #{pr_number}.**\n\n"
-                f"A fix is already in progress for this PR. "
-                f"Your request has been added to the queue (position: {position}). "
-                f"It will run automatically when the current fix completes.\n\n"
-                f"**Scope:** {description.strip() or 'all outstanding review findings'}\n"
-                f"**Estimated start:** ~5 min after current fix finishes."
-            )
+        # Same PR: the fix already in flight covers this request.
+        return (
+            f"⏳ **A fix is already in progress for #{pr_number}.**\n\n"
+            f"Nothing was queued — the fix already running for this PR covers it. "
+            f"Re-comment `@riptide-bot fix` with a description if you want a "
+            f"follow-up run after it finishes.\n\n"
+            f"**Scope:** {description.strip() or 'all outstanding review findings'}"
+        )
 
     # No existing fix — try to spawn immediately (with lock retry)
     def do_spawn():
@@ -219,21 +227,45 @@ def handle_fix_command(
         return f"⚠️ Failed to spawn fix session for #{pr_number}: {e}"
 
     if not spawned:
-        # Reserve failed — something else grabbed the slot. Queue this request.
-        def queue_on_race():
+        if _is_cron_available():
+            # Spawning was possible but the reservation was taken concurrently
+            # (or the attempt failed): this request is a duplicate of a fix that
+            # already has the slot. Queueing it is what produced the dead rows —
+            # do not.
+            log.info(
+                "Spawned=False for %s/%s#%d with cron available — not queueing a duplicate",
+                owner, repo, pr_number,
+            )
+            return (
+                f"⚠️ **No fix session started for #{pr_number}.**\n\n"
+                f"A fix for this PR already holds the slot (or the spawn was rejected). "
+                f"Nothing was queued. Re-comment `@riptide-bot fix` once the running "
+                f"fix finishes."
+            )
+
+        # Spawning is impossible without the Hermes cron CLI — this, and only
+        # this, is what fix_queue is a fallback for.
+        def queue_when_cron_unavailable():
             state = StateStore()
             qid = state.enqueue_fix(pr_number, pr_key, commenter, description.strip(), installation_id=installation_id, owner=owner, repo=repo)
             return state.get_queue_position(qid)
         try:
-            position = _with_db_retry(queue_on_race)
+            position = _with_db_retry(queue_when_cron_unavailable)
         except sqlite3.OperationalError:
             position = "?"
+        log.warning(
+            "Hermes cron CLI unavailable — queued fix for %s/%s#%d (position %s)",
+            owner, repo, pr_number, position,
+        )
         return (
             f"⏳ **Fix queued for #{pr_number}.**\n\n"
-            f"A fix just started for this PR (dedup race). "
-            f"Your request has been added to the queue (position: {position}). "
-            f"It will run automatically when the current fix completes.\n\n"
-            f"**Scope:** {description.strip() or 'all outstanding review findings'}"
+            f"The Hermes cron CLI is not available on this host, so no fix session could "
+            f"be scheduled. Your request is recorded in the fix queue "
+            f"(position: {position}) as the fallback path.\n\n"
+            f"**Scope:** {description.strip() or 'all outstanding review findings'}\n"
+            f"**Note:** nothing drains the queue automatically yet "
+            f"(`process_fix_queue` is unwired), so this starts only when a "
+            f"caller for it lands."
         )
 
     log.info(
@@ -251,6 +283,7 @@ def handle_fix_command(
         if description.strip()
         else "all outstanding review findings"
     )
+    job_name = _fix_job_name(owner, repo, pr_number)
     return (
         f"🛠 **Riptide Fix triggered for #{pr_number}!**\n\n"
         f"A Hermes fix session has been scheduled and will begin within 2 minutes. "
@@ -258,7 +291,8 @@ def handle_fix_command(
         f"**PR:** {title}\n"
         f"**Author:** @{author}\n"
         f"**Changes:** +{additions}/-{deletions} ({total_loc} LOC)\n"
-        f"**Commit:** `{head_sha[:12]}`"
+        f"**Commit:** `{head_sha[:12]}`\n"
+        f"**Track it:** Hermes job `{job_name}` (`hermes cron list`)"
     )
 
 
@@ -282,6 +316,16 @@ def _is_cron_available() -> bool:
     return shutil.which("hermes") is not None
 
 
+def _fix_job_name(owner: str, repo: str, pr_number: int) -> str:
+    """Deterministic Hermes cron job name for one PR's fix session.
+
+    Single source of truth for the name: `_spawn_fix` hands this exact string to
+    `hermes cron create --name`, and the ack comment quotes it so a reader can
+    chase the job (`hermes cron list`) instead of asking where it went.
+    """
+    return f"riptide-fix-{owner}-{repo}-{pr_number}"
+
+
 def _spawn_fix(
     owner: str,
     repo: str,
@@ -302,7 +346,7 @@ def _spawn_fix(
     """
     max_retries = 3
     base_delay = 5  # seconds
-    name = f"riptide-fix-{owner}-{repo}-{pr_number}"
+    name = _fix_job_name(owner, repo, pr_number)
     run_at = (datetime.now() + timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%S")
 
     # Cross-session awareness: clean up stale jobs, then atomically reserve
@@ -392,6 +436,11 @@ def process_fix_queue(client, owner: str = "ChonSong", repo: str = "riptide") ->
     Pops the oldest 'queued' item, marks it 'running', fetches PR details,
     and spawns a fix session directly (bypassing handle_fix_command's busy
     check, since we already hold the queue slot).
+
+    Unwired: nothing in production calls this today (the only writer to
+    fix_queue is handle_fix_command's "Hermes cron CLI unavailable" fallback),
+    so queued rows are not drained automatically. Kept as the deterministic
+    drain path for that fallback.
 
     Returns a status message if a fix was started, None if queue is empty.
     """
