@@ -38,6 +38,35 @@ table.
 Never "clean up" the sign-off on the grounds that the `## Review:` header is
 enough: dropping it silently un-gates every findings review.
 
+### 1a. What a deterministic pass must say
+
+`## Riptide Pass: ✅ No findings` is `companion.py`'s only pass marker and it is
+**line 0, byte-for-byte**: the gate matches the substring, the fixer refuses to
+read a pass as findings, and `assemble_review.py` names the marker. Renaming it
+or putting anything above it un-gates every clean PR.
+
+Below that line the body has to be worth reading. A bare rubric — repeating
+"No findings", announcing "Deterministic analysis found no issues", and closing
+with `Depth: trivial` — says the same thing twice, never names the scan, and
+gives no reason for the class. Do not restore that shape. A pass body states, in
+one paragraph:
+
+1. **what ran** — `diff heuristics` (+ `graphify blast radius` when graphify
+   actually returned context), and that this was **no LLM review**, so the
+   reader knows the limit of the result;
+2. **the evidence** — file count, `+adds/−dels`, the file kinds
+   (`documentation only` / `tests only` / `logic only` / `mixed`), and the depth
+   class **with its reason** (`depth.describe_depth()`, which lives next to the
+   thresholds it narrates);
+3. **why no deep review was queued** and how to ask for one
+   (`@riptide-bot review`), with the LOC/settled thresholds read from
+   `deepthink.MIN_LOC_CHANGED` / `STALENESS_MINUTES` — never hardcoded here.
+
+Every number is derived from the diff at post time; nothing is templated and no
+LLM is called (No Template Fallbacks). A pass must still carry **no** 🔴/🟡
+table rows and no `Riptide Review ·` sign-off — those are what make a comment a
+review, and a pass is not one.
+
 ## 2. The CI gate (`riptide-review-required`)
 
 `.github/workflows/riptide-review-required.yml` runs on `pull_request`
