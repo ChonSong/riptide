@@ -594,11 +594,17 @@ class StateStore:
         assert cur.lastrowid is not None
         return cur.lastrowid
 
-    def get_queue_length(self, pr_number: int, owner: str = "", repo: str = "") -> int:
+    def get_queue_length(self, pr_number: int, owner: str = "", repo: str = "",
+                         max_age_seconds: int | None = None) -> int:
         """Count queued (not yet started) fix requests for this PR.
 
         owner/repo narrow the count to one repository; omitting them counts
         every queued request for the PR number (legacy callers).
+
+        max_age_seconds, when set, counts only rows created within that window.
+        Callers that treat a queued row as "a fix is already pending" must set
+        it: nothing drains fix_queue, so a row's presence otherwise blocks the PR
+        forever (PR #215 review). Omitting it returns the raw backlog.
         """
         self.init_fix_queue()
         conn = self._get_conn()
@@ -610,6 +616,9 @@ class StateStore:
         if repo:
             query += " AND repo = ?"
             params.append(repo)
+        if max_age_seconds is not None:
+            query += " AND created_at > ?"
+            params.append(time.time() - max_age_seconds)
         row = conn.execute(query, params).fetchone()
         return row[0]
 

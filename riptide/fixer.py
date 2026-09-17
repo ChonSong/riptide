@@ -33,6 +33,8 @@ from typing import Optional
 
 import structlog
 
+from riptide.state import FIX_TTL_SECONDS
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -56,6 +58,18 @@ FIX_PROVIDER = os.environ.get("RIPTIDE_FIX_PROVIDER", "longcat")
 # Workspace root for spawned sessions (PYTHONPATH pitfall — spawned
 # sessions have no PYTHONPATH; the prompt must insert this path).
 WORKSPACE_ROOT = os.environ.get("RIPTIDE_WORKSPACE_ROOT", "/home/sc/workspace")
+
+# How long a `queued` fix_queue row may block new work for its PR.
+#
+# Nothing in production drains fix_queue (`process_fix_queue` is unwired), so a
+# row counted unconditionally blocks `@riptide-bot fix` for that PR FOREVER and
+# silently swallows every later request — the one-way door the PR #215 review
+# found. FIX_TTL_SECONDS is the established bound for "a fix can still be in
+# flight" (`has_running_fix`, `cleanup_stale_queue_items` both expire at it), so
+# a row left `queued` for longer than that cannot represent pending work and
+# must not hold the gate. Reusing that constant keeps the two in step; there is
+# deliberately no second TTL to drift.
+QUEUE_BLOCK_MAX_AGE_SECONDS = FIX_TTL_SECONDS
 
 
 def _with_db_retry(fn, max_retries=3, base_delay=0.5):
@@ -89,8 +103,9 @@ def handle_fix_command(
     Called from webhook.py when a user comments @riptide-bot fix on a PR.
     Fetches PR details via the GitHub API client, checks push eligibility,
     spawns the fix session, and returns a user-facing confirmation message
-    (or error message). fix_queue is written only when spawning is impossible
-    (Hermes cron CLI unavailable) — never as a second record of a spawned fix.
+    (or error message). It never writes fix_queue: nothing drains that queue,
+    so a row would block every later request for the PR. When spawning is
+    impossible (Hermes cron CLI unavailable) the returned message says so.
 
     description: optional free-text after `fix` (already stripped).
     delivery_id: trace ID from the originating webhook event (for log correlation).
@@ -151,8 +166,6 @@ def handle_fix_command(
     # Fork PRs authored by us are push-eligible (we own the head branch).
     push_eligible = _is_push_eligible(owner, repo, author) and _is_fork_push_eligible(is_fork, author)
 
-    pr_key = f"{owner}/{repo}#{pr_number}"
-
     # Busy check — with retry on lock contention.
     #
     # This must NOT enqueue. A successful spawn reserves a `jobs` row for this
@@ -160,16 +173,32 @@ def handle_fix_command(
     # `has_running_fix()` stays true for FIX_TTL (2h) after the fix has already
     # pushed. The old unconditional enqueue therefore wrote a duplicate
     # fix_queue row for a PR whose fix was already done (PR #208: row id 1,
-    # created 71s after the commit was pushed), and no production code drains
-    # the queue (process_fix_queue has no caller) — it only got auto-cancelled
-    # by cleanup_stale_queue_items. The queue is written in exactly one place
-    # now: the `not spawned` branch below, when the Hermes cron CLI is absent.
+    # created 71s after the commit was pushed). No production code drains the
+    # queue (process_fix_queue has no caller), so handle_fix_command no longer
+    # writes it at all — a row there is a one-way door for its PR (PR #215
+    # review). The queue methods stay for the drain path, if one is ever wired.
     from riptide.state import StateStore
 
     def check_busy():
         state = StateStore()
-        # Use global gate OR PR-specific queue (both, to avoid races)
-        busy = state.has_running_fix() or state.get_queue_length(pr_number, owner=owner, repo=repo) > 0
+        # Use global gate OR PR-specific queue (both, to avoid races).
+        #
+        # The queue half is age-bounded: nothing drains fix_queue, so a row left
+        # `queued` must not block this PR forever. A row older than
+        # QUEUE_BLOCK_MAX_AGE_SECONDS cannot be pending work (the same age
+        # expires a `running` fix in has_running_fix) and is ignored.
+        queued = state.get_queue_length(
+            pr_number,
+            owner=owner,
+            repo=repo,
+            max_age_seconds=QUEUE_BLOCK_MAX_AGE_SECONDS,
+        )
+        if queued:
+            log.info(
+                "Blocking fix for %s/%s#%d on %d queued fix row(s) younger than %ss",
+                owner, repo, pr_number, queued, QUEUE_BLOCK_MAX_AGE_SECONDS,
+            )
+        busy = state.has_running_fix() or queued > 0
         return busy, (state.get_running_fix_pr() if busy else None)
 
     try:
@@ -243,29 +272,25 @@ def handle_fix_command(
                 f"fix finishes."
             )
 
-        # Spawning is impossible without the Hermes cron CLI — this, and only
-        # this, is what fix_queue is a fallback for.
-        def queue_when_cron_unavailable():
-            state = StateStore()
-            qid = state.enqueue_fix(pr_number, pr_key, commenter, description.strip(), installation_id=installation_id, owner=owner, repo=repo)
-            return state.get_queue_position(qid)
-        try:
-            position = _with_db_retry(queue_when_cron_unavailable)
-        except sqlite3.OperationalError:
-            position = "?"
+        # Spawning is impossible without the Hermes cron CLI. Do NOT enqueue:
+        # nothing in production drains fix_queue, so a row written here would
+        # block this PR for good — the busy check above counts it, and every
+        # later `@riptide-bot fix` would be answered "already in progress" while
+        # nothing ever starts (the one-way door from the PR #215 review). Tell
+        # the user it cannot start instead; no row, no block, no silent swallow.
         log.warning(
-            "Hermes cron CLI unavailable — queued fix for %s/%s#%d (position %s)",
-            owner, repo, pr_number, position,
+            "Hermes cron CLI unavailable — cannot start fix for %s/%s#%d; not queueing",
+            owner, repo, pr_number,
         )
         return (
-            f"⏳ **Fix queued for #{pr_number}.**\n\n"
-            f"The Hermes cron CLI is not available on this host, so no fix session could "
-            f"be scheduled. Your request is recorded in the fix queue "
-            f"(position: {position}) as the fallback path.\n\n"
+            f"⚠️ **Could not start a fix for #{pr_number}.**\n\n"
+            f"The Hermes cron CLI is not available on this host, so no fix session "
+            f"could be scheduled. Nothing was queued: the fix queue has no drainer "
+            f"(`process_fix_queue` is unwired), so a queued row would sit there and "
+            f"block every later `@riptide-bot fix` on this PR.\n\n"
             f"**Scope:** {description.strip() or 'all outstanding review findings'}\n"
-            f"**Note:** nothing drains the queue automatically yet "
-            f"(`process_fix_queue` is unwired), so this starts only when a "
-            f"caller for it lands."
+            f"**Next step:** make sure `hermes` is installed and on PATH for the host "
+            f"running Riptide, then re-comment `@riptide-bot fix`."
         )
 
     log.info(
@@ -437,10 +462,11 @@ def process_fix_queue(client, owner: str = "ChonSong", repo: str = "riptide") ->
     and spawns a fix session directly (bypassing handle_fix_command's busy
     check, since we already hold the queue slot).
 
-    Unwired: nothing in production calls this today (the only writer to
-    fix_queue is handle_fix_command's "Hermes cron CLI unavailable" fallback),
-    so queued rows are not drained automatically. Kept as the deterministic
-    drain path for that fallback.
+    Unwired: nothing in production calls this today, and nothing writes
+    fix_queue either (handle_fix_command stopped enqueueing once the PR #215
+    review showed a row there is a one-way door — no drainer exists, so the row
+    only blocked the PR). Kept as the deterministic drain path for any future
+    writer or manual backfill.
 
     Returns a status message if a fix was started, None if queue is empty.
     """
