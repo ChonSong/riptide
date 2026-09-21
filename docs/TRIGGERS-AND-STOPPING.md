@@ -1,8 +1,8 @@
 # Riptide — Triggers, Variables, and Stopping Conditions
 
 **Status: draft.** This document traces each trigger to the variables it sets and the condition
-that stops it. Claims marked **[verify]** were not confirmed against code while writing and must be
-checked before this is treated as current.
+that stops it. Written from verified evidence; two critique passes (correctness, verbosity) have been
+applied. Awaiting human review before it is treated as current.
 
 Companion docs: `AGENTS.md` (per-bot behaviour), `docs/REVIEW-CONTRACT.md` (what a review must
 contain and what CI accepts). This file answers a different question: *what gets passed where, and
@@ -13,7 +13,7 @@ what ends each path.*
 | Trigger | Fires when | Entry point | Sets |
 |---|---|---|---|
 | Webhook | PR `opened` / `reopened` / `synchronize` | `riptide/webhook.py` | Companion TL;DR comment; installation + PR context |
-| Webhook, bad signature | Any | `webhook.py` | Returns **200**, not 401, so the cron poller picks the PR up instead of GitHub retrying [verify] |
+| Webhook, bad signature | Any | `webhook.py` | Returns **200**, not 401, so the cron poller picks the PR up instead of GitHub retrying (`webhook.py:262`) |
 | Review poller (cron) | Every 15 min | `riptide/deepthink.py` | Reservations, spawn attempts; the scheduled review session |
 | Proofshot poller (cron) | Every 10 min | `riptide/proofshotter.py` | UI-file detection; capture attempt (claim retired, see §4) |
 | `@riptide-bot review` | Comment (aliases: `deepthink`, `full review`) | webhook → poller | On-demand review, same downstream as the poller |
@@ -40,6 +40,10 @@ what ends each path.*
   that a review comment was actually delivered.
 - **Depth classification**: `trivial` = under 10 changed logic lines and no logic files;
   deep-think is reserved for PRs over 100 changed LOC settled 30+ minutes.
+- **Retry delays disagree.** `deepthink.py:562` waits 5s/10s/20s; its docstring at `:380` says
+  5s/15s/30s; the loop at `:405` waits 2s/4s. Three retry loops, three answers.
+- **Fix cooldown**: `FIX_COOLDOWN_SECONDS` (default 300s, from `RIPTIDE_FIX_COOLDOWN`) throttles
+  repeat fix requests (`poller.py:60`).
 - **Findings payload**: only a payload stamped `judged: true` may be posted. An empty result must
   never render as a clean pass.
 
@@ -50,7 +54,7 @@ what ends each path.*
 | `probe` (ws-1) | PR metadata, diff | PR context at its canonical path |
 | `judge` (ws-2) | PR context | Findings stamped `judged: true` |
 | `artisan` (ws-3) | Findings path | Diagram; declares `pipeline=["excalidraw", "upload"]` |
-| `engine` (ws-4) | `inputs["command"]` | **Intended**: uploaded diagram URL. **Actual**: cannot deliver it — see §4 |
+| `engine` (ws-4) | `inputs["command"]` | **Intended**: uploaded diagram URL. **Actual**: cannot deliver it (§4) |
 | `scribe` (ws-5) | Findings, `diagram_url`, model/provider | The posted review body + `Riptide Review ·` sign-off |
 | `warden` | Pipeline artifacts | Verification verdict |
 
@@ -59,14 +63,14 @@ what ends each path.*
 | Scenario | Stop condition | Records / releases | If it misfires |
 |---|---|---|---|
 | Review delivered | Comment posted with the sign-off | Dedup recorded; reservation released | — |
-| Spawn failed | Retries exhausted (3 attempts, 5s/10s/20s backoff [verify]) | **Nothing** — no dedup, so the next poll retries | A failed spawn silently parks the PR |
-| Review gate | A review-shaped comment exists after the head commit | Gate goes green | **False green**: a follow-up commit satisfies the gate without resolving the finding; green ≠ addressed |
+| Spawn failed | Retries exhausted | **Nothing** — no dedup, so the next poll retries | A failed spawn silently parks the PR; the retry delay is inconsistent (§2) |
+| Review gate | The last review-shaped comment that is *not* a pass, with commits counted after its `created_at` (`riptide-review-required.yml:62`) | Gate goes green | **False green**: a follow-up commit satisfies the gate without resolving the finding; green ≠ addressed |
 | Already reviewed | Same SHA + 24h cooldown | Skips | SHA-only dedup once skipped PRs whose review never landed |
 | Stale reservation | Job completes/vanishes, or the review is delivered | Reservation released | Stale reservation blocks every later trigger with "Already pending" |
 | Fix requested, cron CLI absent | Refuses and says so | **No** `fix_queue` row | A row nothing drains would block that PR permanently |
 | Fix already queued | Row younger than `QUEUE_BLOCK_MAX_AGE_SECONDS` (= `FIX_TTL_SECONDS`, 2h) | Blocks a second fix | A row left by an older deployment would hold the gate |
 | Proofshot | Claim retired | Nothing emitted | The bot promised evidence nothing could produce |
-| Diagram upload | — | — | `ws-4-engine` runs a shell command whose stdout cannot write `diagram_url` into the track inputs, so `[Diagram](url)` never appears even if the command resolved |
+| Diagram upload | — | — | `ws-4-engine` shell stdout cannot write `diagram_url` into the track inputs, so `[Diagram](url)` never appears even if the command resolved |
 
 ## 5. Failure modes this document exists to prevent
 
