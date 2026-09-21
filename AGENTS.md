@@ -120,6 +120,15 @@ is not.
 - Fork/foreign PRs get a comment-only patch with a "cannot push" note
 - Safety: no force-push, no secret edits, no push on red tests, Conventional Commits
 - Instant ack comment ("🛠 Riptide Fix triggered"), then summary with verdicts
+- Ack comment names the spawned Hermes job (`riptide-fix-<owner>-<repo>-<n>`,
+  from `_fix_job_name`) so it can be chased with `hermes cron list`
+- `@riptide-bot fix` never writes `fix_queue`: nothing drains it
+  (`process_fix_queue` is unwired), so a row would block that PR permanently — the
+  busy check counts it — and silently swallow every later request. When the Hermes
+  cron CLI is absent the command says it could not start instead.
+- A `queued` row only blocks while it is younger than `QUEUE_BLOCK_MAX_AGE_SECONDS`
+  (= `FIX_TTL_SECONDS`, 2h), so a row left behind by an older deployment cannot hold
+  the gate.
 
 ### Bot 1: Companion State Reporting
 - Companion TL;DR footer includes Bot 2 status when state file is present:
