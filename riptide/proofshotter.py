@@ -416,6 +416,10 @@ def _post_proofshot_comment(
         # Shorten commit message to first line, max 60 chars
         msg = commit_message.split("\n")[0][:60] if commit_message else ""
         body_parts.append(f"**Commit `{commit_sha[:8]}`:** {msg}\n")
+    # RETIRED CLAIM PATH: unreachable while ~/workspace/proofshot/cli.py is missing.
+    # Before restoring that file, check what is actually listening on the capture
+    # target: port 8788 is currently the Hermes WebUI, so a capture there would post
+    # an unrelated app's login page as evidence. Validate the target, then re-arm.
     body_parts.append("ProofShot visual verification completed for the UI changes in this PR.\n")
     body_parts.append(f"![ProofShot GIF]({gif_url})\n")
 
