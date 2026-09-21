@@ -40,8 +40,10 @@ what ends each path.*
   that a review comment was actually delivered.
 - **Depth classification**: `trivial` = under 10 changed logic lines and no logic files;
   deep-think is reserved for PRs over 100 changed LOC settled 30+ minutes.
-- **Retry delays disagree.** `deepthink.py:562` waits 5s/10s/20s; its docstring at `:380` says
-  5s/15s/30s; the loop at `:405` waits 2s/4s. Three retry loops, three answers.
+- **Two retry delays, deliberately distinct.** The spawn retry doubles a 5s base to 5s/10s/20s
+  (`deepthink.py:562`); a separate loop waits 2s/4s (`:405`) for a different retry context. The
+  `:380` docstring claimed 5s/15s/30s and was corrected to match the code; the delays themselves
+  were left as they run.
 - **Fix cooldown**: `FIX_COOLDOWN_SECONDS` (default 300s, from `RIPTIDE_FIX_COOLDOWN`) throttles
   repeat fix requests (`poller.py:60`).
 - **Findings payload**: only a payload stamped `judged: true` may be posted. An empty result must
