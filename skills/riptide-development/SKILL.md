@@ -168,6 +168,10 @@ Plus loaded skills (deep-think: 20k chars, github-pr-lifecycle: 53k chars). Tota
 
 ## Bot 3 (proofshotter) — capture target and guards
 
+Scope: the target/guard behaviour in this section lands in **#220** (it is not on
+`main`); the instance facts and the playwright trap are true today. Read the
+contract below as intended, not deployed, until #220 merges.
+
 - **`proofshot/cli.py` is a single-file CLI, not a package.** It carries no
   `pyproject.toml`/`setup.py`, so `pip install -e ~/workspace/proofshot` fails.
   `proofshotter.py` does NOT call `cli.py pr`; it loads `ProofshotSession` from that
@@ -185,11 +189,18 @@ Plus loaded skills (deep-think: 20k chars, github-pr-lifecycle: 53k chars). Tota
   **no-op** — it does not log in; that skip-onboarding flag is what bypasses the gate.
 - **A login gate answers HTTP 200**, so a status code can never tell it from the app
   shell. Check the rendered DOM (`_assert_capture_is_app_shell`) before posting.
-- **playwright browsers need `env -u NODE_OPTIONS`.** The agent's
-  `NODE_OPTIONS=--gc-interval=100` makes playwright's bundled node abort. The package
-  installs into the service interpreter, but the browser build downloads from
-  Microsoft's CDN, which returns `400 GatewayExceptionResponse` on this host, so
-  `python -m playwright install chromium` fails here.
+- **The playwright browser is already installed — do not reinstall it.** The venv's
+  playwright (1.62.0) expects chromium revision **1234** and
+  `~/.cache/ms-playwright/chromium-1234` matches it (installed 2026-09-17, with
+  `headless_shell` alongside). A real capture against `:8790` produced a GIF, so the
+  capture half works on this host. What breaks a launch is
+  **`NODE_OPTIONS=--gc-interval=100`**, the value agent terminal sessions carry:
+  playwright's bundled node aborts and the API reports `Connection closed while
+  reading from the driver`, which is easily misread as a missing browser.
+  `--max-old-space-size=4096` (what the services run with) is fine. Run captures as
+  `env -u NODE_OPTIONS ...`. Microsoft's CDN does answer a reinstall with
+  `400 GatewayExceptionResponse` here — that is why the reinstall fails, not because
+  the browser is absent, and no reinstall is needed.
 
 ## Worktrees DO exercise their own code
 
@@ -206,7 +217,22 @@ Take a real before/after inside the same worktree (`git checkout --detach origin
 run, then `git checkout <branch>`); the collected test count is the tell that the
 intended tree ran.
 
+Caveat — the editable install still wins in a **subprocess that runs a module as a
+script**. `riptide/tests/test_entrypoints.py` spawns
+`python3 riptide/deepthink.py --help` with `PYTHONPATH=""`, so `sys.path[0]` is the
+worktree's `riptide/` (which holds no `riptide` package) and `import riptide` falls
+through to the editable install → the **shared checkout's** package runs against the
+worktree's script. That is how a worktree run can report one failure that CI never
+sees (it appeared as `ImportError: cannot import name ... from
+'/home/sc/workspace/riptide/riptide/...'`). For an answer that matches CI, copy the
+changed files into the shared checkout, run there, then `git checkout --` them
+(only tracked files; delete any file the branch adds).
+
 ## Review provenance
+
+Scope: the `review_memory` and sign-off behaviour below lands in **#219**; `main`
+still writes no provenance. The "one builder" rule is what a review of #219 asked
+for, and #219's follow-up commit enforces it in `deepthink` and `conductor` too.
 
 - **`review_memory` was written only on merge** (zero counts, no attribution), and its
   `metadata` column was **double-encoded** — `json.dumps` applied to an
