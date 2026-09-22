@@ -227,6 +227,27 @@ intended tree ran.
   parameters to a helper is dead code unless its caller passes them; a diff's
   description is not evidence. Grep the call sites.
 
+## A capture guard must test visibility, not presence
+
+Matching a login-gate selector by **presence** refuses legitimate captures. Measured
+on hermes-webui:
+
+| | `:8790` app shell | `:8788` login gate |
+|---|---|---|
+| final URL | `/` | `/login?next=/` |
+| password inputs | 2, **0 visible** (`#settingsPassword`, `#settingsCurrentPassword`) | 1, **visible** (`#pw` inside `#login-form`) |
+| app markers | `main`, `nav`, `.sidebar`, `header` | none |
+| body | `Chat \| WebUI sessions (0)` | `Enter your password to continue` |
+
+So a gate match only counts when the element is **rendered** (`element.is_visible()`),
+and the URL path is checked separately: the real gate redirects to `/login` on the
+**same host**, so a cross-origin check alone does not catch it.
+
+A guard that fires on the app is worse than no guard — Bot 3 then reports every
+capture as impossible, and the symptom looks like a missing target rather than a
+bad predicate. Verify a guard against the real app before trusting it; a unit test
+with a hand-built page double cannot tell you this.
+
 ## The Companion's nesting metric is diff-scoped and mis-attributes
 
 `DiffAnalyzer` (`riptide/diff_analyzer.py`) measures nesting over the patch's
