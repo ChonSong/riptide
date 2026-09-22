@@ -89,12 +89,15 @@ is not.
 - Posts TL;DR comment with graphify-informed blast radius
 - Does **not** flag proofshot: the "📸 ProofShot Required" claim is RETIRED, so
   Companion stays silent on UI-file changes. Bot 3 has no capture target
-  (port 8788 is occupied by an unrelated application (Hermes WebUI,
-  pid 1902, `Server: HermesWebUI/exp-v0.52.264-dirty`), not dead — a capture
-  would have screenshotted that app's login page and posted it as evidence), the Python entry point `~/workspace/proofshot/cli.py` does not exist (its
-  parent directory does), and `proofshotter.py` would load `ProofshotSession` from that missing
-  file at runtime via importlib, so the failure is a missing file, not a module, so the flag promised evidence that
-  cannot be produced. Do not re-add it without a live capture target.
+  (port 8788 is `hermes-webui-dev.service`, this project's own dev instance —
+  not "an unrelated application", as an earlier note here claimed. It is a live,
+  logged-in instance serving `master`, so a capture there both races with its user
+  and cannot show a PR's change). `~/workspace/proofshot/cli.py` now exists (the
+  corrupt clone was re-made), and `proofshotter.py` loads `ProofshotSession` from it
+  via importlib. The capture target must now be **declared** (`url` in
+  `proofshot.config.json`, or `RIPTIDE_PROOFSHOT_URL`); a repo declaring neither is
+  skipped rather than inheriting a dev port. Re-arm the claim only once a capture is
+  proven to render the app shell rather than a login gate.
 - Uses local Ollama (`qwen2.5-coder:7b`) at `http://localhost:11434`
 - Skip/resume per PR via `@riptide-bot companion skip/resume`
 - On-demand deep-think review via `@riptide-bot review` (alias: `deepthink`, `full review`)
@@ -144,10 +147,25 @@ is not.
 
 ### Bot 3: Proofshotter (Cron-Triggered)
 - Polls open PRs every 10 min via `riptide/proofshotter.py`
-- Checks for UI file changes; runs proofshot Playwright captures on the dev instance (localhost:8788)
-- `proofshot.config.json` is optional — defaults to `localhost:8788` if absent; include for custom captures/seed
-- **Prerequisite:** `RIPTIDE_PROOFSHOT_CLI` must point at an existing proofshot CLI;
-  if the dev instance is down, captures are skipped (never faked)
+- Checks for UI file changes, then captures against a target the repo must
+  **declare**: `url` in `proofshot.config.json`, or `RIPTIDE_PROOFSHOT_URL`. There
+  is no default — a repo declaring neither is skipped (`skipped(no-target)` in the
+  run summary) instead of inheriting a dev port.
+- The dedicated test instance for the Hermes WebUI suite is **:8790**, booted with
+  `HERMES_WEBUI_SKIP_ONBOARDING=1` (see
+  `hermes-webui-tests/.github/workflows/visual.yml`). :8788 is
+  `hermes-webui-dev.service` — the developer's own running instance — so capturing
+  it both races with that user and cannot show a PR's change (`dev` serves
+  `master`, not the PR branch). The auth fixture in `hermes-webui-tests` is a
+  no-op: it does not log in, it relies on that skip-onboarding flag.
+- Before anything is posted, the captured page is checked for a login gate
+  (`_assert_capture_is_app_shell`). A login page answers 200, so a status code
+  cannot tell it from the app shell, and posting one as evidence is a false claim;
+  a refusal fails the capture loudly rather than posting.
+- **Prerequisite:** `RIPTIDE_PROOFSHOT_CLI` must point at an existing proofshot CLI,
+  and `playwright` (package *and* a browser build) must be importable by the
+  service's interpreter; if any of that is missing, or the declared target is down,
+  captures are skipped (never faked)
 - Posts visual evidence (GIF/screenshots) as PR comment
 - Dedup: SHA-based only — new commits with UI changes automatically retrigger (no 24h cooldown)
 

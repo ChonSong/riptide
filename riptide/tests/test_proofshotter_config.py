@@ -15,12 +15,18 @@ class TestProofshotterUrlConfig:
             url = os.environ.get("RIPTIDE_PROOFSHOT_URL", "http://localhost:8788")
             assert url == "http://example.com:9000"
 
-    def test_url_default(self):
-        """Default URL must be localhost:8788 when env var not set."""
+    def test_no_url_default(self):
+        """There is no default target: an undeclared repo is skipped, not captured.
+
+        This used to assert the literal fallback `http://localhost:8788`, which was
+        the module's real behaviour — so any repo with a UI change captured
+        whatever sat on the developer's dev port and posted it as that PR's
+        evidence. A target must now be declared.
+        """
         with patch.dict(os.environ, {}, clear=True):
-            os.environ.pop("RIPTIDE_PROOFSHOT_URL", None)
-            url = os.environ.get("RIPTIDE_PROOFSHOT_URL", "http://localhost:8788")
-            assert url == "http://localhost:8788"
+            from riptide.proofshotter import _resolve_capture_target
+
+            assert _resolve_capture_target({}) is None
 
     def test_proofshotter_uses_env_var(self):
         """Verify proofshotter.py uses RIPTIDE_PROOFSHOT_URL env var."""

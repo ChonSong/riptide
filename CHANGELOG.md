@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Fixed (2026-09-21)
+
+- **Bot 3 captured whatever happened to be on the developer's dev port.**
+  `proofshotter.py` fell back to `http://localhost:8788` in three places, so any
+  watched repo with a UI change captured whatever was listening there — a login
+  page, or another app — and posted it as that PR's visual verification. That port
+  is `hermes-webui-dev.service`, this project's own dev instance serving `master`,
+  so a capture there could not show a PR's change and raced with its user. A target
+  must now be declared (`url` in `proofshot.config.json`, or
+  `RIPTIDE_PROOFSHOT_URL`); a repo declaring neither is skipped
+  (`skipped(no-target)` in the run summary) instead of inheriting a guess.
+- **Nothing visual is posted until the captured page is checked.** A login gate
+  answers 200, so a status code cannot tell it from the app shell: the page is now
+  verified against the rendered DOM, and a gate fails the capture loudly rather
+  than posting. The evidence line names the verified target, and a failed evidence
+  comment is reported as a failure instead of "ProofShot complete".
+
 ### Fixed (2026-09-14)
 
 - **`@riptide-bot fix` wrote a duplicate `fix_queue` row.** A spawned fix left its
