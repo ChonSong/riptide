@@ -363,6 +363,7 @@ class Conductor:
                 brief.inputs.get("diagram_url"),
                 model=brief.inputs.get("model"),
                 provider=brief.inputs.get("provider"),
+                head_sha=brief.inputs.get("head_sha", ""),
             )
         elif action == "record_review":
             findings, err = self._resolve_findings(brief)
@@ -644,6 +645,9 @@ def create_webhook_review_pipeline(
             # code default instead of the model that actually reviewed.
             "model": model,
             "provider": provider,
+            # The reviewed revision, so the sign-off's job handle and the
+            # review_memory row both name the commit the verdict belongs to.
+            "head_sha": pr_details.get("head", {}).get("sha", ""),
         },
         acceptance={"posted": True},
         role="scribe",

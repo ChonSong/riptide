@@ -18,6 +18,7 @@ Usage:
 """
 import argparse
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -89,7 +90,9 @@ def assemble_review_body(
 
     # Clean PR: success message
     if not findings:
-        return _build_success_footer(model, provider, triggered_at, pr_created_at)
+        return _build_success_footer(
+            model, provider, triggered_at, pr_created_at, owner, repo, pr_number
+        )
 
     # Separate critical/warnings from suggestions/info
     criticals = [f for f in findings if f.get("severity") == "critical"]
@@ -127,8 +130,10 @@ def assemble_review_body(
     next_action = _build_next_action(findings, time_estimates)
     parts.append(f"\n{next_action}")
 
-    # 6. Sign-off with timing
-    signoff = _build_signoff(model, provider, triggered_at, pr_created_at)
+    # 6. Sign-off with timing and provenance
+    signoff = _build_signoff(
+        model, provider, triggered_at, pr_created_at, owner, repo, pr_number
+    )
     parts.append(signoff)
 
     body = "\n".join(parts)
@@ -145,6 +150,9 @@ def _build_success_footer(
     provider: Optional[str],
     triggered_at: Optional[str],
     pr_created_at: Optional[str],
+    owner: Optional[str] = None,
+    repo: Optional[str] = None,
+    pr_number: Optional[int] = None,
 ) -> str:
     """Build a clean-PR success message."""
     lines = [
@@ -155,12 +163,15 @@ def _build_success_footer(
         "Next: Merge when ready.",
     ]
 
-    elapsed_str = _compute_elapsed(triggered_at, pr_created_at)
-    if elapsed_str:
-        lines.append(f"\n<sub>Riptide Review · ⏱️ Review posted in {elapsed_str}</sub>")
-    else:
-        signoff = _build_signoff(model, provider, triggered_at, pr_created_at)
-        lines.append(signoff)
+    # One sign-off path for both the timed and untimed case: with no owner/repo/pr
+    # and no model/provider this renders the same `<sub>Riptide Review · ⏱️ …</sub>`
+    # line the timed branch used to hardcode, and it carries the same provenance
+    # when they are supplied.
+    lines.append(
+        _build_signoff(
+            model, provider, triggered_at, pr_created_at, owner, repo, pr_number
+        )
+    )
 
     return "\n".join(lines)
 
@@ -331,20 +342,63 @@ def _format_file_ref(finding: dict) -> str:
     return ""
 
 
+def review_job_name(owner: str, repo: str, pr_number: int) -> str:
+    """The deterministic name of the job that runs a PR's review.
+
+    This is the handle a reader chases with `hermes cron list`: the same string is
+    created by the spawner (`deepthink._spawn_deepthink`, handed to
+    `hermes cron create --name`) and reused as the Conductor track id
+    (`conductor.create_pr_review_pipeline` and its siblings). Keep this the only
+    builder — a format change belongs here and nowhere else.
+    """
+    return f"riptide-review-{owner}-{repo}-{pr_number}"
+
+
+def _current_session_id() -> Optional[str]:
+    """The Hermes session rendering this review, or None when there is no session.
+
+    A cron-spawned review session publishes its own id into the environment
+    (`agent.agent_init._publish_session_id` -> `gateway.session_context
+    .set_current_session_id`), so a posted review can be traced back to the session
+    that produced it. The webhook/service process is not a session and has no id:
+    render nothing rather than invent one.
+    """
+    return os.environ.get("HERMES_SESSION_ID") or None
+
+
 def _build_signoff(
     model: Optional[str],
     provider: Optional[str],
     triggered_at: Optional[str],
     pr_created_at: Optional[str],
+    owner: Optional[str] = None,
+    repo: Optional[str] = None,
+    pr_number: Optional[int] = None,
 ) -> str:
-    """Build the sign-off line with timing."""
+    """Build the sign-off line with timing.
+
+    The `Riptide Review ·` prefix is matched byte-for-byte by the CI gate
+    (`.github/workflows/riptide-review-required.yml`) and by the fixer's
+    "is this a review?" check, so it is emitted verbatim; everything after it is
+    additive provenance. Each part is omitted when unknown, never guessed.
+    """
     elapsed_str = _compute_elapsed(triggered_at, pr_created_at)
 
     signoff_parts = []
+
     if model:
         signoff_parts.append(f"model: `{model}`")
     if provider:
         signoff_parts.append(f"provider: `{provider}`")
+
+    # Provenance, after the model attribution: which job ran this review, and which
+    # session rendered it.
+    if owner and repo and pr_number is not None:
+        signoff_parts.append(f"job: `{review_job_name(owner, repo, pr_number)}`")
+    session_id = _current_session_id()
+    if session_id:
+        signoff_parts.append(f"session: `{session_id}`")
+
     if elapsed_str:
         signoff_parts.append(f"⏱️ Review posted in {elapsed_str}")
 
@@ -435,12 +489,46 @@ def validate_findings(findings: list[dict]) -> list[str]:
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
 
+def _record_review_outcome(args, findings: list[dict]) -> None:
+    """Record the posted review in `review_memory` (best-effort).
+
+    Provenance only: a failure here must never fail a review that already posted.
+    The merge-time writer in `webhook.py` cannot know which model reviewed, so
+    model/provider/head_sha are captured here, where the spawned session supplies
+    them, rather than guessed later.
+    """
+    try:
+        from riptide.review_memory import store_review_outcome
+
+        criticals = sum(1 for f in findings if f.get("severity") == "critical")
+        warnings = sum(1 for f in findings if f.get("severity") == "warning")
+        store_review_outcome(
+            owner=args.owner,
+            repo=args.repo,
+            pr_number=args.pr,
+            head_sha=args.head_sha,
+            findings_count=len(findings),
+            critical_count=criticals,
+            warning_count=warnings,
+            verdict="findings" if findings else "pass",
+            metadata={
+                "job": review_job_name(args.owner, args.repo, args.pr),
+                "model": args.model,
+                "provider": args.provider,
+                "head_sha": args.head_sha,
+            },
+        )
+    except Exception as exc:
+        print(f"WARNING: could not record review outcome: {exc}", file=sys.stderr)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Assemble and post a Riptide review from structured findings")
     parser.add_argument("--findings", required=True, help="Path to findings JSON file")
     parser.add_argument("--owner", required=True, help="Repo owner")
     parser.add_argument("--repo", required=True, help="Repo name")
     parser.add_argument("--pr", required=True, type=int, help="PR number")
+    parser.add_argument("--head-sha", default="", help="Head commit SHA the review covers (stored in review_memory)")
     parser.add_argument("--diagram-url", default=None, help="Pre-generated diagram URL")
     parser.add_argument("--model", default=None, help="Model used for the review (appended to sign-off)")
     parser.add_argument("--provider", default=None, help="Provider used for the review (appended to sign-off)")
@@ -491,6 +579,7 @@ def main():
     success = post_review(args.owner, args.repo, args.pr, body)
     if success:
         print(f"Review posted to {args.owner}/{args.repo}#{args.pr}")
+        _record_review_outcome(args, findings)
     else:
         print(f"ERROR: failed to post review to {args.owner}/{args.repo}#{args.pr}. Fix: check gh auth and PR number.", file=sys.stderr)
         sys.exit(1)
