@@ -186,3 +186,43 @@ class TestScribePassesHeadSha:
         cmd = captured["cmd"]
         assert "--head-sha" in cmd
         assert cmd[cmd.index("--head-sha") + 1] == "deadbeef"
+
+
+class TestOneJobNameBuilder:
+    """The job name is built once.
+
+    A review's sign-off advertises `riptide-review-<owner>-<repo>-<n>` as the handle
+    to chase with `hermes cron list`. That only pays off if the string the sign-off
+    renders is the one the spawner created and the Conductor tracks: three copies of
+    the format drift the moment one is edited. These tests fail if a second copy
+    reappears.
+    """
+
+    def test_spawner_and_conductor_bind_the_shared_builder(self):
+        import riptide.deepthink as deepthink
+        import riptide.pipeline.conductor as conductor
+
+        assert deepthink.review_job_name is review_job_name
+        assert conductor.review_job_name is review_job_name
+
+    def test_no_module_but_the_builder_formats_the_name(self):
+        import inspect
+        import riptide.deepthink as deepthink
+        import riptide.pipeline.conductor as conductor
+
+        for mod in (deepthink, conductor):
+            source = inspect.getsource(mod)
+            assert 'f"riptide-review-{' not in source, (
+                f"{mod.__name__} formats the review job name itself; "
+                "call riptide.assemble_review.review_job_name instead"
+            )
+
+    def test_conductor_prompt_hands_over_the_canonical_name(self):
+        import riptide.deepthink as deepthink
+
+        prompt = deepthink._build_conductor_prompt(
+            "ChonSong", "riptide", 215, "fix: x", "ChonSong", 12, "a" * 40,
+        )
+
+        assert f'"{JOB}"' in prompt
+        assert "riptide-review-{owner}" not in prompt

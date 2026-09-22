@@ -31,6 +31,11 @@ from .warden import Warden
 from .scribe import Scribe
 from .ci_verifier import CIVerifier
 
+# The review job name has exactly one builder: it doubles as the spawner's
+# `hermes cron create --name` and as this module's track id, so a second copy of
+# the format would silently break the sign-off's handle.
+from riptide.assemble_review import review_job_name
+
 
 def _canonical_output_path(pr_number: int, role: str, track_id: str = "") -> str:
     """Per-workstream output path for one review run.
@@ -487,7 +492,7 @@ def create_deepthink_review_pipeline(
 
     Returns the created track dict with all workstreams staged.
     """
-    track_id = f"riptide-review-{owner}-{repo}-{pr_number}"
+    track_id = review_job_name(owner, repo, pr_number)
 
     track = get_track(track_id)
     if not track:
