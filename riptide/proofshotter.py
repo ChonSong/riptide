@@ -530,7 +530,8 @@ class CaptureTargetError(RuntimeError):
 
 
 # A login (or onboarding) gate answers 200, so a status code cannot tell it apart
-# from the app shell. These selectors can.
+# from the app shell. These selectors can — but only when the match is *rendered*
+# (see _find_login_gate): the app shell itself contains hidden password fields.
 _LOGIN_GATE_SELECTORS = (
     "input[type=password]",
     "#login-form",
@@ -556,18 +557,36 @@ def _resolve_capture_target(config: Optional[dict]) -> Optional[str]:
 
 
 def _find_login_gate(page) -> Optional[str]:
-    """The first login-gate selector the page renders, or None.
+    """The first *rendered* login gate on the page, or None.
 
-    Split out of `_assert_capture_is_app_shell` to keep that function's nesting
-    under the repo's complexity threshold — the Companion's pre-pass raised a 🟡
-    against it at depth 5 (`riptide/proofshotter.py`).
+    Presence is not enough — visibility is the test. The hermes-webui app shell
+    serves two `input[type=password]` fields in its settings forms
+    (`#settingsPassword`, `#settingsCurrentPassword`), both hidden. Matching on
+    presence alone refused a real capture of the dedicated :8790 instance, title
+    "Hermes", HTTP 200: a guard that fires on the app itself is worse than no
+    guard, because it silently reports every capture as impossible.
+
+    The gate it must catch instead redirects to `/login` and renders one *visible*
+    `#pw` inside `#login-form` ("Hermes — Sign in", "Enter your password to
+    continue").
     """
+    path = urlparse(getattr(page, "url", "") or "").path
+    if path.rstrip("/").endswith("/login"):
+        return f"redirected to {path}"
+
     query = getattr(page, "query_selector", None)
     if not callable(query):
         return None
     for selector in _LOGIN_GATE_SELECTORS:
-        if query(selector):
-            return selector
+        element = query(selector)
+        if element is None:
+            continue
+        is_visible = getattr(element, "is_visible", None)
+        # Test doubles expose no is_visible(); a match with no visibility API is
+        # treated as rendered, which keeps the selector-matching contract intact.
+        if callable(is_visible) and not is_visible():
+            continue
+        return selector
     return None
 
 

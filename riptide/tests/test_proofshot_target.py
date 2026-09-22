@@ -23,15 +23,28 @@ from riptide.proofshotter import (
 )
 
 
+class _Element:
+    """Stand-in for a Playwright element handle."""
+
+    def __init__(self, visible):
+        self._visible = visible
+
+    def is_visible(self):
+        return self._visible
+
+
 class _Page:
     """Minimal stand-in for a Playwright page."""
 
-    def __init__(self, url="http://localhost:8790/", login_selector=None):
+    def __init__(self, url="http://localhost:8790/", login_selector=None, login_visible=True):
         self.url = url
         self._login_selector = login_selector
+        self._login_visible = login_visible
 
     def query_selector(self, selector):
-        return object() if selector == self._login_selector else None
+        if selector == self._login_selector:
+            return _Element(self._login_visible)
+        return None
 
 
 class TestResolveCaptureTarget:
@@ -65,6 +78,33 @@ class TestAppShellGuard:
         with pytest.raises(CaptureTargetError) as exc:
             _assert_capture_is_app_shell(page, "http://localhost:8790/")
         assert "redirected off" in str(exc.value)
+
+    def test_hidden_password_field_is_not_a_gate(self):
+        """The app shell carries HIDDEN password fields in its settings forms.
+
+        Measured on a live :8790 instance (title "Hermes", HTTP 200): two
+        `input[type=password]` elements, neither rendered. Presence alone refused
+        that capture, which would have made Bot 3 silently refuse every capture.
+        """
+        page = _Page(login_selector="input[type=password]", login_visible=False)
+        _assert_capture_is_app_shell(page, "http://localhost:8790/")
+
+    def test_visible_password_field_is_a_gate(self):
+        """The real gate: one visible `#pw` inside `#login-form`."""
+        page = _Page(login_selector="input[type=password]", login_visible=True)
+        with pytest.raises(CaptureTargetError) as exc:
+            _assert_capture_is_app_shell(page, "http://localhost:8790/")
+        assert "login form" in str(exc.value)
+
+    def test_login_redirect_path_is_refused(self):
+        """A gate redirects to /login on the SAME host.
+
+        The cross-origin check cannot catch that, so the path is checked too.
+        """
+        page = _Page(url="http://localhost:8790/login?next=/")
+        with pytest.raises(CaptureTargetError) as exc:
+            _assert_capture_is_app_shell(page, "http://localhost:8790/")
+        assert "/login" in str(exc.value)
 
 
 class _FakeCompleted:
