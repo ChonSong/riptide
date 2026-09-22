@@ -166,6 +166,75 @@ Plus loaded skills (deep-think: 20k chars, github-pr-lifecycle: 53k chars). Tota
 - Verify with `python -m py_compile` + `python -m pytest`, not just claims of working
 - Test isolation: use `tempfile.mkdtemp()` and patch module-level path constants
 
+## Bot 3 (proofshotter) — capture target and guards
+
+- **`proofshot/cli.py` is a single-file CLI, not a package.** It carries no
+  `pyproject.toml`/`setup.py`, so `pip install -e ~/workspace/proofshot` fails.
+  `proofshotter.py` does NOT call `cli.py pr`; it loads `ProofshotSession` from that
+  file via importlib, so the dependency to satisfy is the class, not the subcommand.
+- **`cli.py pr <n>` requires `--url`** (argparse `required=True`) and is a hardcoded
+  chat-tiling walkthrough that posts its own comment and release upload. Do not wire
+  it into CI — it cannot run as written and duplicates the bot's own path.
+- **A capture target must be declared** (`url` in `proofshot.config.json`, or
+  `RIPTIDE_PROOFSHOT_URL`). Never reintroduce a `localhost:8788` default: a repo
+  declaring nothing must be skipped (`skipped(no-target)`), not captured.
+- **8788 is `hermes-webui-dev.service`** — this project's own dev instance serving
+  `master`, not "an unrelated application". A capture there races its user and cannot
+  show a PR's change. The dedicated test instance is **8790**, booted with
+  `HERMES_WEBUI_SKIP_ONBOARDING=1`. `hermes-webui-tests/lib/auth-fixture.ts` is a
+  **no-op** — it does not log in; that skip-onboarding flag is what bypasses the gate.
+- **A login gate answers HTTP 200**, so a status code can never tell it from the app
+  shell. Check the rendered DOM (`_assert_capture_is_app_shell`) before posting.
+- **playwright browsers need `env -u NODE_OPTIONS`.** The agent's
+  `NODE_OPTIONS=--gc-interval=100` makes playwright's bundled node abort. The package
+  installs into the service interpreter, but the browser build downloads from
+  Microsoft's CDN, which returns `400 GatewayExceptionResponse` on this host, so
+  `python -m playwright install chromium` fails here.
+
+## Worktrees DO exercise their own code
+
+AGENTS.md's warning is stale on this host: from `/tmp/wt-<name>`, `import riptide`
+resolves to the **worktree's** `riptide/`, not the shared checkout. Confirm it rather
+than assuming either way:
+
+```bash
+cd /tmp/wt-<name> && /home/sc/.hermes/hermes-agent/venv/bin/python3 \
+  -c "import riptide; print(riptide.__file__)"
+```
+
+Take a real before/after inside the same worktree (`git checkout --detach origin/main`,
+run, then `git checkout <branch>`); the collected test count is the tell that the
+intended tree ran.
+
+## Review provenance
+
+- **`review_memory` was written only on merge** (zero counts, no attribution), and its
+  `metadata` column was **double-encoded** — `json.dumps` applied to an
+  already-encoded string, so the column parsed back to a string, not a dict. Rows are
+  now written when a review posts, carrying `{job, model, provider, head_sha}`. The
+  merge-time writer cannot know which model reviewed, so capture that on the review
+  path instead of reconstructing it later.
+- **The sign-off handle is `riptide-review-<owner>-<repo>-<n>`** — the same string the
+  spawner passes to `hermes cron create --name`. Keep one builder for it.
+  `Riptide Review ·` must stay byte-identical: the CI gate and the fixer's
+  review-detection both match that literal.
+- **A cron-spawned session really does know its own session id**
+  (`agent.agent_init._publish_session_id` →
+  `gateway.session_context.set_current_session_id`, published to `os.environ` as
+  `cron_<job_id>_<YYYYmmdd_HHMMSS>`); the webhook/service process has none. Render
+  `session:` only when present — never invent one.
+- **Verify a parked patch's call sites before building on it.** A patch that adds
+  parameters to a helper is dead code unless its caller passes them; a diff's
+  description is not evidence. Grep the call sites.
+
+## Corrupt clones
+
+A workspace directory holding only `.git` + `node_modules` where `git` reports
+"fatal: not a git repository" is an aborted clone. `~/workspace/proofshot` and
+`~/workspace/hermes-webui-tests*` were all in this state. Re-clone from the remote
+(`git clone https://github.com/ChonSong/<repo>.git <dir>`); do not try to repair
+the `.git`.
+
 ## References
 
 - `references/unified-pipeline-design.md` — WS-3 architecture, 5-stage model
