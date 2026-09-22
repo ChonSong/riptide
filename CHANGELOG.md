@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Fixed (2026-09-22)
+
+- **This repo no longer declares a foreign capture target.**
+  `proofshot.config.json` pointed `ChonSong/riptide` at `:8790`, which is the
+  Hermes WebUI suite's instance — an app this repo's PRs do not change, and one
+  whose skip-onboarding boot leaves no login gate for the guard to catch. The file
+  is a schema example again, with no `url`, and its `_comment` records why. The
+  older, unreferenced `proofshot.config.example.json` no longer documents the
+  removed `localhost:8788` default.
+- **The t3 dispatch path kept its own dev-port default.** `orchestrator.py`
+  resolved its capture target from `RIPTIDE_PROOFSHOT_URL` or
+  `http://localhost:8788`, bypassing the declared-target contract. It now resolves
+  the PR's declared target like the poller and refuses to capture when none is
+  declared — the last of the three `8788` fallbacks.
+- **The `companion.py` notes still called :8788 "an unrelated application".** It is
+  `hermes-webui-dev.service` (`HERMES_WEBUI_PORT=8788`), the Hermes WebUI dev
+  instance: a different application from Riptide, and not a mystery one. The two
+  comments and the two `test_companion.py` docstrings now say so.
+
 ### Fixed (2026-09-21)
 
 - **Bot 3 captured whatever happened to be on the developer's dev port.**

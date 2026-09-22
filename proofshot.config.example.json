@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "description": "Proofshot visual verification config. PR authors include this file in the PR root to declare UI changes and define what proofshot should capture.",
+  "description": "Schema for a repo's ProofShot config, the file Bot 3 reads from a PR's head (proofshot.config.json). This file only documents the fields; the bot never reads it.",
   "fields": {
     "url": {
       "required": true,
-      "description": "URL of the dev instance to capture (e.g., http://localhost:8788)",
-      "default": "http://localhost:8788"
+      "description": "URL of the instance to capture, as the app under review serves it. There is no default: a repo that declares no url is skipped (skipped(no-target)), never captured on a guessed dev port, and a page that renders a login gate is refused.",
+      "example": "http://localhost:9000"
     },
     "seed": {
       "required": false,
@@ -23,7 +23,7 @@
     }
   },
   "example": {
-    "url": "http://localhost:8788",
+    "url": "http://localhost:9000",
     "seed": "scripts/test-seed.js",
     "captures": [
       { "name": "initial", "wait": 2000 },

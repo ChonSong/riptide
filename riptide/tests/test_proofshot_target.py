@@ -162,13 +162,34 @@ class TestManualCommandHonesty:
         assert "ProofShot complete" not in reply
 
 
-class TestExampleConfig:
-    def test_the_shipped_example_declares_a_target(self):
-        """AGENTS.md points PR authors at this file, so it must stay usable.
+class TestShippedConfigs:
+    def test_this_repo_declares_no_capture_target(self):
+        """`ChonSong/riptide` serves no capturable UI, so it declares no target.
 
-        It is the only source of the schema now that a target must be declared.
+        The shipped config used to declare `:8790` — the Hermes WebUI suite's
+        instance, a different application whose skip-onboarding boot leaves no login
+        gate for the guard to catch. A Riptide PR touching a stylesheet would have
+        posted that app's shell as its evidence. Declaring nothing makes Bot 3 skip
+        the PR instead of capturing a stranger's app.
         """
-        example = Path(__file__).resolve().parents[2] / "proofshot.config.json"
-        config = json.loads(example.read_text(encoding="utf-8"))
-        assert config.get("url"), "the example must declare a url"
+        shipped = Path(__file__).resolve().parents[2] / "proofshot.config.json"
+        config = json.loads(shipped.read_text(encoding="utf-8"))
+
+        assert "url" not in config, "this repo must not declare a capture target"
         assert isinstance(config.get("captures", []), list)
+
+    def test_no_shipped_config_documents_the_removed_default(self):
+        """Nothing in the repo may still teach `localhost:8788`."""
+        root = Path(__file__).resolve().parents[2]
+
+        for name in ("proofshot.config.json", "proofshot.config.example.json"):
+            text = (root / name).read_text(encoding="utf-8")
+            assert "8788" not in text, f"{name} still documents the removed default"
+
+    def test_the_schema_file_still_documents_the_fields(self):
+        root = Path(__file__).resolve().parents[2]
+        schema = json.loads((root / "proofshot.config.example.json").read_text(encoding="utf-8"))
+
+        assert set(schema["fields"]) == {"url", "seed", "captures"}
+        assert schema["fields"]["url"]["required"] is True
+        assert "default" not in schema["fields"]["url"]
