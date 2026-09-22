@@ -555,6 +555,22 @@ def _resolve_capture_target(config: Optional[dict]) -> Optional[str]:
     return os.environ.get("RIPTIDE_PROOFSHOT_URL") or None
 
 
+def _find_login_gate(page) -> Optional[str]:
+    """The first login-gate selector the page renders, or None.
+
+    Split out of `_assert_capture_is_app_shell` to keep that function's nesting
+    under the repo's complexity threshold — the Companion's pre-pass raised a 🟡
+    against it at depth 5 (`riptide/proofshotter.py`).
+    """
+    query = getattr(page, "query_selector", None)
+    if not callable(query):
+        return None
+    for selector in _LOGIN_GATE_SELECTORS:
+        if query(selector):
+            return selector
+    return None
+
+
 def _assert_capture_is_app_shell(page, expected_url: str) -> None:
     """Raise `CaptureTargetError` unless `page` is the app, not a gate.
 
@@ -562,14 +578,12 @@ def _assert_capture_is_app_shell(page, expected_url: str) -> None:
     screenshot of it would be posted as this PR's "visual verification" while
     showing an unrelated screen.
     """
-    query = getattr(page, "query_selector", None)
-    if callable(query):
-        for selector in _LOGIN_GATE_SELECTORS:
-            if query(selector):
-                raise CaptureTargetError(
-                    f"{expected_url} rendered a login form ({selector}); refusing "
-                    f"to post a login page as visual evidence"
-                )
+    gate = _find_login_gate(page)
+    if gate:
+        raise CaptureTargetError(
+            f"{expected_url} rendered a login form ({gate}); refusing to post a "
+            f"login page as visual evidence"
+        )
 
     expected_host = urlparse(expected_url).netloc
     actual_host = urlparse(getattr(page, "url", "") or "").netloc
