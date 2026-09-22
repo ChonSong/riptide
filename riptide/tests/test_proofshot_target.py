@@ -120,3 +120,15 @@ class TestManualCommandHonesty:
             reply = handle_manual_command(1, "ChonSong", "riptide", 1, "ChonSong")
         assert "posting the evidence comment failed" in reply
         assert "ProofShot complete" not in reply
+
+
+class TestExampleConfig:
+    def test_the_shipped_example_declares_a_target(self):
+        """AGENTS.md points PR authors at this file, so it must stay usable.
+
+        It is the only source of the schema now that a target must be declared.
+        """
+        example = Path(__file__).resolve().parents[2] / "proofshot.config.json"
+        config = json.loads(example.read_text(encoding="utf-8"))
+        assert config.get("url"), "the example must declare a url"
+        assert isinstance(config.get("captures", []), list)
