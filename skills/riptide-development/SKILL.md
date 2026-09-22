@@ -227,6 +227,31 @@ intended tree ran.
   parameters to a helper is dead code unless its caller passes them; a diff's
   description is not evidence. Grep the call sites.
 
+## The Companion's nesting metric is diff-scoped and mis-attributes
+
+`DiffAnalyzer` (`riptide/diff_analyzer.py`) measures nesting over the patch's
+**added lines** using indentation, and only resets `current_func` on an added line
+at or below the function's definition indent. Two consequences:
+
+- a changed argument inside a multi-line call whose **opening line is unchanged
+  context** is counted as a statement at its raw indent (e.g. level 5), because the
+  open bracket is invisible to the counter — even though it is a call continuation,
+  not a nesting level;
+- the finding is then attached to **whichever function the counter last saw**, not
+  the function containing the line. A 🟡 naming function X can be about a line in
+  function Y.
+
+So verify before "fixing" one. Re-run the analyzer over your diff and print the
+stack progression (`_get_added_lines` + `_nesting_level` + `_bracket_delta`) to see
+which line actually crosses `MAX_NESTING_DEPTH`. A real example: a 🟡 against
+`_assert_capture_is_app_shell` was really `captured_url=url,` in the poll path's
+`_post_proofshot_comment(...)` call — pre-existing indentation, tripped only because
+that argument was the added line.
+
+**Do not restructure working code to satisfy the metric.** Extracting a function to
+reduce real nesting is fine on its own merits, but it will not clear this finding;
+say so rather than implying it did.
+
 ## Corrupt clones
 
 A workspace directory holding only `.git` + `node_modules` where `git` reports
