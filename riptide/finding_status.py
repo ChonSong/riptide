@@ -60,7 +60,18 @@ SEVERITY = {"🔴": "critical", "🟡": "warning"}
 # Review markers, mirroring deepthink.RIPTIDE_REVIEW_MARKERS. A comment carrying
 # one of these is a review; `## Riptide Pass:` and `## ✨ Review Required` are not.
 _REVIEW_MARKERS = ("## 🔍 Findings", "## 🎯 Summary", "Riptide Review ·")
-_NOT_A_REVIEW = ("Riptide Pass:", "Review Required")
+# First-line exclusions: the Companion's pass and complexity pre-pass, and the
+# fixer's ack — which QUOTES the review it is responding to ("Riptide Fix triggered
+# for #217!"), table, sign-off and all, so without this it is the newest
+# findings-bearing comment on the PR and the status block would land on the ack
+# while the review it quotes stays frozen.
+_NOT_A_REVIEW = ("Riptide Pass:", "Review Required", "triggered for")
+
+# The gate's own test for "this review raises findings"
+# (`.github/workflows/riptide-review-required.yml`): a severity row anywhere in the
+# body. Kept character-for-character in spirit, because a review that blocks the
+# gate and a review that counts as "clean" here must never disagree.
+_SEVERITY_ROW = re.compile(r"\|[\s]*(?:🔴|🟡)")
 
 # Comment/commit lists are fetched one page; a PR with more is out of scope here
 # and the refresh degrades to "no later commits", which never resolves a finding.
@@ -125,11 +136,23 @@ def parse_findings(body: str) -> list[Finding]:
 
 
 def is_review_comment(body: str) -> bool:
-    """Whether a comment is a findings-capable review (not a pass/pre-pass)."""
+    """Whether a comment is a findings-capable review (not a pass/pre-pass/ack)."""
     first_line = body.splitlines()[0] if body.splitlines() else ""
     if any(skip in first_line for skip in _NOT_A_REVIEW):
         return False
     return any(marker in body for marker in _REVIEW_MARKERS)
+
+
+def raises_findings(body: str) -> bool:
+    """Whether a review raises findings, by the CI gate's own test.
+
+    Not the same as `parse_findings(body) != []`: the table row for a finding with
+    no file renders as `| 🟡 | <title> | — |`, which the parser skips (it has no
+    path to report) while the gate still counts it. Treating that review as "clean"
+    would resolve every earlier finding on the strength of a review that is
+    blocking the merge.
+    """
+    return bool(_SEVERITY_ROW.search(body))
 
 
 def assess(
@@ -290,17 +313,19 @@ def refresh_review_status(
     reviewed_at = review.get("created_at", "")
 
     later_review_clean = any(
-        is_review_comment(body) and not parse_findings(body)
+        is_review_comment(body) and not raises_findings(body)
         for body in (c.get("body", "") for c in comments[review_index + 1:])
     )
 
     commits = _gh_json(
         ["api", f"repos/{owner}/{repo}/pulls/{pr_number}/commits?{_PAGE}"], runner
     ) or []
+    # Commits come back oldest-first, so the cap keeps the NEWEST ones: a PR with a
+    # long tail since its review must not lose the commit that changed the file.
     after = [
         c for c in commits
         if (c.get("commit", {}).get("committer", {}).get("date") or "") > reviewed_at
-    ][:_MAX_COMMITS_SCANNED]
+    ][-_MAX_COMMITS_SCANNED:]
 
     touched: set[str] = set()
     for commit in after:

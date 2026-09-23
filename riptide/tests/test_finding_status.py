@@ -321,3 +321,100 @@ class TestRefresh:
 
         with pytest.raises(RuntimeError, match="status PATCH failed"):
             refresh_review_status("o", "r", 1, runner=gh, now=NOW)
+
+
+FILELESS_REVIEW_BODY = """## Review: 1 warning(s). Fix something first.
+1. **A finding with no file** in `—` — the table has no path for it.
+
+| | Finding | File |
+|---|---|---|
+| 🟡 | A finding with no file | — |
+
+<sub>Riptide Review · model: `deepseek-v4-flash` · provider: `deepseek`</sub>
+"""
+
+ACK_BODY = """🛠 **Riptide Fix triggered for #220!**
+
+A Hermes fix session has been scheduled. Scope: the problem you described.
+
+| | Finding | File |
+|---|---|---|
+| 🟡 | A `localhost:8788` fallback survives in the poller | `riptide/proofshotter.py:632` |
+
+<sub>Riptide Review · model: `deepseek-v4-flash` · provider: `deepseek`</sub>
+"""
+
+
+class TestReviewerFindings:
+    """Fixes for the four findings the review of this PR raised.
+
+    Each of the first three fails against the code as first written.
+    """
+
+    def test_a_review_with_a_fileless_finding_is_not_a_clean_review(self):
+        """The gate counts `| 🟡 | title | — |` as a finding; the parser cannot.
+
+        If "no parsed findings" is read as "raised no findings", a review that is
+        blocking the merge simultaneously resolves every earlier finding — the one
+        status this module promises only ever comes from a review that raised
+        nothing.
+        """
+        gh = FakeGH(
+            comments=[
+                FakeGH.comment(REVIEW_BODY, comment_id=42),
+                FakeGH.comment(FILELESS_REVIEW_BODY, comment_id=45,
+                               created_at="2026-09-22T06:00:00Z"),
+            ],
+            commits=[],
+        )
+
+        result = refresh_review_status("o", "r", 1, runner=gh, now=NOW)
+
+        assert result["counts"] == {OPEN: 2, ADDRESSED: 0, RESOLVED: 0}
+        assert "a later review raised no findings" not in gh.patched_body
+
+    def test_a_fileless_finding_is_still_a_finding_for_selection(self):
+        assert is_review_comment(FILELESS_REVIEW_BODY) is True
+        assert parse_findings(FILELESS_REVIEW_BODY) == []
+
+    def test_the_fixers_ack_is_not_a_review(self):
+        """The ack quotes the review it answers, sign-off and table included.
+
+        Left in, it is the newest findings-bearing comment and the status block
+        lands on the ack while the review it quotes stays frozen.
+        """
+        assert is_review_comment(ACK_BODY) is False
+
+        gh = FakeGH(
+            comments=[
+                FakeGH.comment(REVIEW_BODY, comment_id=42),
+                FakeGH.comment(ACK_BODY, comment_id=99,
+                               created_at="2026-09-22T00:20:50Z"),
+            ],
+            commits=[],
+        )
+
+        refresh_review_status("o", "r", 1, runner=gh, now=NOW)
+
+        assert len(gh.patches) == 1
+        assert any("/issues/comments/42" in arg for arg in gh.patches[0])
+
+    def test_the_newest_commits_after_the_review_are_the_ones_scanned(self):
+        """Commits arrive oldest-first, so the cap must keep the tail.
+
+        A PR with a long tail since its review otherwise reads every finding as
+        untouched on the strength of the ten oldest commits.
+        """
+        commits = [
+            _commit(f"{i:040x}", f"2026-09-22T01:{i:02d}:00Z") for i in range(12)
+        ]
+        gh = FakeGH(
+            comments=[FakeGH.comment(REVIEW_BODY, comment_id=42)],
+            commits=commits,
+            commit_files={commits[-1]["sha"]: _files("riptide/proofshotter.py")},
+        )
+
+        result = refresh_review_status("o", "r", 1, runner=gh, now=NOW)
+
+        assert result["counts"] == {OPEN: 1, ADDRESSED: 1, RESOLVED: 0}
+        assert "changed after the review" in gh.patched_body

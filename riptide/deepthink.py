@@ -33,7 +33,7 @@ import structlog
 from riptide.state import StateStore
 from riptide.depth import ReviewDepth, classify_review_depth, select_skills  # noqa: F401 (re-exported for back-compat)
 from riptide.review_memory import get_memory_context
-from riptide import finding_status
+from riptide.finding_status import refresh_review_status
 
 logging.basicConfig(
     level=logging.INFO,
@@ -924,7 +924,7 @@ def run():
             # can see what still stands. Cheap when there is nothing to do — one
             # comment fetch, no writes — and it must never stop the poll.
             try:
-                finding_status.refresh_review_status(owner, repo_name, pr_number)
+                refresh_review_status(owner, repo_name, pr_number)
             except Exception as exc:
                 log.warning(f"  #{pr_number} finding-status refresh failed: {exc}")
 
