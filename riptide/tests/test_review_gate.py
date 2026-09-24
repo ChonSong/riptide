@@ -345,3 +345,88 @@ def test_the_workflow_calls_the_extracted_gate():
     # The selector lives in the script; a body-wide pass test must not creep back in.
     assert 'contains("## Riptide Pass:")' not in text
     assert "split(\"\\n\")[0]" not in text
+
+
+# ── Rows the parser must read the way the detection does ────────────────────
+
+REPEATED_FILE_REVIEW = f"""## Review: 2 warning(s). Two findings, one file.
+
+1. **A negative bucket** in `riptide/companion.py:429`.
+2. **A single-kind diff called mixed** in `riptide/companion.py:436`.
+
+| | Finding | File |
+|---|---|---|
+| 🟡 | Pass evidence can print a negative file bucket | `riptide/companion.py:429` |
+| 🟡 | A single-kind diff is called mixed | `riptide/companion.py:436` |
+
+{SIGNOFF}
+"""
+
+FILELESS_ROW_WITH_CODE_REVIEW = f"""## Review: 1 warning(s).
+
+1. **A helper is used wrongly** — the reviewer pinned no file.
+
+| | Finding | File |
+|---|---|---|
+| 🟡 | `_describe_changed_files()` mixes classification and rendering | — |
+
+{SIGNOFF}
+"""
+
+QUOTED_ROW_REVIEW = f"""## Review: no findings of its own.
+
+The review it answers had said:
+
+> | | Finding | File |
+> |---|---|---|
+> | 🟡 | An earlier finding, quoted here for context | `riptide/companion.py:429` |
+
+{SIGNOFF}
+"""
+
+
+def test_two_rows_naming_one_file_still_require_a_touching_commit(tmp_path):
+    """Two findings in one file are two named rows. Counting unique paths instead
+    relaxed the rule back to "any commit" for exactly the reviews that repeat a
+    file — which is most of them, and all three rows of one recent review."""
+    data = write_data(
+        tmp_path,
+        reviews=[(41, REVIEWED_AT, REPEATED_FILE_REVIEW)],
+        commits=[("bbb", AFTER, ["docs/README.md", "CHANGELOG.md"])],
+    )
+
+    proc = run_gate(data)
+
+    assert proc.returncode == 1
+    assert "none touches the files the findings name" in proc.stdout
+    assert "names no file" not in proc.stdout
+
+
+def test_a_fileless_row_with_inline_code_is_not_a_path(tmp_path):
+    """The File cell is `—`, so the row names no file. Reading the row's last code
+    span as the path demanded a commit touching `_describe_changed_files()` — a
+    red no push can clear."""
+    data = write_data(
+        tmp_path,
+        reviews=[(41, REVIEWED_AT, FILELESS_ROW_WITH_CODE_REVIEW)],
+        commits=[("bbb", AFTER, ["docs/README.md"])],
+    )
+
+    proc = run_gate(data)
+
+    assert proc.returncode == 0
+    assert "0 naming a file" in proc.stdout
+    assert "_describe_changed_files" not in proc.stdout
+
+
+def test_a_quoted_row_is_not_a_finding(tmp_path):
+    """Detection and parsing share one predicate, so a review that quotes a
+    severity row raises nothing — it must not reach the relaxation branch with a
+    self-contradictory "0 finding row(s)" note."""
+    data = write_data(tmp_path, reviews=[(41, REVIEWED_AT, QUOTED_ROW_REVIEW)])
+
+    proc = run_gate(data)
+
+    assert proc.returncode == 0
+    assert "is clean" in proc.stdout
+    assert "finding row(s)" not in proc.stdout

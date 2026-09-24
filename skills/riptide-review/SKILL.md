@@ -606,25 +606,25 @@ interrupted run, reset that workstream by hand (`read_state` → set status →
 ### Traps that only show up when you run it
 
 - **The gate matches the `<sub>Riptide Review · …</sub>` sign-off, not the `## Review:` header.**
-  `riptide-review-required.yml` selects comments containing `## 🔍 Findings`, `## 🎯 Summary`,
-  `Riptide Review ·` or `## Riptide Pass:`, and explicitly **skips the Companion's
-  `## ✨ Review Required` complexity pre-pass** (it posts first and carries 🟡 rows, so counting
-  it as a review reddens clean PRs). `## Review:` is not in the selector (removed in f7a920a),
-  and the loose `critical`+`warning` clause was removed too — both are now locked by
-  `riptide/tests/test_review_gate_workflow.py`. Reproduce by running the workflow's own `--jq`
-  selector over a candidate body; a findings body without the sign-off is invisible to the gate.
-  `docs/REVIEW-CONTRACT.md` §2 documents this now — but verify against the workflow, not the doc.
-- **The pre-pass skip is a body-substring test, so a review that quotes that heading is skipped too.**
-  The selector drops any comment whose body `contains()` the Companion's pre-pass heading — not only
-  the pre-pass itself. A review *about* the selector that reproduces the heading verbatim is invisible
-  to the gate: on #206 a 🟡 review (header + table + sign-off, posted 23:57:09) was excluded, the rerun
-  reported `Review is clean — no follow-up commit required.`, and deleting only that one `select` clause
-  from the same comment list selected the review with `HAS_FINDINGS=true`. Once the review drops out, the
-  gate reads whatever else matches — usually the Companion's `## Riptide Pass:`, which reports clean.
-  So never reproduce the pre-pass heading as a contiguous string in a review body; name it in words,
-  and confirm the verdict from the job log rather than the check colour.
-- **Only a 🔴/🟡 severity-table row blocks the merge.** The gate's `HAS_FINDINGS` is
-  `test("\\|[\\s]*🔴|\\|[\\s]*🟡")`, and `_build_severity_table` emits no table when there are no
+  The selector lives in `scripts/check_riptide_review.sh` — the workflow only builds its data file
+  from the API — and selects comments containing `## 🔍 Findings`, `## 🎯 Summary` or
+  `Riptide Review ·`, preferring the newest review over any `## Riptide Pass:` posted later. It
+  skips the Companion's `## ✨ Review Required` complexity pre-pass (it posts first and carries 🟡
+  rows, so counting it as a review reddens clean PRs). `## Review:` is not in the selector (removed
+  in f7a920a), and the loose `critical`+`warning` clause was removed too — both are now locked by
+  `riptide/tests/test_review_gate_workflow.py`, which reads the script's `chosen:` line, and by
+  `riptide/tests/test_review_gate.py`. A findings body without the sign-off is invisible to the gate.
+- **The pre-pass and pass skips are first-line anchored (fixed by the extracted gate).** Both used to
+  be body-substring tests, so a review that *quoted* either heading was itself skipped: on #206 a 🟡
+  review (header + table + sign-off) was excluded, the rerun reported `Review is clean — no follow-up
+  commit required.`, and the gate then read the Companion's `## Riptide Pass:` and went green over a
+  standing finding. `scripts/check_riptide_review.sh` anchors both exclusions to a comment's first
+  line, and `riptide/tests/test_review_gate.py` pins the case where a quoting review sits before a
+  later pass. Confirm the verdict from the run's `chosen:` line rather than the check colour.
+- **Only a 🔴/🟡 severity-table row blocks the merge.** The gate matches rows against one predicate
+  (`^[[:space:]]*\|[[:space:]]*(🔴|🟡)`), the same one it parses file paths from, so a row quoted
+  inside a blockquote is context rather than a finding. `_build_severity_table` emits no table when
+  there are no
   critical/warning findings — so a review carrying only 🟣 suggestions / 🔵 info reports
   "Review is clean — no follow-up commit required" and the check goes green (verified by rerunning
   the gate over the posted body). The §XI line "a findings review therefore blocks the merge" is
@@ -714,21 +714,24 @@ node scripts/generate-registry.mjs --out dist/registry.json
   finding already posted at an unchanged head is worth exactly one short paragraph — pair it
   with the new verified blockers, never alone.
 
-### The gate's comment selector (pass-shadowing is fixed as of #207's base)
+### The gate's comment selector (now `scripts/check_riptide_review.sh`)
 
-Current selector, verbatim from the workflow's run log:
-`sort_by(.created_at) as $all | (($all | map(select((.body | contains("## Riptide Pass:")) | not)) | last) // ($all | last))`
-over comments containing `## 🔍 Findings` / `## 🎯 Summary` / `Riptide Review ·` / `## Riptide Pass:` —
-it now prefers the newest **non-pass** comment, so the Companion's pass no longer shadows a
-findings review. On older bases the selector was plain `sort_by(.created_at) | last`, where it did
-(see the #204 history below). `companion.py` posts
+The selector is no longer jq inside the workflow: it lives in `scripts/check_riptide_review.sh`,
+which the workflow feeds the comments and the commits (with each commit's files) as a data file, and
+it prints `chosen: review <id>` / `chosen: pass <ts>` / `chosen: none` so the run log says which
+comment it judged. Its rules and tests are `docs/REVIEW-CONTRACT.md` §2,
+`riptide/tests/test_review_gate.py` and `riptide/tests/test_review_gate_workflow.py`. The retired jq
+expressed the same preference — newest **non-pass** comment, else the newest pass — so the
+Companion's pass no longer shadows a findings review. On older bases the selector was plain
+`sort_by(.created_at) | last`, where it did (see the #204 history below). `companion.py` posts
 `## Riptide Pass: ✅ No findings` whenever its **deterministic** analysis has nothing actionable
 (observed on #204 at 23:23:10, 41 s after a 🔴 review at 23:22:29) — so a companion delta review
 landing later silently greens the gate over your findings. Confirm the gate's own verdict rather
 than the check colour: `gh run rerun <riptide-review-required run>`, then read the job log for
 `::error::Review has findings…` (your review counted) vs `::error::No Riptide review found…`
-(nothing counted). Also note a push *after* your review's `created_at` satisfies the follow-up
-requirement, so a review + the author's next commit turns the gate green without addressing it.
+(nothing counted). A push *after* your review's `created_at` only satisfies the follow-up
+requirement when it touches a file the severity table names; a push that changes something else
+leaves the gate red, which is the point.
 
 ### The head can move mid-review — re-run the whole Conductor at the new SHA
 

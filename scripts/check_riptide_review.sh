@@ -202,24 +202,42 @@ chosen "review ${REVIEW_IDS[$review_index]}"
 REVIEW_BODY="${REVIEW_BODIES[$review_index]}"
 REVIEW_TIME="${REVIEW_TS[$review_index]}"
 
-# ── Findings? (the same test the gate has always used) ────────────────────────
+# ── Findings? ────────────────────────────────────────────────────────────────
+# One predicate for both the "has findings" test and the row parser: a severity
+# row starts a line. While the two disagreed — the test matching `| 🟡` anywhere,
+# the parser only at column 0 — a review that quoted a row counted as
+# findings-bearing with nothing parsed, and the run settled for any commit.
 
-if ! printf '%s' "$REVIEW_BODY" | grep -qE '\|[[:space:]]*(🔴|🟡)'; then
+ROW_RE='^[[:space:]]*\|[[:space:]]*(🔴|🟡)'
+
+rows="$(printf '%s' "$REVIEW_BODY" | grep -E "$ROW_RE" || true)"
+row_count="$(printf '%s\n' "$rows" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
+
+if [ "$row_count" -eq 0 ]; then
   pass "Review ${REVIEW_IDS[$review_index]} is clean — no follow-up commit required."
 fi
 
 # ── A commit after the review must touch a file the findings name ─────────────
 
-row_count="$(printf '%s' "$REVIEW_BODY" | grep -cE '^\|[[:space:]]*(🔴|🟡)' || true)"
-# The File cell is a row's LAST backticked token; taking only that avoids reading a
-# title's inline `code` as a path.
-refs="$(
-  printf '%s' "$REVIEW_BODY" | grep -E '^\|[[:space:]]*(🔴|🟡)' | while IFS= read -r row; do
-    printf '%s' "$row" | grep -oE '`[^`]+`' | tr -d '`' | tail -n 1
-  done | sed -E 's/:[0-9]+$//' | sed '/^[[:space:]]*$/d' | sort -u || true
+# The File cell is a row's LAST cell. Read that cell, not the row's last code
+# span: when a row names no file, its title's inline `code` is not a path, and
+# demanding a commit that touches a symbol cannot be satisfied by any push.
+# `named_count` counts ROWS that name a file (before dedup), so two rows in one
+# file are two named rows — counting unique paths instead relaxed the rule back
+# to "any commit" for exactly the reviews that repeat a file.
+named_refs="$(
+  printf '%s\n' "$rows" | while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    cell="$(printf '%s' "$row" | awk -F'|' '{print $(NF-1)}')"
+    ref="$(printf '%s' "$cell" | grep -oE '`[^`]+`' | head -n 1 | tr -d '`')"
+    case "$ref" in
+      '' | *[!A-Za-z0-9._/:-]*) continue ;;  # no cell, or not a path-shaped token
+    esac
+    printf '%s\n' "$ref"
+  done
 )"
-finding_paths="$refs"
-ref_count="$(printf '%s\n' "$refs" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
+named_count="$(printf '%s\n' "$named_refs" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
+finding_paths="$(printf '%s\n' "$named_refs" | sed -E 's/:[0-9]+$//' | sed '/^[[:space:]]*$/d' | sort -u)"
 
 new_commits=()
 for i in "${!COMMIT_SHAS[@]}"; do
@@ -232,8 +250,8 @@ if [ "${#new_commits[@]}" -eq 0 ]; then
   fail "Review ${REVIEW_IDS[$review_index]} has findings. At least one commit addressing them is required before merge."
 fi
 
-if [ -z "$finding_paths" ] || [ "$ref_count" -lt "$row_count" ]; then
-  note "ℹ️ ${row_count} finding row(s), ${ref_count} naming a file: at least one finding names no file and cannot"
+if [ -z "$finding_paths" ] || [ "$named_count" -lt "$row_count" ]; then
+  note "ℹ️ ${row_count} finding row(s), ${named_count} naming a file: at least one finding names no file and cannot"
   note "   be matched against a commit's files, so this run accepts any commit after the review."
   pass "Follow-up commit(s) found (${#new_commits[@]}); not all findings name a file to check against."
 fi
