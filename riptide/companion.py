@@ -29,6 +29,7 @@ import requests
 
 from riptide.diff_analyzer import DiffAnalyzer, DiffReport
 from riptide.context_bundle import build_context_bundle, concept_summary
+from riptide.depth import LOGIC_EXTENSIONS, describe_depth
 from riptide.checkbox import (
     CHECKBOX_ACTIONS,
     parse_checkbox_state,
@@ -37,6 +38,20 @@ from riptide.checkbox import (
 )
 
 logger = logging.getLogger("riptide.companion")
+
+# ── Deterministic pass comment ───────────────────────────────────────────────
+# The first line of a pass comment is a gate marker: the CI gate
+# (.github/workflows/riptide-review-required.yml), assemble_review.py and the
+# fixer's "is this a review?" check all key off `## Riptide Pass:`. Keep
+# PASS_MARKER byte-identical; everything below it is context for the reader.
+
+PASS_MARKER = "## Riptide Pass: ✅ No findings"
+
+# Kinds that make a pass self-evidently cheap to trust: prose and specs.
+# `.txt` is deliberately absent — it is usually prose, but `requirements.txt` is a
+# dependency change, and a pass calling that "documentation only" is exactly the
+# false reassurance this summary exists to prevent.
+DOC_EXTENSIONS = (".md", ".mdx", ".rst", ".adoc")
 
 # ── Emoji classification ─────────────────────────────────────────────────────
 
@@ -360,6 +375,69 @@ def classify_pr_mood(title: str, changed_files: list[dict] | None = None) -> str
 
 # Module-level flag for one-time legacy skip import per process
 _legacy_skip_imported = False
+
+
+# ── Pass-comment evidence helpers ────────────────────────────────────────────
+# Pure functions over the file list, so the numbers a pass comment prints are
+# the diff's own, and so the wording is testable without a Companion.
+
+def _is_test_path(filename: str) -> bool:
+    """A test file by the same conventions the rest of the package uses."""
+    lowered = filename.lower()
+    base = Path(lowered).name
+    return (
+        base.startswith("test_")
+        or base.startswith("spec_")
+        or base.endswith("_test.py")
+        or lowered.startswith("tests/")
+        or "/tests/" in lowered
+        or "/test/" in lowered
+    )
+
+
+def _extensions_of(filenames: list[str]) -> str:
+    """Sorted unique extensions, rendered for a backticked list: `.md`, `.py`."""
+    exts = sorted({Path(n).suffix.lower() or "(no extension)" for n in filenames})
+    return "`, `".join(exts)
+
+
+def _describe_changed_files(files: list[dict]) -> str:
+    """One phrase naming what kinds of files the diff touched.
+
+    A pass on a docs-only diff means something quite different from a pass on a
+    diff full of logic, and the reader cannot tell which they got from a bare
+    "no findings" — so the pass comment says it.
+    """
+    names = [str(f.get("filename") or "") for f in files or []]
+    names = [n for n in names if n]
+    if not names:
+        return "no files in the diff"
+
+    # One bucket per file, tests first, so the counts always add up to len(names):
+    # a file can be both a test and a `.txt`, and counting it in both buckets made
+    # `others` negative — "mixed (1 test, 1 doc, -1 other)". A test is its own
+    # kind, so it is never also counted as logic or as documentation.
+    tests = [n for n in names if _is_test_path(n)]
+    rest = [n for n in names if not _is_test_path(n)]
+    docs = [n for n in rest if n.lower().endswith(DOC_EXTENSIONS)]
+    rest = [n for n in rest if not n.lower().endswith(DOC_EXTENSIONS)]
+    logic = [n for n in rest if n.lower().endswith(LOGIC_EXTENSIONS)]
+    others = [n for n in rest if not n.lower().endswith(LOGIC_EXTENSIONS)]
+
+    buckets = [
+        (len(logic), "logic"),
+        (len(tests), "test"),
+        (len(docs), "doc"),
+        (len(others), "other"),
+    ]
+    present = [(count, kind) for count, kind in buckets if count]
+    if len(present) == 1:
+        # A single kind is named, not called "mixed (1 other)".
+        _, kind = present[0]
+        label = {"doc": "documentation", "test": "tests"}.get(kind, kind)
+        return f"{label} only (`{_extensions_of(names)}`)"
+    named = ", ".join(f"{count} {kind}" for count, kind in present)
+    return f"mixed ({named})"
 
 
 class Companion:
@@ -744,13 +822,7 @@ class Companion:
                 # from the poller — leaving 'Riptide Review Required' red on
                 # clean PRs.
                 if active_client:
-                    body = (
-                        f"## Riptide Pass: ✅ No findings\n\n"
-                        f"**Riptide Review Complete — No findings**\n\n"
-                        f"Deterministic analysis found no issues with this PR.\n\n"
-                        f"**Depth:** {getattr(self, '_depth', 'standard')} | "
-                        f"**Verdict:** pass"
-                    )
+                    body = self._build_pass_body(files, review_depth, graph_context)
                     active_client.post_pr_comment(installation_id, owner, repo, pr_number, body)
                     logger.info("Posted pass confirmation for %s#%d", full_name, pr_number)
                     # Record the reviewed SHA: without it the same revision is
@@ -1167,6 +1239,78 @@ ELI5:"""
             parts.append(f"- ...and {len(report.findings) - 5} more findings")
 
         return "\n".join(parts)
+
+    def _build_pass_body(self, files, review_depth, graph_context=None) -> str:
+        """Build the deterministic pass comment: what ran, the evidence, what next.
+
+        The old body was a rubber stamp — two headlines saying "no findings",
+        "Deterministic analysis found no issues", and a bare `Depth: trivial`
+        that explained nothing. A reader could not tell what had actually run,
+        how much of the diff it saw, or why no deep review was queued.
+
+        First line must stay byte-identical to `PASS_MARKER`: the CI gate keys
+        off `## Riptide Pass:` and a renamed marker un-gates every clean PR.
+        No LLM text is added (No Template Fallbacks) — every number here comes
+        from the file list and the depth classification.
+        """
+        files = files or []
+        additions = sum(int(f.get("additions") or 0) for f in files)
+        deletions = sum(int(f.get("deletions") or 0) for f in files)
+        total_loc = additions + deletions
+
+        depth = getattr(review_depth, "value", review_depth) or getattr(
+            self, "_depth", "standard"
+        )
+
+        scanned = "diff heuristics"
+        if self.enable_graphify and graph_context:
+            scanned += " + graphify blast radius"
+
+        return "\n".join([
+            PASS_MARKER,
+            "",
+            f"Ran the deterministic scan ({scanned}) — no LLM review, so this "
+            f'means "nothing static looked wrong", not "I read it carefully".',
+            "",
+            f"**{len(files)}** file(s), **+{additions}/−{deletions}** lines, "
+            f"{_describe_changed_files(files)} — classified `{depth}`: "
+            f"{describe_depth(depth)}. {self._deepthink_sentence(total_loc)}",
+        ])
+
+    def _deepthink_sentence(self, total_loc: int) -> str:
+        """Why no deep review was queued here, and how to ask for one.
+
+        The thresholds are read from the poller's configured settings
+        (`deepthink.MIN_LOC_CHANGED` / `STALENESS_MINUTES`, both env-driven) so
+        a config change cannot leave this comment stating a stale number.
+        """
+
+        def _thresholds():
+            from riptide.deepthink import MIN_LOC_CHANGED, STALENESS_MINUTES
+            return MIN_LOC_CHANGED, STALENESS_MINUTES
+
+        try:
+            min_loc, settled = _thresholds()
+        except Exception:
+            # Not a template fallback (No Template Fallbacks is about a dead
+            # model): losing the threshold numbers must not cost the gate its
+            # pass comment on a clean PR, so the sentence stays true without
+            # them rather than the post failing.
+            return (
+                "Deep reviews are queued automatically once a PR settles; "
+                "ask for one now with `@riptide-bot review`."
+            )
+
+        if total_loc > min_loc:
+            return (
+                f"Deep-think runs automatically for PRs over {min_loc} changed LOC "
+                f"once they have settled {settled}+ min — this one qualifies, so it "
+                f"will be queued; ask for one now with `@riptide-bot review`."
+            )
+        return (
+            f"Too small for an automatic deep review (needs {min_loc} changed LOC "
+            f"settled {settled}+ min); ask for one anyway with `@riptide-bot review`."
+        )
 
     def _build_tier1_body(self, emoji: str, author: str, tldr: str, deterministic_report,
                           depth: str = "standard", webhook_received_at=None,

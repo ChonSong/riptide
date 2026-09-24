@@ -13,7 +13,13 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from riptide.companion import Companion, classify_pr_mood
+from riptide.companion import (
+    PASS_MARKER,
+    Companion,
+    _describe_changed_files,
+    classify_pr_mood,
+)
+from riptide.depth import ReviewDepth, classify_review_depth, describe_depth
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -503,7 +509,13 @@ class TestDeterministicAnalysis:
         """No findings still posts a pass confirmation carrying the gate marker
         (`## Riptide Pass:`), otherwise 'Riptide Review Required' deadlocks
         every clean PR. The marker is deliberately distinct from the review
-        markers so the poller can tell a pass from a review."""
+        markers so the poller can tell a pass from a review.
+
+        Rewritten for the new contract: the body is no longer a rubric of
+        "no findings" twice plus `**Verdict:** pass`. It must lead with the
+        gate marker and then say what ran and on what — the assertions below
+        are the parts the gate and the reader depend on.
+        """
         companion = make_companion()
         companion.enable_deterministic = True
         companion.enable_graphify = False
@@ -524,9 +536,12 @@ class TestDeterministicAnalysis:
         # Exactly one comment, and it must satisfy the CI gate's marker check
         companion.client.post_pr_comment.assert_called_once()
         body = companion.client.post_pr_comment.call_args[0][4]
-        assert "## Riptide Pass:" in body
+        assert body.split("\n")[0] == PASS_MARKER
         assert "No findings" in body
-        assert "Verdict:** pass" in body
+        assert "Ran the deterministic scan" in body
+        assert "no LLM review" in body
+        # The evidence for the pass is the diff's own numbers, not a claim
+        assert "**1** file(s)" in body and "**+1/−0** lines" in body
         # No table rows with 🔴/🟡 — the gate treats this as clean
         assert "🔴" not in body
         assert "🟡" not in body
@@ -564,7 +579,10 @@ class TestDeterministicAnalysis:
         # Marker-agnostic on purpose: the exact gate marker differs between the
         # branches in this stack (it is asserted exactly by the sibling test).
         body = poller_client.post_pr_comment.call_args[0][4]
-        assert "No findings" in body and "Verdict:** pass" in body
+        assert body.startswith(PASS_MARKER)
+        # New contract: the poller's pass must carry the same context as the
+        # webhook's, so a reader cannot tell which path posted it.
+        assert "no LLM review" in body and "Ran the deterministic scan" in body
         companion.client.post_pr_comment.assert_not_called()
 
     def test_pass_confirmation_records_the_reviewed_sha(self, mock_ollama):
@@ -834,6 +852,220 @@ class TestTwoTierResponse:
         # Only POST (legacy path), no PATCH
         companion.client.post_pr_comment.assert_called_once()
         companion.client.update_pr_comment.assert_not_called()
+
+
+# ── Pass comment content ─────────────────────────────────────────────────────
+
+
+# The diff that motivated the rewrite (PR #208): docs-only, 3 files, +925/−0.
+DOCS_ONLY_FILES = [
+    {"filename": "docs/REVIEW-CONTRACT.md", "patch": "+x", "additions": 300, "deletions": 0, "status": "modified"},
+    {"filename": "docs/SECURITY.md", "patch": "+x", "additions": 300, "deletions": 0, "status": "modified"},
+    {"filename": "README.md", "patch": "+x", "additions": 325, "deletions": 0, "status": "modified"},
+]
+
+TINY_DOC_FILE = [
+    {"filename": "README.md", "patch": "+hello", "additions": 1, "deletions": 0, "status": "modified"},
+]
+
+
+class TestPassCommentContent:
+    """The deterministic pass must carry context, not just a verdict.
+
+    The old body said "no findings" twice, called itself deterministic without
+    naming what ran, and gave a bare `Depth: trivial` with no reason. These pin
+    the three things it owed the reader: what ran (and its limit), the evidence
+    it passed on, and why no deep review was queued.
+    """
+
+    def _run(self, files, graph_context=None, repo="fixture-docs-only"):
+        """Post a pass for *files* and return the body that was posted."""
+        companion = make_companion()
+        companion.enable_deterministic = True
+        companion.enable_graphify = graph_context is not None
+        companion._get_last_sha = MagicMock(return_value=None)
+        companion._set_last_sha = MagicMock()
+        companion.client.get_pr_details.return_value = {"head": {"sha": "pass-sha"}}
+        companion.client.post_pr_comment = MagicMock()
+        if graph_context is not None:
+            companion._get_graph_context = MagicMock(return_value=graph_context)
+
+        mock_report = MagicMock()
+        mock_report.has_actionable = False
+        mock_report.findings = []
+        mock_report.verdict = "pass"
+        with patch("riptide.companion.build_context_bundle", return_value={"report": mock_report}):
+            companion._execute(
+                123, "owner", repo, 42,
+                "docs: rewrite the contract", "author", files,
+            )
+        assert companion.client.post_pr_comment.call_count == 1
+        return companion.client.post_pr_comment.call_args[0][4]
+
+    def test_first_line_is_the_gate_marker_byte_for_byte(self):
+        """The gate contract: `.github/workflows/riptide-review-required.yml`
+        matches a body containing `## Riptide Pass:` and the fixer's review
+        detection keys off the same prefix. The marker is line 0 and is exact —
+        renaming it, or letting anything above it, un-gates every clean PR.
+        """
+        body = self._run(list(DOCS_ONLY_FILES), graph_context={"nodes": 4})
+        assert body.split("\n")[0] == "## Riptide Pass: ✅ No findings"
+        assert PASS_MARKER == "## Riptide Pass: ✅ No findings"
+        # Still a pass, never a review: no severity rows, no review sign-off
+        assert "🔴" not in body
+        assert "🟡" not in body
+        assert "Riptide Review ·" not in body
+
+    def test_says_what_ran_and_that_no_llm_read_the_diff(self):
+        """A deterministic pass has a limit, and the reader has to be told —
+        otherwise "no findings" reads like a human/LLM read the change."""
+        body = self._run(list(DOCS_ONLY_FILES), graph_context={"nodes": 4})
+        assert "Ran the deterministic scan" in body
+        assert "diff heuristics" in body
+        assert "graphify blast radius" in body
+        assert "no LLM review" in body
+        assert '"nothing static looked wrong"' in body
+
+    def test_graphify_named_only_when_it_actually_ran(self):
+        """Naming a scan that did not run is the same lie as the old body."""
+        body = self._run(list(DOCS_ONLY_FILES))  # enable_graphify False
+        assert "diff heuristics" in body
+        assert "graphify blast radius" not in body
+
+    def test_carries_the_real_file_loc_and_kind_numbers(self):
+        """The evidence for the pass is the diff's own numbers."""
+        body = self._run(list(DOCS_ONLY_FILES), graph_context={"nodes": 4})
+        assert "**3** file(s)" in body
+        assert "**+925/−0** lines" in body
+        assert "documentation only (`.md`)" in body
+
+    def test_numbers_track_the_diff_not_a_template(self):
+        """Change the diff and every number must follow it."""
+        files = [{"filename": "riptide/foo.py", "patch": "+x", "additions": 11, "deletions": 2, "status": "modified"}]
+        body = self._run(files)
+        assert "**1** file(s)" in body
+        assert "**+11/−2** lines" in body
+        assert "logic only (`.py`)" in body
+        assert "+925" not in body
+
+    def test_explains_the_depth_class_instead_of_just_naming_it(self):
+        """`classified trivial` alone is what the maintainer rejected: the
+        reason must come from depth.py, next to the rule that decides it."""
+        body = self._run(list(TINY_DOC_FILE))
+        assert "classified `trivial`" in body
+        assert describe_depth("trivial") in body
+        # The class printed is the classifier's own answer for this diff
+        depth = classify_review_depth({"files_changed": TINY_DOC_FILE})
+        assert depth is ReviewDepth.TRIVIAL
+        assert f"`{depth.value}`" in body
+
+    def test_deep_review_thresholds_come_from_the_poller_config(self):
+        """Never a hardcoded 100/30: a config change must move the sentence."""
+        from riptide.deepthink import MIN_LOC_CHANGED, STALENESS_MINUTES
+
+        big = self._run(list(DOCS_ONLY_FILES))
+        assert f"over {MIN_LOC_CHANGED} changed LOC" in big
+        assert f"settled {STALENESS_MINUTES}+ min" in big
+        assert "will be queued" in big
+        assert "`@riptide-bot review`" in big
+
+        small = self._run(list(TINY_DOC_FILE))
+        assert f"needs {MIN_LOC_CHANGED} changed LOC" in small
+        assert "ask for one anyway with `@riptide-bot review`" in small
+
+    def test_threshold_boundary_matches_the_poller_rule(self):
+        """`deepthink` skips at `total_loc <= MIN_LOC_CHANGED`, so a PR sitting
+        exactly on the threshold is not auto-reviewed — the comment must not
+        tell its author otherwise."""
+        from riptide.deepthink import MIN_LOC_CHANGED
+
+        at_threshold = [{
+            "filename": "riptide/x.py", "patch": "+x",
+            "additions": MIN_LOC_CHANGED, "deletions": 0, "status": "modified",
+        }]
+        body = self._run(at_threshold)
+        assert f"needs {MIN_LOC_CHANGED} changed LOC" in body
+        assert "will be queued" not in body
+
+    def test_missing_threshold_config_still_points_at_the_command(self, monkeypatch):
+        """Defensive path: if the poller's settings cannot be imported, the pass
+        must still post (the gate needs it) and still say how to ask for a
+        review — it just drops the numbers."""
+        import sys
+
+        monkeypatch.setitem(sys.modules, "riptide.deepthink", None)
+        body = self._run(list(TINY_DOC_FILE))
+        assert body.split("\n")[0] == PASS_MARKER
+        assert "`@riptide-bot review`" in body
+        assert "100" not in body
+
+    def test_body_is_one_tight_paragraph_not_a_duplicate_headline(self):
+        """The regression being fixed: the old body repeated the verdict."""
+        body = self._run(list(DOCS_ONLY_FILES), graph_context={"nodes": 4})
+        assert "Riptide Review Complete" not in body
+        assert "Deterministic analysis found no issues" not in body
+        assert "**Verdict:**" not in body
+        assert "**Depth:**" not in body
+        # marker + 3 body blocks (blank-line separated), nothing more
+        assert len(body.split("\n")) == 5
+
+
+class TestChangedFileSummary:
+    """`_describe_changed_files` names the kinds of files in evidence."""
+
+    def test_docs_only(self):
+        assert _describe_changed_files(DOCS_ONLY_FILES) == "documentation only (`.md`)"
+
+    def test_tests_only(self):
+        files = [{"filename": "riptide/tests/test_x.py"}, {"filename": "riptide/tests/test_y.py"}]
+        assert _describe_changed_files(files) == "tests only (`.py`)"
+
+    def test_logic_only(self):
+        files = [{"filename": "riptide/a.py"}, {"filename": "riptide/b.go"}]
+        assert _describe_changed_files(files) == "logic only (`.go`, `.py`)"
+
+    def test_mixed_names_every_bucket(self):
+        files = [{"filename": "riptide/a.py"}, {"filename": "docs/x.md"}, {"filename": "riptide/tests/test_a.py"}]
+        assert _describe_changed_files(files) == "mixed (1 logic, 1 test, 1 doc)"
+
+    def test_config_only_diff_is_not_called_logic(self):
+        files = [{"filename": ".github/workflows/x.yml"}, {"filename": "docs/x.md"}]
+        assert _describe_changed_files(files) == "mixed (1 doc, 1 other)"
+
+    def test_a_test_that_is_also_a_text_file_is_counted_once(self):
+        """The regression: a `test_*.txt` file sat in two buckets at once, so the
+        remainder went negative — "mixed (1 test, 1 doc, -1 other)"."""
+        files = [{"filename": "tests/data/test_report.txt"}]
+
+        assert _describe_changed_files(files) == "tests only (`.txt`)"
+
+    def test_a_dependency_manifest_is_not_documentation(self):
+        """`requirements.txt` is a dependency change, not prose. Calling the diff
+        "documentation only" was the false reassurance this summary prevents."""
+        result = _describe_changed_files([{"filename": "requirements.txt"}])
+
+        assert "documentation" not in result
+        assert result == "other only (`.txt`)"
+
+    def test_a_single_unclassifiable_file_is_named_not_mixed(self):
+        """A one-file diff of a file with no prose extension is not "mixed"."""
+        assert _describe_changed_files([{"filename": "Makefile"}]) == "other only (`(no extension)`)"
+
+    def test_the_buckets_never_overlap(self):
+        """Every file lands in exactly one bucket, so a count can never be
+        negative and the buckets always sum to the number of files."""
+        files = [
+            {"filename": "requirements.txt"},
+            {"filename": "tests/data/test_report.txt"},
+            {"filename": "riptide/a.py"},
+            {"filename": "docs/x.md"},
+            {"filename": "Makefile"},
+        ]
+
+        assert _describe_changed_files(files) == "mixed (1 logic, 1 test, 1 doc, 2 other)"
+
+    def test_empty_diff_says_so(self):
+        assert _describe_changed_files([]) == "no files in the diff"
 
 
 # ── Depth gating (WS-3 Stage 0) ─────────────────────────────────────────────
