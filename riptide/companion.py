@@ -48,7 +48,10 @@ logger = logging.getLogger("riptide.companion")
 PASS_MARKER = "## Riptide Pass: ✅ No findings"
 
 # Kinds that make a pass self-evidently cheap to trust: prose and specs.
-DOC_EXTENSIONS = (".md", ".mdx", ".rst", ".txt", ".adoc")
+# `.txt` is deliberately absent — it is usually prose, but `requirements.txt` is a
+# dependency change, and a pass calling that "documentation only" is exactly the
+# false reassurance this summary exists to prevent.
+DOC_EXTENSIONS = (".md", ".mdx", ".rst", ".adoc")
 
 # ── Emoji classification ─────────────────────────────────────────────────────
 
@@ -410,29 +413,30 @@ def _describe_changed_files(files: list[dict]) -> str:
     if not names:
         return "no files in the diff"
 
-    docs = [n for n in names if n.lower().endswith(DOC_EXTENSIONS)]
+    # One bucket per file, tests first, so the counts always add up to len(names):
+    # a file can be both a test and a `.txt`, and counting it in both buckets made
+    # `others` negative — "mixed (1 test, 1 doc, -1 other)". A test is its own
+    # kind, so it is never also counted as logic or as documentation.
     tests = [n for n in names if _is_test_path(n)]
-    if len(docs) == len(names):
-        return f"documentation only (`{_extensions_of(names)}`)"
-    if len(tests) == len(names):
-        return f"tests only (`{_extensions_of(names)}`)"
+    rest = [n for n in names if not _is_test_path(n)]
+    docs = [n for n in rest if n.lower().endswith(DOC_EXTENSIONS)]
+    rest = [n for n in rest if not n.lower().endswith(DOC_EXTENSIONS)]
+    logic = [n for n in rest if n.lower().endswith(LOGIC_EXTENSIONS)]
+    others = [n for n in rest if not n.lower().endswith(LOGIC_EXTENSIONS)]
 
-    # Non-test logic files: a test is already its own kind, so it must not be
-    # double-counted as "logic" (the classifier counts it as logic, which is
-    # why a docs+test diff is mixed and not "logic only").
-    logic = [n for n in names if n.lower().endswith(LOGIC_EXTENSIONS) and not _is_test_path(n)]
     buckets = [
         (len(logic), "logic"),
         (len(tests), "test"),
         (len(docs), "doc"),
+        (len(others), "other"),
     ]
-    others = len(names) - sum(count for count, _ in buckets)
-    if others:
-        buckets.append((others, "other"))
-
-    if len(logic) == len(names):
-        return f"logic only (`{_extensions_of(names)}`)"
-    named = ", ".join(f"{count} {kind}" for count, kind in buckets if count)
+    present = [(count, kind) for count, kind in buckets if count]
+    if len(present) == 1:
+        # A single kind is named, not called "mixed (1 other)".
+        _, kind = present[0]
+        label = {"doc": "documentation", "test": "tests"}.get(kind, kind)
+        return f"{label} only (`{_extensions_of(names)}`)"
+    named = ", ".join(f"{count} {kind}" for count, kind in present)
     return f"mixed ({named})"
 
 

@@ -1017,6 +1017,38 @@ class TestChangedFileSummary:
         files = [{"filename": ".github/workflows/x.yml"}, {"filename": "docs/x.md"}]
         assert _describe_changed_files(files) == "mixed (1 doc, 1 other)"
 
+    def test_a_test_that_is_also_a_text_file_is_counted_once(self):
+        """The regression: a `test_*.txt` file sat in two buckets at once, so the
+        remainder went negative — "mixed (1 test, 1 doc, -1 other)"."""
+        files = [{"filename": "tests/data/test_report.txt"}]
+
+        assert _describe_changed_files(files) == "tests only (`.txt`)"
+
+    def test_a_dependency_manifest_is_not_documentation(self):
+        """`requirements.txt` is a dependency change, not prose. Calling the diff
+        "documentation only" was the false reassurance this summary prevents."""
+        result = _describe_changed_files([{"filename": "requirements.txt"}])
+
+        assert "documentation" not in result
+        assert result == "other only (`.txt`)"
+
+    def test_a_single_unclassifiable_file_is_named_not_mixed(self):
+        """A one-file diff of a file with no prose extension is not "mixed"."""
+        assert _describe_changed_files([{"filename": "Makefile"}]) == "other only (`(no extension)`)"
+
+    def test_the_buckets_never_overlap(self):
+        """Every file lands in exactly one bucket, so a count can never be
+        negative and the buckets always sum to the number of files."""
+        files = [
+            {"filename": "requirements.txt"},
+            {"filename": "tests/data/test_report.txt"},
+            {"filename": "riptide/a.py"},
+            {"filename": "docs/x.md"},
+            {"filename": "Makefile"},
+        ]
+
+        assert _describe_changed_files(files) == "mixed (1 logic, 1 test, 1 doc, 2 other)"
+
     def test_empty_diff_says_so(self):
         assert _describe_changed_files([]) == "no files in the diff"
 
