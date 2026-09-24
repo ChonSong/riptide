@@ -31,6 +31,27 @@ When the user asks for a review-and-fix pass on a PR:
 4. **Validate before reporting** — `python -m py_compile` + `python -m pytest -q`
 5. **Regex audit** — when a review claims a regex is broken, test it directly: `python3 -c "import re; print(re.compile(r'...').search('eval('))"`
 6. **Prove pre-existing failures with git stash** — when the suite has failures you believe are unrelated, `git stash`, run the failing file on the clean tree, confirm it still fails, then `git stash pop`
+7. **A finding can be a stale-base artifact** — a review that says "X does not exist" grepped the PR's own base, which may predate the merge that added X. Check `git merge-base origin/main <branch>` and verify the symbol against `origin/main` before "fixing" anything: a doc whose branch is merely behind can describe main correctly, and the finding is the branch's staleness
+8. **Never read the gate's colour as "the findings are addressed"** — it reports that a commit landed after the review. Read the run's own state line (`chosen: …` once `scripts/check_riptide_review.sh` is in play) instead of the check's colour
+
+## The Review Gate (`riptide-review-required`)
+
+`scripts/check_riptide_review.sh` decides whether a PR may merge; the workflow only builds its data file from the API (`review`/`commit`/`file` records) and runs it. Edit the script and its tests, never a selector inline in the workflow.
+
+How it decides, and what must not regress:
+
+- It judges the newest **review** (marker: `## 🔍 Findings`, `## 🎯 Summary`, or the `Riptide Review ·` sign-off), preferring it over a Companion pass posted later.
+- Both exclusions (`## ✨ Review Required` pre-pass, `## Riptide Pass:`) are anchored to a comment's **first line**. A body-wide `contains` drops a review that merely *quotes* the heading; the gate then falls back to an older comment and greens while a finding stands.
+- A findings review needs a commit after it that **touches a file the findings name**. A commit touching anything else is not an answer.
+- A finding row naming no file (`| 🟡 | title | — |`) cannot be matched against a commit, so it relaxes that rule and the run says so — never silently treat it as answered.
+- A pass-only PR still satisfies the gate, but the log and the step summary state that no deep review ran on this head, so a green check is never read as "reviewed".
+- `chosen: review <id>` / `chosen: pass <ts>` / `chosen: none` is the machine-readable line the selector locks read — keep it.
+
+Extracting a gate out of a workflow:
+
+- **Migrate its lock tests.** `riptide/tests/test_review_gate_workflow.py` pulls the jq selector out of the workflow text; moving the selector into a script leaves five of its tests failing. Re-point them at the script's `chosen:` line rather than deleting them.
+- **Prove the old behaviour, do not assert it.** Extract the previous selector verbatim with `git show origin/main:<workflow>` and run both over the same fixtures. Retyping it from memory gives a subtly different expression and a bogus comparison.
+- The workflow's data-building step is part of the code path — verify the script against live PRs by rebuilding the same records with `gh api`, not only over fixtures.
 
 ## Rebase Workflow for Stacked PRs
 
