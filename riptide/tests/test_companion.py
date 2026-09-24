@@ -319,12 +319,27 @@ class TestFormatComment:
         assert "ELI5" in result
         assert "It's like adding a new room to a house." in result
 
-    def test_proofshot_for_ui_files(self):
+    def test_no_proofshot_flag_for_ui_files(self):
+        """CONTRACT CHANGE: a UI change must NOT produce a proofshot claim.
+
+        This test used to assert the opposite — that the flag and the changed
+        filename appeared in the body. The claim has been RETIRED (see
+        TestProofShotClaimRetired below for why), so the assertion is inverted
+        rather than deleted: the UI path has to stay silent, and this is the test
+        that says so.
+
+        Note the boundary: the interactive "ProofShot" checkbox action is a
+        different mechanism (it fires a workflow_dispatch against an existing
+        workflow) and is deliberately still offered, so this asserts on the
+        retired claim text, not on every mention of the word.
+        """
         companion = make_companion()
         ui_files = [{"filename": "src/components/Button.tsx"}]
         result = companion._format_comment("✨", "testuser", "Some TL;DR.", None, ui_files=ui_files)
-        assert "ProofShot" in result
-        assert "Button.tsx" in result
+        assert "ProofShot Required" not in result
+        assert "ProofShot visual verification" not in result
+        # The filename was only ever rendered by the retired flag block
+        assert "Button.tsx" not in result
 
     def test_delta_prefix(self):
         companion = make_companion()
@@ -1194,3 +1209,168 @@ class TestBuildTier1BodyFooter:
         )
 
         assert "ProofShot" not in body
+
+
+# ── ProofShot claim retirement ───────────────────────────────────────────
+
+
+class TestProofShotClaimRetired:
+    """Companion must never claim proofshot visual verification again.
+
+    Bot 3 (proofshotter) cannot produce the evidence the flag promised, for
+    reasons narrower than "the host has nothing":
+
+    * the capture target defaults to localhost:8788, which is not dead but
+      occupied by an unrelated application (Hermes WebUI). A capture there would
+      have posted that app's login page as evidence;
+    * the Python entry point ``~/workspace/proofshot/cli.py`` does not exist
+      (its parent directory does), so riptide/proofshotter.py's importlib load of
+      ``ProofshotSession`` fails as a missing file at runtime, not as a missing
+      module; upstream AmElmo/proofshot is a Node CLI and cannot be imported.
+
+    Flagging every UI change with a demand for visual evidence was therefore a
+    claim that could not be honoured, so it was retired rather than shimmed.
+
+    RETIRED_CLAIMS below is the only place this file spells the retired text out:
+    a guard has to name exactly what it forbids, and it is the literal that grep
+    should find if anyone ever wonders whether the claim is still live.
+
+    These tests pin the retirement, and they assert ABSENCE on purpose:
+    reintroducing the claim - in the posted body, in the TL;DR prompt, or in the
+    module source - is a regression, not a feature. proofshotter.py itself is
+    kept for a future rebuild and is deliberately not covered here.
+    """
+
+    RETIRED_CLAIMS = (
+        "ProofShot Required",
+        "Proofshot Required",
+        "ProofShot visual verification",
+    )
+
+    @staticmethod
+    def _ui_files():
+        return [{
+            "filename": "src/components/Button.tsx",
+            "status": "modified",
+            "additions": 3,
+            "deletions": 1,
+            "patch": "+<button type=\"button\" />",
+        }]
+
+    def assert_no_retired_claim(self, text, where):
+        for retired in self.RETIRED_CLAIMS:
+            assert retired not in text, f"retired claim re-appeared in {where}: {retired!r}"
+
+    def test_ui_change_body_carries_no_proofshot_claim(self):
+        """Pin: the flag must not come back on the LLM-format body."""
+        companion = make_companion()
+        body = companion._format_comment(
+            "✨", "testuser", "Some TL;DR.", None, ui_files=self._ui_files()
+        )
+        self.assert_no_retired_claim(body, "the posted body (ui_files)")
+
+    def test_ui_change_tier1_body_carries_no_proofshot_claim(self):
+        """Pin: neither does the deterministic Tier-1 body."""
+        from riptide.companion import Companion
+        from riptide.diff_analyzer import DiffReport
+
+        companion = Companion.__new__(Companion)
+        companion.model = "test"
+        companion.client = MagicMock()
+
+        report = DiffReport(
+            verdict="pass",
+            summary="Test summary",
+            findings=[],
+            stats={"files": 1, "additions": 1, "deletions": 0},
+        )
+
+        body = companion._build_tier1_body(
+            emoji="✨",
+            author="testuser",
+            tldr="Test TL;DR",
+            deterministic_report=report,
+            depth="trivial",
+            ui_files=["src/ui/App.tsx"],
+        )
+        self.assert_no_retired_claim(body, "the Tier-1 body (ui_files)")
+
+    def test_tldr_prompt_does_not_request_a_proofshot_claim(self, mock_ollama):
+        """Pin: the TL;DR prompt must not ask the model to promise proofshot.
+
+        The prompt was a second source of the lie - it told the model that visual
+        verification was required and handed it a ready-made "📸" header to
+        paste into the TL;DR. A model that obeys would post the claim even with
+        the body-side append removed.
+        """
+        companion = make_companion()
+        companion._generate_tldr("feat: touch UI", "testuser", self._ui_files(), None)
+        prompt = mock_ollama.call_args.kwargs["json"]["prompt"]
+        self.assert_no_retired_claim(prompt, "the TL;DR prompt")
+        # No pre-built screenshot header left for the model to echo back
+        assert "📸" not in prompt
+
+    def test_companion_source_no_longer_emits_the_flag(self):
+        """Pin at the source level, so an unexercised path cannot smuggle it back.
+
+        A body-level test only covers the paths it calls; this fails the moment
+        the literal returns anywhere in the module, including a prompt or a new
+        comment that quotes it verbatim.
+        """
+        import inspect as _inspect
+
+        import riptide.companion as companion_module
+
+        source = _inspect.getsource(companion_module)
+        self.assert_no_retired_claim(source, "riptide/companion.py source")
+
+    def test_leftover_proofshot_claim_literal_is_gated_and_confined(self):
+        """Pin why proofshotter.py's surviving claim literal is inert.
+
+        ``_post_proofshot_comment`` in riptide/proofshotter.py still appends a
+        claim of visual verification, and the source-level guard above greps
+        riptide/companion.py only - so nothing there would notice if that literal
+        moved into a live path. Two properties keep it inert, both pinned here:
+
+        1. no capture result without the CLI: ``_run_proofshot`` returns None
+           while PROOFSHOT_CLI is missing (the file does not exist; its parent
+           directory does), and both call sites bail on that None before posting;
+        2. the literal itself is confined to the poster function, so it cannot
+           appear in the poll loop, a review body, or the TL;DR prompt.
+
+        Restoring ~/workspace/proofshot/cli.py re-arms the whole path, so a
+        future rebuild has to re-validate the capture target: port 8788 is
+        another application (Hermes WebUI), and a capture there would post that
+        app's login page as evidence.
+        """
+        import inspect as _inspect
+
+        from riptide import proofshotter as proofshotter_module
+
+        # 1. Missing CLI -> no result for the callers to post.
+        with patch.object(
+            proofshotter_module, "PROOFSHOT_CLI",
+            Path("/nonexistent-proofshot-root/proofshot/cli.py"),
+        ):
+            result = proofshotter_module._run_proofshot(
+                1, "http://localhost:8788", None,
+                Path("/tmp/riptide-proofshot-test"), [],
+            )
+        assert result is None, "a missing CLI must leave the callers with nothing to post"
+
+        # 2. The literal must not escape the (unreachable) poster.
+        literal_lines = [
+            line
+            for line in _inspect.getsource(proofshotter_module).splitlines()
+            if "ProofShot visual verification" in line
+        ]
+        if not literal_lines:
+            return  # retired outright - nothing left to confine
+        poster_lines = _inspect.getsource(
+            proofshotter_module._post_proofshot_comment
+        ).splitlines()
+        escaped = [line for line in literal_lines if line not in poster_lines]
+        assert not escaped, (
+            "the retired proofshot claim escaped _post_proofshot_comment into a "
+            f"live path: {escaped!r}"
+        )

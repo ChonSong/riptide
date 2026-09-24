@@ -49,7 +49,7 @@ and `curl -s localhost:8477/health`.
 riptide/
 ├── riptide/
 │   ├── github_app.py      # JWT auth, GitHub API client
-│   ├── companion.py       # Bot 1: TL;DR + ELI5 + ProofShot flagger
+│   ├── companion.py       # Bot 1: TL;DR + ELI5 (proofshot flag retired)
 │   ├── deepthink.py       # Bot 2: Cron polling + Hermes deep-think spawner
 │   ├── fixer.py           # Bot 2b: Autonomous fix (edit/commit/push)
 │   ├── proofshotter.py    # Bot 3: Cron-polled proofshot visual verification
@@ -87,7 +87,14 @@ is not.
 ### Bot 1: Companion (Webhook-Triggered)
 - Triggered by `pull_request` opened/reopened/synchronize
 - Posts TL;DR comment with graphify-informed blast radius
-- Flags "📸 ProofShot Required" when UI files change
+- Does **not** flag proofshot: the "📸 ProofShot Required" claim is RETIRED, so
+  Companion stays silent on UI-file changes. Bot 3 has no capture target
+  (port 8788 is occupied by an unrelated application (Hermes WebUI,
+  pid 1902, `Server: HermesWebUI/exp-v0.52.264-dirty`), not dead — a capture
+  would have screenshotted that app's login page and posted it as evidence), the Python entry point `~/workspace/proofshot/cli.py` does not exist (its
+  parent directory does), and `proofshotter.py` would load `ProofshotSession` from that missing
+  file at runtime via importlib, so the failure is a missing file, not a module, so the flag promised evidence that
+  cannot be produced. Do not re-add it without a live capture target.
 - Uses local Ollama (`qwen2.5-coder:7b`) at `http://localhost:11434`
 - Skip/resume per PR via `@riptide-bot companion skip/resume`
 - On-demand deep-think review via `@riptide-bot review` (alias: `deepthink`, `full review`)
@@ -102,7 +109,6 @@ is not.
   (`RIPTIDE_DEEPTHINK_MODEL`/`_PROVIDER`). **Check `.env`, don't assume** — the code
   defaults (`LongCat-2.0`/`longcat`) are fallbacks only and are not what prod runs
 - Posts review comment with findings
-- Notes missing proofshot evidence in review comment
 - Dedup: same SHA + 24h cooldown, **plus a check that a review comment was actually
   delivered** — SHA-only dedup skipped PRs whose review never landed
 - Reservations are released when the job completes/vanishes or the review is
@@ -120,6 +126,15 @@ is not.
 - Fork/foreign PRs get a comment-only patch with a "cannot push" note
 - Safety: no force-push, no secret edits, no push on red tests, Conventional Commits
 - Instant ack comment ("🛠 Riptide Fix triggered"), then summary with verdicts
+- Ack comment names the spawned Hermes job (`riptide-fix-<owner>-<repo>-<n>`,
+  from `_fix_job_name`) so it can be chased with `hermes cron list`
+- `@riptide-bot fix` never writes `fix_queue`: nothing drains it
+  (`process_fix_queue` is unwired), so a row would block that PR permanently — the
+  busy check counts it — and silently swallow every later request. When the Hermes
+  cron CLI is absent the command says it could not start instead.
+- A `queued` row only blocks while it is younger than `QUEUE_BLOCK_MAX_AGE_SECONDS`
+  (= `FIX_TTL_SECONDS`, 2h), so a row left behind by an older deployment cannot hold
+  the gate.
 
 ### Bot 1: Companion State Reporting
 - Companion TL;DR footer includes Bot 2 status when state file is present:
