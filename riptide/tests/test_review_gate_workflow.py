@@ -10,24 +10,21 @@ Then the first fix over-corrected: it excluded the pre-pass with a substring tes
 over the whole body, so a *review that quoted the heading* was filtered out too —
 silently hiding a findings review and greening the check.
 
-These tests run the workflow's own jq selector over representative comment bodies,
-which is the only way to catch that class of mistake.
+The selector now lives in scripts/check_riptide_review.sh, so these tests feed it
+comment records and read back the one line naming the comment it judged
+(``chosen: review <id>`` / ``chosen: pass <ts>`` / ``chosen: none``). Running the
+real selector is the only way to catch that class of mistake.
 """
 
-import json
+import base64
+import os
 import re
-import shutil
 import subprocess
 from pathlib import Path
 
-import pytest
-
-WORKFLOW = (
-    Path(__file__).resolve().parents[2]
-    / ".github"
-    / "workflows"
-    / "riptide-review-required.yml"
-)
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SCRIPT = REPO_ROOT / "scripts" / "check_riptide_review.sh"
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "riptide-review-required.yml"
 
 PRE_PASS = (
     "## ✨ Review Required\n\n@someone:\n⚠️ 2 complexity issues found\n"
@@ -48,96 +45,102 @@ REVIEW = (
 COMPANION_PASS = "## Riptide Pass: ✅ No findings\n\n**Verdict:** pass\n"
 
 
-def _workflow_text() -> str:
-    return WORKFLOW.read_text(encoding="utf-8")
+def _record(body: str, created: str, cid: int) -> str:
+    encoded = base64.b64encode(body.encode("utf-8")).decode("ascii")
+    return f"review {cid} {created} {encoded}"
 
 
-def _selector() -> str:
-    """Pull the jq selector out of the workflow's gh api call.
-
-    The selector is one long line ending in ``')``; the ``.*`` is greedy so it
-    stops at the last single quote before that (the body itself uses double
-    quotes only).
-    """
-    match = re.search(r"--jq '(.*)'\)\s*$", _workflow_text(), re.MULTILINE)
-    assert match, "could not find the --jq selector in the workflow"
+def _judge(tmp_path, records: list[str]) -> str:
+    """Run the gate over these records, returning its `chosen:` payload."""
+    data = tmp_path / "comments.txt"
+    data.write_text("\n".join(records) + "\n", encoding="utf-8")
+    env = dict(os.environ)
+    env.pop("GITHUB_STEP_SUMMARY", None)
+    proc = subprocess.run(
+        ["bash", str(SCRIPT), str(data)], capture_output=True, text=True, env=env
+    )
+    match = re.search(r"^chosen: (.+)$", proc.stdout, re.MULTILINE)
+    assert match, f"the gate printed no chosen: line\n{proc.stdout}\n{proc.stderr}"
     return match.group(1)
 
 
-def _select(comments: list[dict]) -> dict | None:
-    jq = shutil.which("jq")
-    if jq is None:
-        pytest.skip("jq is not installed")
-    proc = subprocess.run(
-        [jq, "-c", _selector()],
-        input=json.dumps(comments),
-        capture_output=True,
-        text=True,
-    )
-    assert proc.returncode == 0, proc.stderr
-    out = proc.stdout.strip()
-    return json.loads(out) if out and out != "null" else None
+def _script_text() -> str:
+    return SCRIPT.read_text(encoding="utf-8")
 
 
-def _comment(body: str, created: str, cid: int) -> dict:
-    return {"id": cid, "body": body, "created_at": created}
+def test_the_selector_lives_in_the_gate_script():
+    assert SCRIPT.is_file(), f"missing {SCRIPT}"
 
 
-def test_workflow_exists():
-    assert WORKFLOW.is_file(), f"missing {WORKFLOW}"
-
-
-def test_gate_picks_the_review_not_the_companion_pre_pass():
-    chosen = _select([
-        _comment(PRE_PASS, "2026-01-01T00:00:00Z", 1),
-        _comment(REVIEW, "2026-01-01T00:01:00Z", 2),
+def test_gate_picks_the_review_not_the_companion_pre_pass(tmp_path):
+    chosen = _judge(tmp_path, [
+        _record(PRE_PASS, "2026-01-01T00:00:00Z", 1),
+        _record(REVIEW, "2026-01-01T00:01:00Z", 2),
     ])
-    assert chosen is not None and chosen["id"] == 2, chosen
+    assert chosen == "review 2", chosen
 
 
-def test_gate_does_not_drop_a_review_that_quotes_the_pre_pass_heading():
+def test_gate_does_not_drop_a_review_that_quotes_the_pre_pass_heading(tmp_path):
     """The regression: the exclusion must not be a whole-body substring test."""
-    chosen = _select([
-        _comment(PRE_PASS, "2026-01-01T00:00:00Z", 1),
-        _comment(REVIEW_QUOTING_THE_HEADING, "2026-01-01T00:01:00Z", 2),
+    chosen = _judge(tmp_path, [
+        _record(PRE_PASS, "2026-01-01T00:00:00Z", 1),
+        _record(REVIEW_QUOTING_THE_HEADING, "2026-01-01T00:01:00Z", 2),
     ])
-    assert chosen is not None, "the review was filtered out entirely"
-    assert chosen["id"] == 2, (
+    assert chosen == "review 2", (
         "the selector dropped a real review because it quoted the pre-pass heading"
     )
 
 
-def test_a_later_companion_pass_does_not_shadow_a_findings_review():
+def test_a_later_companion_pass_does_not_shadow_a_findings_review(tmp_path):
     """Otherwise a post-review pass greens the check while findings stand."""
-    chosen = _select([
-        _comment(REVIEW, "2026-01-01T00:01:00Z", 2),
-        _comment(COMPANION_PASS, "2026-01-01T00:02:00Z", 3),
+    chosen = _judge(tmp_path, [
+        _record(REVIEW, "2026-01-01T00:01:00Z", 2),
+        _record(COMPANION_PASS, "2026-01-01T00:02:00Z", 3),
     ])
-    assert chosen is not None and chosen["id"] == 2, chosen
+    assert chosen == "review 2", chosen
 
 
-def test_the_pass_is_used_when_it_is_the_only_marker():
-    chosen = _select([_comment(COMPANION_PASS, "2026-01-01T00:02:00Z", 3)])
-    assert chosen is not None and chosen["id"] == 3, chosen
+def test_the_pass_is_used_when_it_is_the_only_marker(tmp_path):
+    chosen = _judge(tmp_path, [
+        _record(COMPANION_PASS, "2026-01-01T00:02:00Z", 3),
+    ])
+    assert chosen.startswith("pass "), chosen
 
 
 def test_gate_matches_the_markers_a_real_review_carries():
-    text = _workflow_text()
+    text = _script_text()
     for marker in (
         "## 🔍 Findings",
         "## 🎯 Summary",
         "Riptide Review ·",
         "## Riptide Pass:",
     ):
-        assert f'contains("{marker}")' in text, f"selector lost the {marker!r} marker"
+        assert marker in text, f"the selector lost the {marker!r} marker"
 
 
 def test_gate_does_not_use_a_loose_critical_warning_clause():
     """The removed clause matched any comment that happened to use both words."""
-    text = _workflow_text()
+    text = _script_text()
     assert 'contains("critical")' not in text, (
         "the loose critical/warning clause is back — it matches non-review comments"
     )
     assert 'contains("warning")' not in text, (
         "the loose critical/warning clause is back — it matches non-review comments"
+    )
+
+
+def test_both_exclusions_are_anchored_to_the_first_line():
+    """A body-wide `contains` drops a review that quotes the heading."""
+    text = _script_text()
+    assert "first_line()" in text
+    # The exclusions go through `head`, never through the whole body.
+    assert re.search(r'case "\$head" in\s*\n\s*\*"Review Required"\*', text)
+    assert '[[ "$head" == *"Riptide Pass:"* ]]' in text
+
+
+def test_the_workflow_runs_the_script_and_keeps_no_inline_selector():
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert "scripts/check_riptide_review.sh" in text
+    assert 'contains("## Riptide Pass:")' not in text, (
+        "the body-wide pass test is back in the workflow"
     )
