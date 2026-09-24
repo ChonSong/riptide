@@ -298,3 +298,41 @@ class TestT0Orchestrator:
             result = orch.review_pr(profile, mode="parallel")
             mock_t1.assert_called_once()
             assert result["status"] == "complete"
+
+    def test_t3_visual_refuses_a_capture_with_no_declared_target(self, monkeypatch):
+        """The t3 path must not capture a guessed dev port.
+
+        It fell back to `http://localhost:8788`, which serves the Hermes WebUI's
+        login page — a capture there would be posted as this PR's visual evidence.
+        """
+        monkeypatch.delenv("RIPTIDE_PROOFSHOT_URL", raising=False)
+        orch = T0Orchestrator(state_store=self.store)
+        files = [{"filename": "Button.tsx"}]
+        profile = self._make_profile(6, files, 80, ui_files=files)
+
+        with patch("riptide.proofshotter._check_proofshot_config", return_value=None), \
+             patch("riptide.proofshotter._checkout_pr") as checkout, \
+             patch("riptide.proofshotter._run_proofshot") as run:
+            result = orch._dispatch_t3_visual(profile)
+
+        assert result["status"] == "error"
+        assert "target" in result["body"].lower()
+        run.assert_not_called()
+        checkout.assert_not_called()
+
+    def test_t3_visual_captures_the_target_the_repo_declares(self, monkeypatch):
+        monkeypatch.delenv("RIPTIDE_PROOFSHOT_URL", raising=False)
+        orch = T0Orchestrator(state_store=self.store)
+        files = [{"filename": "Button.tsx"}]
+        profile = self._make_profile(7, files, 80, ui_files=files)
+
+        with patch("riptide.proofshotter._check_proofshot_config",
+                   return_value={"url": "http://declared:9123/"}), \
+             patch("riptide.proofshotter._checkout_pr", return_value="/tmp/fake-checkout"), \
+             patch("riptide.proofshotter._run_proofshot",
+                   return_value={"gif": "/tmp/x.gif"}) as run, \
+             patch("riptide.proofshotter._upload_gif", return_value="https://img/x.gif"):
+            result = orch._dispatch_t3_visual(profile)
+
+        assert run.call_args.kwargs["url"] == "http://declared:9123/"
+        assert result["status"] == "complete"
