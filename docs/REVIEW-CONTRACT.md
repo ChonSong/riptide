@@ -24,13 +24,16 @@ table.
 | `Riptide Review ·` (sign-off) | `assemble_review.py` sign-off | Emitted on every real review *and* on clean ones | **Yes** | **Yes** |
 | `## Riptide Pass: ✅ No findings` | `companion.py` deterministic pass | "The deterministic pass ran and found nothing" — not a review | **Yes** | **No** |
 
-- **The CI gate** matches a body containing `## 🔍 Findings`, `## 🎯 Summary`,
-  `Riptide Review ·`, or `## Riptide Pass:`, and ignores the Companion's
-  complexity pre-pass (`## ✨ Review Required`)
-  (`.github/workflows/riptide-review-required.yml`). It does **not** test for
-  `## Review:` — that header is presentational. What carries a real review past
-  the gate is the `Riptide Review ·` sign-off, which `assemble_review.py` always
-  writes (both `_build_signoff()` and `_build_success_footer()`).
+- **The CI gate** is `scripts/check_riptide_review.sh`; the workflow only builds its
+  data file from the API and runs the script. It matches a body containing
+  `## 🔍 Findings`, `## 🎯 Summary`, or `Riptide Review ·` as a review, and treats
+  `## Riptide Pass:` as a non-review. Both exclusions — the Companion's complexity
+  pre-pass (`## ✨ Review Required`) and the pass — are anchored to a comment's
+  **first line**, so a review that merely *quotes* those headings is still a
+  review. It does **not** test for `## Review:` — that header is presentational.
+  What carries a real review past the gate is the `Riptide Review ·` sign-off,
+  which `assemble_review.py` always writes (both `_build_signoff()` and
+  `_build_success_footer()`).
 - **The poller's skip decision** uses `deepthink.RIPTIDE_REVIEW_MARKERS`, which
   deliberately excludes `## Riptide Pass:`. A deterministic pass must not make a
   PR look deep-reviewed, or a PR whose review never landed looks reviewed forever.
@@ -42,22 +45,31 @@ enough: dropping it silently un-gates every findings review.
 
 `.github/workflows/riptide-review-required.yml` runs on `pull_request`
 opened/synchronize/reopened (it does **not** re-run on comments, so a gate result
-can be stale — re-run it or push a commit).
+can be stale — re-run it or push a commit). The rule itself is
+`scripts/check_riptide_review.sh`, which takes the comments and the commits (with
+each commit's files) as a data file, so it is exercised offline by
+`riptide/tests/test_review_gate.py` rather than by opening a PR.
 
-1. Selects the **latest** comment whose body contains `## 🔍 Findings`,
-   `## 🎯 Summary`, `Riptide Review ·`, or `## Riptide Pass:`, skipping the
-   Companion's `## ✨ Review Required` pre-pass (it posts before the review and
-   carries 🟡 rows, so counting it would redden clean PRs).
+1. Selects the **latest review** whose body contains `## 🔍 Findings`,
+   `## 🎯 Summary`, or `Riptide Review ·` — preferring it over any `## Riptide
+   Pass:` posted later — and skips the Companion's `## ✨ Review Required` pre-pass
+   (it posts before the review and carries 🟡 rows, so counting it would redden
+   clean PRs). Both skips look at a comment's **first line** only.
 2. No match → fail: *"No Riptide review found on this PR."*
-3. Match with a `| 🔴` or `| 🟡` table row → **fail** until a commit lands after
-   the review (the follow-up-commit rule).
-4. Match without those rows → pass.
+3. Match with a `| 🔴` or `| 🟡` table row → **fail** until a commit after the
+   review touches a file one of those rows names (the follow-up-commit rule). A
+   commit that changes something else does not answer the review. A row whose File
+   cell names no file cannot be matched, so it relaxes that rule and the run says
+   so rather than pretending the row was answered.
+4. Match without those rows → pass. A `## Riptide Pass:` alone also passes, and the
+   run states that no deep review ran on this head — a green check from a pass is
+   not a review of the code.
 
 So a findings-bearing review must emit the 🔴/🟡 severity table
 (`_build_severity_table` in `assemble_review.py`) **and** carry the
 `Riptide Review ·` sign-off: the table rows are what keep the gate red until a
-follow-up commit lands, and the sign-off is what makes the comment match at all.
-The `## Review:` header is for humans — the gate never looks at it.
+commit touches a file they name, and the sign-off is what makes the comment match
+at all. The `## Review:` header is for humans — the gate never looks at it.
 
 ## 3. Review pipeline (Conductor)
 

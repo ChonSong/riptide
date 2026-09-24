@@ -4,12 +4,37 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
+# The gate itself lives in scripts/check_riptide_review.sh so that it can be run
+# and tested without GitHub; this step only feeds it the PR's comments and commits.
+#
+# What the gate enforces, and why each part of it is written the way it is:
+#
+#   * It judges the newest review — a comment recognised by '## 🔍 Findings' /
+#     '## 🎯 Summary' / the 'Riptide Review ·' sign-off. Ordering: a Companion pass
+#     ('## Riptide Pass:') posted after a review would otherwise shadow it, greening
+#     the check while findings stand, so a pass is only used when there is nothing
+#     else.
+#   * A pass is not a review. It satisfies the gate — a PR must not be blocked
+#     forever by a check nothing can clear — and the run reports that fact instead of
+#     letting a green check imply the head was reviewed.
+#   * A findings review needs a commit AFTER it that touches a file the findings
+#     name. It used to accept any commit at all, which greened a check while every
+#     finding stood.
+#   * The Companion's complexity pre-pass ('## ✨ Review Required') is excluded: it
+#     posts BEFORE the deep-think review, carries 🟡 rows, and would otherwise be read
+#     as a findings-bearing review whenever the gate runs in the window between a
+#     push and the review landing.
+#   * Both exclusions are anchored to a comment's FIRST LINE, not the whole body: a
+#     real review that merely quotes one of those headings (as a review of this
+#     selector must) would otherwise be filtered out, and the gate would fall back to
+#     an older comment — silently greening while that review's findings stood.
 jobs:
   check-riptide-review:
     name: Riptide Review Required
     runs-on: ubuntu-latest
     steps:
-      - name: Check for Riptide review + follow-up commit
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - name: Check for Riptide review + addressing commit
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -17,55 +42,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Find the most recent Riptide review.
-          # A review is recognised by '## 🔍 Findings' / '## 🎯 Summary' / the
-          # 'Riptide Review ·' sign-off. The Companion's pass confirmation
-          # ('## Riptide Pass:') also satisfies the gate — it means the
-          # deterministic pass ran and found nothing — but it is deliberately
-          # NOT a review marker, so the poller still asks for a real review.
-          #
-          # The Companion's complexity pre-pass ('## ✨ Review Required') is
-          # excluded: it posts BEFORE the deep-think review, carries 🟡 rows, and
-          # would otherwise be read as a findings-bearing review whenever the gate
-          # runs in the window between a push and the review landing. The test is
-          # anchored to its FIRST LINE, not the whole body: a real review that
-          # merely quotes the heading (as a review of this selector does) must not
-          # be filtered out — that mistake silently hid a findings review.
-          #
-          # Ordering: a Companion pass ('## Riptide Pass:') posted after a review
-          # would otherwise shadow it, greening the check while findings stand. So
-          # prefer the newest non-pass comment and only fall back to a pass when
-          # there is nothing else.
-          REVIEW=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
-            --jq '[.[] | select(((.body | split("\n")[0]) | contains("Review Required")) | not) | select(.body | (contains("## 🔍 Findings") or contains("## 🎯 Summary") or contains("Riptide Review ·") or contains("## Riptide Pass:")))] | sort_by(.created_at) as $all | (($all | map(select((.body | contains("## Riptide Pass:")) | not)) | last) // ($all | last))')
+          # Comments and commits for scripts/check_riptide_review.sh, straight from
+          # the API so no fetch-depth is needed:
+          #   review <id> <created_at> <base64 body>
+          #   commit <sha> <committer-date>
+          #   file   <path changed by that commit>
+          data="$(mktemp)"
+          shas="$(mktemp)"
+          gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
+            --jq '.[] | "review \(.id) \(.created_at) \(.body | @base64)"' >"${data}"
+          gh api "repos/${REPO}/pulls/${PR_NUMBER}/commits" --paginate --jq '.[].sha' >"${shas}"
+          while IFS= read -r sha; do
+            [ -n "${sha}" ] || continue
+            gh api "repos/${REPO}/commits/${sha}" \
+              --jq '"commit \(.sha) \(.commit.committer.date // .commit.author.date)"' >>"${data}"
+            gh api "repos/${REPO}/commits/${sha}" \
+              --jq '(.files // [])[] | "file \(.filename)"' >>"${data}"
+          done <"${shas}"
 
-          REVIEW_ID=$(echo "${REVIEW}" | jq -r '.id // empty')
-
-          if [ -z "${REVIEW_ID}" ]; then
-            echo "::error::No Riptide review found on this PR. Comment '@riptide-bot review' to trigger one."
-            exit 1
-          fi
-
-          # Check if review has findings (🔴 or 🟡 in table rows)
-          HAS_FINDINGS=$(echo "${REVIEW}" | jq -r '
-            if (.body // "" | test("\\|[\\s]*🔴|\\|[\\s]*🟡")) then "true" else "false" end
-          ')
-
-          if [ "${HAS_FINDINGS}" = "false" ]; then
-            echo "Review is clean — no follow-up commit required."
-            exit 0
-          fi
-
-          # Get review timestamp
-          REVIEW_TIME=$(echo "${REVIEW}" | jq -r '.created_at')
-
-          # Check for commits after the review
-          FOLLOWUP_COUNT=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/commits" --paginate \
-            --jq "[.[] | select((.commit.committer.date // .commit.author.date) > \"${REVIEW_TIME}\")] | length")
-
-          if [ "${FOLLOWUP_COUNT}" -eq 0 ]; then
-            echo "::error::Review has findings. At least one commit addressing them is required before merge."
-            exit 1
-          fi
-
-          echo "✅ Follow-up commit(s) found (${FOLLOWUP_COUNT})"
+          bash scripts/check_riptide_review.sh "${data}"
