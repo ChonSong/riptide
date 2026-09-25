@@ -134,8 +134,29 @@ def _cron_job_states() -> "dict[str, dict] | None":
                 "state": job.get("state"),
                 "last_status": job.get("last_status"),
                 "enabled": job.get("enabled"),
+                # Kept so a spawn can tell "this attempt's job" from an earlier
+                # review of the same PR — the name alone is not enough.
+                "run_at": (job.get("schedule") or {}).get("run_at"),
             }
     return states
+
+
+def _job_already_scheduled(name: str, run_at: str) -> bool:
+    """True when a cron job called `name` is already scheduled for `run_at`.
+
+    `hermes cron create` can create the job and *then* outlive the subprocess
+    timeout, so a timed-out attempt may already have scheduled the review.
+    Matching on the name alone would also match an earlier review of the same PR
+    (the name is deterministic per PR), hence run_at.
+
+    An unreadable store returns False on purpose: "unknown" must not read as
+    "already scheduled", or a genuinely failed spawn would be swallowed.
+    """
+    jobs = _cron_job_states()
+    if not jobs:
+        return False
+    info = jobs.get(name)
+    return bool(info) and info.get("run_at") == run_at
 
 
 def _release_finished_reservations(
@@ -559,6 +580,17 @@ def _spawn_deepthink(
     try:
         for attempt in range(max_retries):
             if attempt > 0:
+                # The previous attempt may have created the job before it timed out
+                # (the CLI is sometimes slower than the 15s subprocess timeout).
+                # Recreating with the same --name and run_at would schedule a second
+                # review for the same PR: two Hermes sessions, two bills, one PR.
+                if _job_already_scheduled(name, run_at):
+                    log.info(
+                        f"✓ Spawn already landed for {owner}/{repo}#{pr_number} "
+                        f"({name} at {run_at}) — not recreating"
+                    )
+                    scheduled = True
+                    return True
                 delay = base_delay * (2 ** attempt)  # 5s, 10s, 20s
                 log.info(f"Retry {attempt+1}/{max_retries} for {owner}/{repo}#{pr_number} in {delay}s...")
                 time.sleep(delay)
