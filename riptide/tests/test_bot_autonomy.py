@@ -105,6 +105,41 @@ class TestSpawnRetry:
             assert result is True
             assert mock_run.call_count == 3
 
+    def test_spawn_that_timed_out_after_creating_the_job_does_not_recreate(self, tmp_path):
+        """A create that times out can still have landed — do not schedule a second job.
+
+        `hermes cron create` is occasionally slower than the 15s subprocess timeout:
+        the job is created, the attempt is scored as a failure, and the retry created
+        a *second* job with the same name and the same run_at. That happened for real
+        on 2026-09-24 (two jobs for PR #223, both ran, two review sessions billed).
+        """
+        store = tmp_path / "jobs.json"
+
+        def timeout_but_create(cmd, **kwargs):
+            # Stand-in for `hermes cron create <run_at> <prompt> --name <name>`:
+            # the job lands in the store, then the CLI outlives the timeout.
+            run_at = cmd[3]
+            name = cmd[cmd.index("--name") + 1]
+            store.write_text(json.dumps({
+                "jobs": [{"name": name, "schedule": {"run_at": run_at}, "enabled": True}]
+            }))
+            raise subprocess.TimeoutExpired(cmd="hermes", timeout=15)
+
+        with patch("subprocess.run", side_effect=timeout_but_create) as mock_run, \
+             patch("riptide.deepthink.CRON_JOBS_PATH", store), \
+             patch("time.sleep"), \
+             patch("riptide.deepthink._is_cron_available", return_value=True), \
+             patch("riptide.deepthink._gather_review_data", side_effect=self._gather_data_mock), \
+             patch("riptide.state.StateStore") as mock_state:
+            mock_state.return_value.reserve_job.return_value = True
+            result = _spawn_deepthink("ChonSong", "riptide", 42, "test", "user", 200, "abc123")
+
+        assert result is True
+        assert mock_run.call_count == 1, (
+            "retrying after a timeout that had already created the job "
+            "would schedule a second review for the same PR"
+        )
+
     def test_skips_when_review_already_pending(self):
         """If a review is already pending, raise RuntimeError."""
         with patch("riptide.state.StateStore") as mock_state:
