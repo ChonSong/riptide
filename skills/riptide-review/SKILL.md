@@ -613,7 +613,9 @@ interrupted run, reset that workstream by hand (`read_state` → set status →
   rows, so counting it as a review reddens clean PRs). `## Review:` is not in the selector (removed
   in f7a920a), and the loose `critical`+`warning` clause was removed too — both are now locked by
   `riptide/tests/test_review_gate_workflow.py`, which reads the script's `chosen:` line, and by
-  `riptide/tests/test_review_gate.py`. A findings body without the sign-off is invisible to the gate.
+  `riptide/tests/test_review_gate.py`. A findings body in the current format without the sign-off is
+  invisible to the gate (a legacy body carrying the `## 🔍 Findings` or `## 🎯 Summary` heading still
+  matches).
 - **The pre-pass and pass skips are first-line anchored (fixed by the extracted gate).** Both used to
   be body-substring tests, so a review that *quoted* either heading was itself skipped: on #206 a 🟡
   review (header + table + sign-off) was excluded, the rerun reported `Review is clean — no follow-up

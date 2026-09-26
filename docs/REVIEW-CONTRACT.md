@@ -33,7 +33,8 @@ table.
   review. It does **not** test for `## Review:` — that header is presentational.
   What carries a real review past the gate is the `Riptide Review ·` sign-off,
   which `assemble_review.py` always writes (both `_build_signoff()` and
-  `_build_success_footer()`).
+  `_build_success_footer()`) — for the current format. A legacy body matches on
+  its `## 🔍 Findings` / `## 🎯 Summary` heading alone.
 - **The poller's skip decision** uses `deepthink.RIPTIDE_REVIEW_MARKERS`, which
   deliberately excludes `## Riptide Pass:`. A deterministic pass must not make a
   PR look deep-reviewed, or a PR whose review never landed looks reviewed forever.
@@ -68,8 +69,10 @@ each commit's files) as a data file, so it is exercised offline by
 So a findings-bearing review must emit the 🔴/🟡 severity table
 (`_build_severity_table` in `assemble_review.py`) **and** carry the
 `Riptide Review ·` sign-off: the table rows are what keep the gate red until a
-commit touches a file they name, and the sign-off is what makes the comment match
-at all. The `## Review:` header is for humans — the gate never looks at it.
+commit touches a file they name, and the sign-off is what makes a **current-format**
+comment match at all — a body carrying the legacy `## 🔍 Findings` or `## 🎯 Summary`
+heading matches without it. The `## Review:` header is for humans — the gate never
+looks at it.
 
 ## 3. Review pipeline (Conductor)
 

@@ -430,3 +430,52 @@ def test_a_quoted_row_is_not_a_finding(tmp_path):
     assert proc.returncode == 0
     assert "is clean" in proc.stdout
     assert "finding row(s)" not in proc.stdout
+
+
+# ── Ordering ties, and File cells the parser must read as paths ─────────────
+
+
+def test_a_same_second_review_with_the_higher_id_is_the_newest(tmp_path):
+    """Timestamps are whole seconds and the API returns comments oldest-first, so
+    a strict `>` kept the FIRST of two comments sharing one: a clean review posted
+    in the same second as a later findings review greened the check while those
+    findings stood."""
+    data = write_data(
+        tmp_path,
+        reviews=[
+            (20, REVIEWED_AT, CLEAN_REVIEW),
+            (21, REVIEWED_AT, FINDINGS_REVIEW),
+        ],
+    )
+
+    proc = run_gate(data)
+
+    assert proc.returncode == 1
+    assert "chosen: review 21" in proc.stdout
+
+
+def test_a_file_cell_is_matched_exactly_whatever_characters_it_holds(tmp_path):
+    """The cell's code span is the path. A character-class filter read a filename
+    with a space or a `+` as fileless, which relaxed the rule back to "any commit"
+    instead of matching the commit that touched exactly that file."""
+    for path in ("docs/review notes.md", "src/api+auth.py"):
+        named = FINDINGS_REVIEW.replace("`riptide/companion.py:429`", f"`{path}`")
+        unrelated = write_data(
+            tmp_path,
+            reviews=[(41, REVIEWED_AT, named)],
+            commits=[("bbb", AFTER, ["docs/README.md", "CHANGELOG.md"])],
+            name="unrelated.txt",
+        )
+        touched = write_data(
+            tmp_path,
+            reviews=[(41, REVIEWED_AT, named)],
+            commits=[("bbb", AFTER, [path])],
+            name="touched.txt",
+        )
+
+        missed = run_gate(unrelated)
+        matched = run_gate(touched)
+
+        assert missed.returncode == 1, f"{path}: unrelated commit satisfied the gate"
+        assert "names no file" not in missed.stdout, f"{path}: read as fileless"
+        assert matched.returncode == 0, f"{path}: the touching commit was not matched"

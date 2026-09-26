@@ -144,3 +144,14 @@ def test_the_workflow_runs_the_script_and_keeps_no_inline_selector():
     assert 'contains("## Riptide Pass:")' not in text, (
         "the body-wide pass test is back in the workflow"
     )
+
+
+def test_the_workflow_paginates_a_commit_s_changed_files():
+    """A commit's `files` array is paginated. Without `--paginate` the data file
+    loses the filenames past the first page, and the gate rejects a commit that did
+    touch the file a finding names."""
+    lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
+    files_request = next(i for i, line in enumerate(lines) if "file \\(.filename)" in line)
+    request = "\n".join(lines[max(0, files_request - 3):files_request])
+
+    assert "gh api" in request and "--paginate" in request, request

@@ -160,6 +160,22 @@ done <"$DATA"
 
 first_line() { printf '%s' "${1%%$'\n'*}"; }
 
+# Newest wins, by timestamp rather than by position in the file. Timestamps are
+# whole seconds, so two comments can share one; the tie goes to the higher comment
+# id, because the API hands comments back oldest-first and a strict `>` kept the
+# FIRST of the two — a clean review posted in the same second as a later findings
+# review greened the check while those findings stood.
+newer_than() {
+  local ts="$1" id="$2" best_ts="$3" best_id="$4"
+  if [[ "$ts" != "$best_ts" ]]; then
+    [[ "$ts" > "$best_ts" ]]
+  elif [[ "$id" =~ ^[0-9]+$ && "$best_id" =~ ^[0-9]+$ ]]; then
+    (( id > best_id ))
+  else
+    [[ "$id" > "$best_id" ]]
+  fi
+}
+
 review_index=-1
 pass_index=-1
 
@@ -172,15 +188,16 @@ for i in "${!REVIEW_IDS[@]}"; do
     *"Review Required"*) continue ;;
   esac
   if [[ "$head" == *"Riptide Pass:"* ]]; then
-    if [ "$pass_index" -eq -1 ] || [[ "${REVIEW_TS[$i]}" > "${REVIEW_TS[$pass_index]}" ]]; then
+    if [ "$pass_index" -eq -1 ] || newer_than "${REVIEW_TS[$i]}" "${REVIEW_IDS[$i]}" \
+      "${REVIEW_TS[$pass_index]}" "${REVIEW_IDS[$pass_index]}"; then
       pass_index="$i"
     fi
     continue
   fi
 
   if [[ "$body" == *"## 🔍 Findings"* || "$body" == *"## 🎯 Summary"* || "$body" == *"Riptide Review ·"* ]]; then
-    # Newest wins, by timestamp rather than by position in the file.
-    if [ "$review_index" -eq -1 ] || [[ "${REVIEW_TS[$i]}" > "${REVIEW_TS[$review_index]}" ]]; then
+    if [ "$review_index" -eq -1 ] || newer_than "${REVIEW_TS[$i]}" "${REVIEW_IDS[$i]}" \
+      "${REVIEW_TS[$review_index]}" "${REVIEW_IDS[$review_index]}"; then
       review_index="$i"
     fi
   fi
@@ -229,9 +246,14 @@ named_refs="$(
   printf '%s\n' "$rows" | while IFS= read -r row; do
     [ -n "$row" ] || continue
     cell="$(printf '%s' "$row" | awk -F'|' '{print $(NF-1)}')"
+    # The cell's first code span IS the path: `_build_severity_table` renders
+    # `path` or `path:line`, and a bare `—` when the finding names no file. A
+    # character-class filter here rejected real filenames — spaces, `+`, `@` — and
+    # read those rows as fileless, which relaxed the rule back to "any commit" for
+    # a finding a commit could have matched exactly.
     ref="$(printf '%s' "$cell" | grep -oE '`[^`]+`' | head -n 1 | tr -d '`')"
     case "$ref" in
-      '' | *[!A-Za-z0-9._/:-]*) continue ;;  # no cell, or not a path-shaped token
+      '' | '—') continue ;;  # empty cell, or the no-file placeholder
     esac
     printf '%s\n' "$ref"
   done
