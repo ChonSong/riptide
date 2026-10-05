@@ -15,12 +15,12 @@ what ends each path.*
 | Webhook | PR `opened` / `reopened` / `synchronize` | `riptide/webhook.py` | Companion TL;DR comment; installation + PR context |
 | Webhook, bad signature | Any | `webhook.py` | Returns **200**, not 401, so the cron poller picks the PR up instead of GitHub retrying (`webhook.py:262`) |
 | Review poller (cron) | Every 15 min | `riptide/deepthink.py` | Reservations, spawn attempts; the scheduled review session |
-| Proofshot poller (cron) | Every 10 min | `riptide/proofshotter.py` | UI-file detection; capture attempt (claim retired, see §4) |
+| Proofshot poller (cron) | **Disabled** — schedule `*/10 * * * *` exists but the job `riptide-proofshot-poll` is `enabled: false` (last run 2026-09-17); nothing fires it | `riptide/proofshotter.py` | Would-be: UI-file detection; capture attempt. Claim retired (§4) — do not expect captures |
 | `@riptide-bot review` | Comment (aliases: `deepthink`, `full review`) | webhook → poller | On-demand review, same downstream as the poller |
 | `@riptide-bot fix [description]` | Comment; author, repo owner or ChonSong only | `riptide/fixer.py` | A fix session; ack comment naming the spawned job |
 | `@riptide-bot proofshot` / `visual` | Comment; author or owner | `riptide/visual.py` | User-initiated visual capture (not a bot claim) |
 | `@riptide-bot companion skip` / `resume` | Comment | `webhook.py` | Per-PR Companion state |
-| CI gate `riptide-review-required` | Every push | `.github/workflows/` | Red until a review-shaped comment exists after the head commit |
+| CI gate `riptide-review-required` | Push `opened` / `synchronize` / `reopened` (not comments) | `.github/workflows/` | A review-shaped comment must exist **when the check runs**; a review posted after the push needs the check re-run. A findings-bearing review additionally requires a later commit touching a file a row names; a clean review requires nothing |
 
 ## 2. Variables and identifiers
 
@@ -58,7 +58,7 @@ what ends each path.*
 | `artisan` (ws-3) | Findings path | Diagram; declares `pipeline=["excalidraw", "upload"]` |
 | `engine` (ws-4) | `inputs["command"]` | **Intended**: uploaded diagram URL. **Actual**: cannot deliver it (§4) |
 | `scribe` (ws-5) | Findings, `diagram_url`, model/provider | The posted review body + `Riptide Review ·` sign-off |
-| `warden` | Pipeline artifacts | Verification verdict |
+| `warden` | Pipeline artifacts | Verification verdict — **not a staged workstream**: runs inline inside `conductor._run_workstream` (`conductor.py:175`) as each workstream's acceptance check; no builder creates a `warden` workstream |
 
 ## 4. Stopping conditions, per scenario
 
