@@ -377,7 +377,7 @@ def _spawn_deepthink(
     1. Creates a Conductor track with workstreams (probe → judge → artisan → engine → scribe)
     2. Spawns a Hermes cron session that runs the Conductor
 
-    Retries up to 3 times with exponential backoff (5s/15s/30s).
+    Retries up to 3 times with exponential backoff (5s/10s/20s).
     Reserves a pending job before spawning the review; marks the job as
     complete on success or failed if all attempts fail.
     Returns True if spawned successfully, False otherwise.
