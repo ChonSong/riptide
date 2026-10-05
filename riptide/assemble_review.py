@@ -350,6 +350,12 @@ def review_job_name(owner: str, repo: str, pr_number: int) -> str:
     `hermes cron create --name`) and reused as the Conductor track id
     (`conductor.create_pr_review_pipeline` and its siblings). Keep this the only
     builder — a format change belongs here and nowhere else.
+
+    The "only builder" claim is enforced, not aspirational: both producer
+    modules import this function (pinned by
+    `test_review_provenance.py::test_spawner_and_conductor_bind_the_shared_builder`),
+    and `test_no_module_but_the_builder_formats_the_name` rejects any
+    re-inlined `f"riptide-review-{...}"` in their source.
     """
     return f"riptide-review-{owner}-{repo}-{pr_number}"
 
