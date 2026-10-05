@@ -955,12 +955,13 @@ class Companion:
         # RETIRED: the proofshot-required claim is gone from the TL;DR prompt.
         # Companion used to instruct the model to tell authors that ProofShot
         # visual verification was required, and to hand it a screenshot header to
-        # paste in. Bot 3 cannot produce that evidence: the capture target
-        # (localhost:8788) is occupied by an unrelated application (Hermes WebUI),
-        # the Python entry point ~/workspace/proofshot/cli.py does not exist, and
-        # proofshotter would load `ProofshotSession` from that missing file at
-        # runtime. A claim that cannot be produced is a lie, so it is not asked
-        # for. Reintroduce it only once a capture target actually exists.
+        # paste in. Bot 3 could not produce that evidence: the capture target
+        # defaulted to localhost:8788, which is `hermes-webui-dev.service` — the
+        # Hermes WebUI dev instance, a different application from Riptide — so a
+        # capture there would have posted that app's login page as this PR's
+        # evidence. That default is gone (#220): a repo must declare its target,
+        # and a login gate is refused at capture time. Re-arm the claim only for
+        # a repo whose PRs change a capturable app that declares one.
 
         if is_delta:
             prompt = f"""Write a 2-3 sentence TL;DR focusing on what CHANGED in this latest push to the PR.
@@ -1282,17 +1283,18 @@ ELI5:"""
 
         # RETIRED: UI-file changes no longer append a proofshot-required flag to
         # the posted body. Companion claimed visual verification was required on
-        # every UI change, but Bot 3 has no way to produce it, and the two
-        # reasons are not the ones first recorded here:
-        #   * the capture target (port 8788) is not dead — it is occupied by an
-        #     unrelated application (Hermes WebUI). A capture there would have
-        #     posted that app's login page as evidence for this PR's UI change;
-        #   * the Python entry point `~/workspace/proofshot/cli.py` does not
-        #     exist (its parent directory does), so proofshotter.py's importlib
-        #     load of `ProofshotSession` fails as a missing file at runtime, not
-        #     as a missing module.
-        # The flag promised evidence that cannot be produced; do not re-add it
-        # without a live capture target. `ui_files` is still used below, for the
+        # every UI change, but Bot 3 had no target to produce it from:
+        #   * the capture target defaulted to port 8788, which is not dead — it is
+        #     `hermes-webui-dev.service` (`HERMES_WEBUI_PORT=8788`), the Hermes
+        #     WebUI dev instance and a different application from Riptide. A
+        #     capture there would have posted that app's login page as evidence
+        #     for this PR's UI change. No default survives (#220): the repo
+        #     declares its target, and a login gate is refused at capture time;
+        #   * `~/workspace/proofshot/cli.py` exists again (re-cloned 2026-09-21),
+        #     so proofshotter.py's importlib load of `ProofshotSession` resolves.
+        # The flag promised evidence no repo had declared; do not re-add it until
+        # a repo whose PRs change a capturable app declares a target and the
+        # posted capture proves that app. `ui_files` is still used below, for the
         # interactive checkbox actions only.
 
         # GIF reaction

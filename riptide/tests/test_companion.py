@@ -1220,13 +1220,18 @@ class TestProofShotClaimRetired:
     Bot 3 (proofshotter) cannot produce the evidence the flag promised, for
     reasons narrower than "the host has nothing":
 
-    * the capture target defaults to localhost:8788, which is not dead but
-      occupied by an unrelated application (Hermes WebUI). A capture there would
-      have posted that app's login page as evidence;
-    * the Python entry point ``~/workspace/proofshot/cli.py`` does not exist
-      (its parent directory does), so riptide/proofshotter.py's importlib load of
-      ``ProofshotSession`` fails as a missing file at runtime, not as a missing
-      module; upstream AmElmo/proofshot is a Node CLI and cannot be imported.
+    * the capture target used to default to localhost:8788, which is not dead but
+      is `hermes-webui-dev.service` (`HERMES_WEBUI_PORT=8788`), the Hermes WebUI
+      dev instance and a different application from Riptide. A capture there
+      would have posted that app's login page as evidence. The default is gone
+      (#220): a repo must declare its target, and a login gate is refused at
+      capture time;
+    * when this claim was retired the Python entry point
+      ``~/workspace/proofshot/cli.py`` did not exist (its parent directory did),
+      so riptide/proofshotter.py's importlib load of
+      ``ProofshotSession`` failed as a missing file at runtime, not as a missing
+      module; upstream AmElmo/proofshot is a Node CLI and cannot be imported. The
+      file exists again (re-cloned 2026-09-21).
 
     Flagging every UI change with a demand for visual evidence was therefore a
     claim that could not be honoured, so it was retired rather than shimmed.
@@ -1333,15 +1338,15 @@ class TestProofShotClaimRetired:
         moved into a live path. Two properties keep it inert, both pinned here:
 
         1. no capture result without the CLI: ``_run_proofshot`` returns None
-           while PROOFSHOT_CLI is missing (the file does not exist; its parent
-           directory does), and both call sites bail on that None before posting;
+           while PROOFSHOT_CLI is missing — this test points it at a path that
+           does not exist — and both call sites bail on that None before posting;
         2. the literal itself is confined to the poster function, so it cannot
            appear in the poll loop, a review body, or the TL;DR prompt.
 
-        Restoring ~/workspace/proofshot/cli.py re-arms the whole path, so a
-        future rebuild has to re-validate the capture target: port 8788 is
-        another application (Hermes WebUI), and a capture there would post that
-        app's login page as evidence.
+        `~/workspace/proofshot/cli.py` exists again (re-cloned 2026-09-21), so
+        the missing-CLI property is a test fixture, not a host fact. Re-arming the
+        path now needs a repo to declare a capture target and the guard to accept
+        the captured page (measured: :8790 passes, :8788's login gate is refused).
         """
         import inspect as _inspect
 

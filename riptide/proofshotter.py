@@ -3,9 +3,10 @@
 
 Cron-polled worker that:
   1. Polls open PRs for UI changes
-  2. Runs proofshot Playwright captures on the dev instance
-     (proofshot.config.json is optional — defaults to localhost:8788
-      if absent; include one in the PR root for custom captures/seed)
+  2. Runs proofshot Playwright captures against a target the repo declares
+     (`url` in proofshot.config.json, or RIPTIDE_PROOFSHOT_URL). There is no
+     default: a repo that declares neither is skipped rather than having captures
+     pointed at whatever happens to be listening on a dev port.
   3. Posts visual evidence (GIF + optional screenshots) as a GitHub PR comment
 
 Dedup: tracks pr_number + head_sha to avoid re-running on the same revision.
@@ -27,6 +28,7 @@ import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 from multiprocessing import Process, Queue
 
 logging.basicConfig(
@@ -208,6 +210,9 @@ def _session_worker(
         session = ProofshotSession(url, str(output_dir), seed_path)
         session.start()
 
+        # Refuse to treat a login/onboarding gate as this PR's evidence.
+        _assert_capture_is_app_shell(session.page, url)
+
         if captures:
             for c in captures:
                 wait_ms = c.get("wait", 0)
@@ -312,6 +317,9 @@ def _run_proofshot_direct(
         session = ProofshotSession(url, str(output_dir), seed_path)
         session.start()
 
+        # Refuse to treat a login/onboarding gate as this PR's evidence.
+        _assert_capture_is_app_shell(session.page, url)
+
         if captures:
             for c in captures:
                 wait_ms = c.get("wait", 0)
@@ -407,6 +415,7 @@ def _post_proofshot_comment(
     owner: str, repo: str, pr_number: int,
     gif_url: str, commit_sha: str = "", commit_message: str = "",
     screenshots: Optional[list[str]] = None, pr_created_at: Optional[str] = None,
+    captured_url: str = "",
 ) -> bool:
     """Post the ProofShot visual evidence comment on the PR."""
     body_parts = [
@@ -416,11 +425,15 @@ def _post_proofshot_comment(
         # Shorten commit message to first line, max 60 chars
         msg = commit_message.split("\n")[0][:60] if commit_message else ""
         body_parts.append(f"**Commit `{commit_sha[:8]}`:** {msg}\n")
-    # RETIRED CLAIM PATH: unreachable while ~/workspace/proofshot/cli.py is missing.
-    # Before restoring that file, check what is actually listening on the capture
-    # target: port 8788 is currently the Hermes WebUI, so a capture there would post
-    # an unrelated app's login page as evidence. Validate the target, then re-arm.
-    body_parts.append("ProofShot visual verification completed for the UI changes in this PR.\n")
+    # This line only renders for a capture that already passed
+    # _assert_capture_is_app_shell, so "completed" is backed by a checked page
+    # rather than by the capture having exited 0. Do not move it above that guard.
+    verified = f" against `{captured_url}`" if captured_url else ""
+    body_parts.append(
+        f"ProofShot visual verification completed{verified} for the UI changes "
+        f"in this PR — the captured page was checked for a login gate before "
+        f"posting.\n"
+    )
     body_parts.append(f"![ProofShot GIF]({gif_url})\n")
 
     if screenshots:
@@ -512,6 +525,94 @@ def _get_commit_file_map(owner: str, repo: str, pr_number: int) -> list[dict]:
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 
+class CaptureTargetError(RuntimeError):
+    """The capture target is not the application under review."""
+
+
+# A login (or onboarding) gate answers 200, so a status code cannot tell it apart
+# from the app shell. These selectors can — but only when the match is *rendered*
+# (see _find_login_gate): the app shell itself contains hidden password fields.
+_LOGIN_GATE_SELECTORS = (
+    "input[type=password]",
+    "#login-form",
+    "form[action*='login']",
+)
+
+
+def _resolve_capture_target(config: Optional[dict]) -> Optional[str]:
+    """The URL Bot 3 may capture for this repo, or None when none is declared.
+
+    This used to fall back to `http://localhost:8788` in three places, so any repo
+    with a UI change silently captured whatever sat on the developer's dev port --
+    a login page, or an unrelated app -- and posted it as that PR's evidence. A
+    target must now be declared, by the PR's `proofshot.config.json` (`url`) or by
+    an explicit `RIPTIDE_PROOFSHOT_URL`; a repo that declares neither is skipped
+    rather than inheriting a guess.
+    """
+    if config:
+        url = config.get("url")
+        if url:
+            return url
+    return os.environ.get("RIPTIDE_PROOFSHOT_URL") or None
+
+
+def _find_login_gate(page) -> Optional[str]:
+    """The first *rendered* login gate on the page, or None.
+
+    Presence is not enough — visibility is the test. The hermes-webui app shell
+    serves two `input[type=password]` fields in its settings forms
+    (`#settingsPassword`, `#settingsCurrentPassword`), both hidden. Matching on
+    presence alone refused a real capture of the dedicated :8790 instance, title
+    "Hermes", HTTP 200: a guard that fires on the app itself is worse than no
+    guard, because it silently reports every capture as impossible.
+
+    The gate it must catch instead redirects to `/login` and renders one *visible*
+    `#pw` inside `#login-form` ("Hermes — Sign in", "Enter your password to
+    continue").
+    """
+    path = urlparse(getattr(page, "url", "") or "").path
+    if path.rstrip("/").endswith("/login"):
+        return f"redirected to {path}"
+
+    query = getattr(page, "query_selector", None)
+    if not callable(query):
+        return None
+    for selector in _LOGIN_GATE_SELECTORS:
+        element = query(selector)
+        if element is None:
+            continue
+        is_visible = getattr(element, "is_visible", None)
+        # Test doubles expose no is_visible(); a match with no visibility API is
+        # treated as rendered, which keeps the selector-matching contract intact.
+        if callable(is_visible) and not is_visible():
+            continue
+        return selector
+    return None
+
+
+def _assert_capture_is_app_shell(page, expected_url: str) -> None:
+    """Raise `CaptureTargetError` unless `page` is the app, not a gate.
+
+    Checked against the rendered DOM: a login page is served with HTTP 200, so a
+    screenshot of it would be posted as this PR's "visual verification" while
+    showing an unrelated screen.
+    """
+    gate = _find_login_gate(page)
+    if gate:
+        raise CaptureTargetError(
+            f"{expected_url} rendered a login form ({gate}); refusing to post a "
+            f"login page as visual evidence"
+        )
+
+    expected_host = urlparse(expected_url).netloc
+    actual_host = urlparse(getattr(page, "url", "") or "").netloc
+    if expected_host and actual_host and actual_host != expected_host:
+        raise CaptureTargetError(
+            f"capture target redirected off {expected_host} to {actual_host}; "
+            f"the evidence would not show the app under review"
+        )
+
+
 def run():
     """Poll watched repos and run ProofShot on qualifying PRs."""
     state = _load_state()
@@ -519,6 +620,7 @@ def run():
     cutoff = now - timedelta(minutes=STALENESS_MINUTES)
     triggered = 0
     skipped_no_ui = 0
+    skipped_no_target = 0
     skipped_stale = 0
     skipped_draft = 0
     skipped_dedup = 0
@@ -630,10 +732,9 @@ def run():
                 continue
 
             # Check for proofshot.config.json (optional enrichment)
-            config = _check_proofshot_config(owner, repo_name, pr_number, head_sha)
-            if config is None:
+            config = _check_proofshot_config(owner, repo_name, pr_number, head_sha) or {}
+            if not config:
                 log.info("  #%d no proofshot.config.json — using defaults", pr_number)
-                config = {"url": os.environ.get("RIPTIDE_PROOFSHOT_URL", "http://localhost:8788"), "captures": []}
 
             # Resolve seed path (relative to repo root in the checkout)
             seed_path: Optional[str] = None
@@ -645,7 +746,14 @@ def run():
                 else:
                     log.warning("  Seed file %s not found at %s", raw_seed, candidate)
 
-            url = config.get("url", os.environ.get("RIPTIDE_PROOFSHOT_URL", "http://localhost:8788"))
+            url = _resolve_capture_target(config)
+            if url is None:
+                log.info(
+                    "  #%d skip — no capture target declared (set \"url\" in "
+                    "proofshot.config.json, or RIPTIDE_PROOFSHOT_URL)", pr_number,
+                )
+                skipped_no_target += 1
+                continue
             captures = config.get("captures", [])
 
             # Run proofshot for each commit that touched UI files
@@ -679,6 +787,7 @@ def run():
                     commit_sha=commit_sha, commit_message=commit_msg,
                     screenshots=result.get("screenshots"),
                     pr_created_at=created_at_str,
+                    captured_url=url,
                 ):
                     triggered += 1
 
@@ -689,10 +798,10 @@ def run():
     # ── Summary ─────────────────────────────────────────────────────────
     log.info(
         "Done. Triggered=%d, skipped(draft)=%d, skipped(stale)=%d, "
-        "skipped(no-UI)=%d, "
+        "skipped(no-UI)=%d, skipped(no-target)=%d, "
         "skipped(dedup)=%d, skipped(error)=%d",
         triggered, skipped_draft, skipped_stale,
-        skipped_no_ui,
+        skipped_no_ui, skipped_no_target,
         skipped_dedup, skipped_error,
     )
 
@@ -757,9 +866,7 @@ def handle_manual_command(
         return "❌ Failed to checkout PR branch."
 
     # Config
-    config = _check_proofshot_config(owner, repo, pr_number, head_sha)
-    if config is None:
-        config = {"url": "http://localhost:8788", "captures": []}
+    config = _check_proofshot_config(owner, repo, pr_number, head_sha) or {}
 
     # Seed
     seed_path: Optional[str] = None
@@ -769,7 +876,13 @@ def handle_manual_command(
         if candidate.exists():
             seed_path = str(candidate.resolve())
 
-    url = config.get("url", os.environ.get("RIPTIDE_PROOFSHOT_URL", "http://localhost:8788"))
+    url = _resolve_capture_target(config)
+    if url is None:
+        return (
+            "❌ No capture target declared for this repo. Add `\"url\"` to "
+            "`proofshot.config.json` (the dedicated test instance, e.g. "
+            "`http://localhost:8790`), or set `RIPTIDE_PROOFSHOT_URL`."
+        )
     captures = config.get("captures", [])
     output_dir = Path(f"/tmp/proofshot-pr-{owner}-{repo}-{pr_number}")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -785,11 +898,19 @@ def handle_manual_command(
         return "❌ Failed to upload GIF."
 
     # Post
-    _post_proofshot_comment(
+    posted = _post_proofshot_comment(
         owner, repo, pr_number, gif_url,
         screenshots=result.get("screenshots"),
         pr_created_at=pr_created_at,
+        captured_url=url,
     )
+    if not posted:
+        # The capture exists but its evidence comment does not, so reporting the
+        # proofshot as complete would be a claim with nothing behind it.
+        return (
+            f"❌ Capture for PR #{pr_number} succeeded but posting the evidence "
+            f"comment failed — see the service log."
+        )
 
     # Mark as visualized (manual trigger)
     mark_visualized(owner, repo, pr_number, head_sha, triggered_by="manual")
