@@ -77,7 +77,7 @@ def select_skills(depth: ReviewDepth) -> list[str]:
     elif depth == ReviewDepth.INLINE_ONLY:
         return ["deep-think", "github-pr-lifecycle"]
     elif depth == ReviewDepth.STANDARD:
-        return ["deep-think", "github-pr-lifecycle", "excalidraw"]
+        return ["deep-think", "github-pr-lifecycle"]
     elif depth == ReviewDepth.ARCH:
-        return ["deep-think", "github-pr-lifecycle", "excalidraw", "brooks-lint"]
+        return ["deep-think", "github-pr-lifecycle", "brooks-lint"]
     return ["deep-think"]

@@ -101,11 +101,14 @@ class TestSelectSkills:
         ]
 
     def test_standard_skills(self):
+        # No excalidraw: the skill is disabled, so requesting it only logged a
+        # "skill not found and skipped" warning; the diagram is built by
+        # grafiphy/orchestrator and uploaded by scripts/upload_excalidraw.py.
         assert _d.select_skills(_d.ReviewDepth.STANDARD) == [
-            "deep-think", "github-pr-lifecycle", "excalidraw"
+            "deep-think", "github-pr-lifecycle"
         ]
 
     def test_arch_skills_includes_brooks(self):
         assert _d.select_skills(_d.ReviewDepth.ARCH) == [
-            "deep-think", "github-pr-lifecycle", "excalidraw", "brooks-lint"
+            "deep-think", "github-pr-lifecycle", "brooks-lint"
         ]
