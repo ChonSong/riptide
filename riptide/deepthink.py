@@ -33,6 +33,7 @@ import structlog
 from riptide.state import StateStore
 from riptide.depth import ReviewDepth, classify_review_depth, select_skills  # noqa: F401 (re-exported for back-compat)
 from riptide.review_memory import get_memory_context
+from riptide.finding_status import refresh_review_status
 
 logging.basicConfig(
     level=logging.INFO,
@@ -917,6 +918,15 @@ def run():
             total_loc = pr.get("additions", 0) + pr.get("deletions", 0)
             updated_at_str = pr.get("updatedAt", "")
             head_sha = pr.get("headRefOid", "")
+
+            # A review's findings outlive the code they describe: keep the newest
+            # findings review's status block current so a reader (and the CI gate)
+            # can see what still stands. Cheap when there is nothing to do — one
+            # comment fetch, no writes — and it must never stop the poll.
+            try:
+                refresh_review_status(owner, repo_name, pr_number)
+            except Exception as exc:
+                log.warning(f"  #{pr_number} finding-status refresh failed: {exc}")
 
             # Filter 3: Ownership
             if owner != OUR_ORG and pr_author != OUR_USERNAME:
