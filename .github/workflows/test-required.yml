@@ -1,4 +1,5 @@
 name: test-required
+
 on:
   pull_request:
     types: [opened, synchronize]
@@ -7,33 +8,37 @@ concurrency:
   group: test-required-${{ github.ref }}
   cancel-in-progress: true
 
+# Reads the PR's commits and their changed files through the API only.
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
   check:
     runs-on: ubuntu-latest
     steps:
+      # The gate itself lives in scripts/check_test_required.sh so that it can be
+      # run and tested without GitHub; this step only feeds it data.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
-        with:
-          fetch-depth: 0
       - name: Check that feat/fix commits include test changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          # Get all commits in this PR (excluding base)
-          base="${{ github.event.pull_request.base.sha }}"
-          head="${{ github.event.pull_request.head.sha }}"
-          commits=$(git rev-list "$base..$head" 2>/dev/null || echo "")
-          [ -z "$commits" ] && echo "No feat/fix commits to check" && exit 0
-          for sha in $commits; do
-            msg=$(git log -1 --format=%s "$sha")
-            files=$(git diff-tree --no-commit-id -r --name-only "$sha" | tr '\n' ' ')
-            # Only check feat: / fix: prefixed commits
-            case "$msg" in
-              feat:*|fix:*|feat\(*\):*|fix\(*\):*)
-                test_files=$(echo "$files" | grep -Eo 'test[_/]|\.test\.|_test\.py' || true)
-                if [ -z "$test_files" ]; then
-                  echo "::error::Commit $sha ($msg) adds/changes no test files. Feat/fix commits must include paired test changes."
-                  exit 1
-                fi
-                ;;
-            esac
-          done
-          echo "All feat/fix commits have paired test changes."
+          # Commit data for scripts/check_test_required.sh, straight from the API
+          # so no git history or fetch-depth is needed:
+          #   commit  <sha>
+          #   message <base64 of the full commit message>
+          #   file    <changed path>
+          data="$(mktemp)"
+          shas="$(mktemp)"
+          gh api "repos/$REPO/pulls/$PR_NUMBER/commits" --paginate --jq '.[].sha' > "$shas"
+          while IFS= read -r sha; do
+            [ -n "$sha" ] || continue
+            echo "commit $sha" >> "$data"
+            gh api "repos/$REPO/commits/$sha" --jq '"message \(.commit.message | @base64)"' >> "$data"
+            gh api "repos/$REPO/commits/$sha" --jq '(.files // [])[] | "file \(.filename)"' >> "$data"
+          done < "$shas"
+          bash scripts/check_test_required.sh "$data"

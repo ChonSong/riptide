@@ -49,7 +49,7 @@ and `curl -s localhost:8477/health`.
 riptide/
 ├── riptide/
 │   ├── github_app.py      # JWT auth, GitHub API client
-│   ├── companion.py       # Bot 1: TL;DR + ELI5 + ProofShot flagger
+│   ├── companion.py       # Bot 1: TL;DR + ELI5 (proofshot flag retired)
 │   ├── deepthink.py       # Bot 2: Cron polling + Hermes deep-think spawner
 │   ├── fixer.py           # Bot 2b: Autonomous fix (edit/commit/push)
 │   ├── proofshotter.py    # Bot 3: Cron-polled proofshot visual verification
@@ -87,7 +87,17 @@ is not.
 ### Bot 1: Companion (Webhook-Triggered)
 - Triggered by `pull_request` opened/reopened/synchronize
 - Posts TL;DR comment with graphify-informed blast radius
-- Flags "📸 ProofShot Required" when UI files change
+- Does **not** flag proofshot: the "📸 ProofShot Required" claim is RETIRED, so
+  Companion stays silent on UI-file changes. Bot 3 has no capture target
+  (port 8788 is `hermes-webui-dev.service`, this project's own dev instance —
+  not "an unrelated application", as an earlier note here claimed. It is a live,
+  logged-in instance serving `master`, so a capture there both races with its user
+  and cannot show a PR's change). `~/workspace/proofshot/cli.py` now exists (the
+  corrupt clone was re-made), and `proofshotter.py` loads `ProofshotSession` from it
+  via importlib. The capture target must now be **declared** (`url` in
+  `proofshot.config.json`, or `RIPTIDE_PROOFSHOT_URL`); a repo declaring neither is
+  skipped rather than inheriting a dev port. Re-arm the claim only once a capture is
+  proven to render the app shell rather than a login gate.
 - Uses local Ollama (`qwen2.5-coder:7b`) at `http://localhost:11434`
 - Skip/resume per PR via `@riptide-bot companion skip/resume`
 - On-demand deep-think review via `@riptide-bot review` (alias: `deepthink`, `full review`)
@@ -102,7 +112,6 @@ is not.
   (`RIPTIDE_DEEPTHINK_MODEL`/`_PROVIDER`). **Check `.env`, don't assume** — the code
   defaults (`LongCat-2.0`/`longcat`) are fallbacks only and are not what prod runs
 - Posts review comment with findings
-- Notes missing proofshot evidence in review comment
 - Dedup: same SHA + 24h cooldown, **plus a check that a review comment was actually
   delivered** — SHA-only dedup skipped PRs whose review never landed
 - Reservations are released when the job completes/vanishes or the review is
@@ -120,6 +129,15 @@ is not.
 - Fork/foreign PRs get a comment-only patch with a "cannot push" note
 - Safety: no force-push, no secret edits, no push on red tests, Conventional Commits
 - Instant ack comment ("🛠 Riptide Fix triggered"), then summary with verdicts
+- Ack comment names the spawned Hermes job (`riptide-fix-<owner>-<repo>-<n>`,
+  from `_fix_job_name`) so it can be chased with `hermes cron list`
+- `@riptide-bot fix` never writes `fix_queue`: nothing drains it
+  (`process_fix_queue` is unwired), so a row would block that PR permanently — the
+  busy check counts it — and silently swallow every later request. When the Hermes
+  cron CLI is absent the command says it could not start instead.
+- A `queued` row only blocks while it is younger than `QUEUE_BLOCK_MAX_AGE_SECONDS`
+  (= `FIX_TTL_SECONDS`, 2h), so a row left behind by an older deployment cannot hold
+  the gate.
 
 ### Bot 1: Companion State Reporting
 - Companion TL;DR footer includes Bot 2 status when state file is present:
@@ -129,10 +147,25 @@ is not.
 
 ### Bot 3: Proofshotter (Cron-Triggered)
 - Polls open PRs every 10 min via `riptide/proofshotter.py`
-- Checks for UI file changes; runs proofshot Playwright captures on the dev instance (localhost:8788)
-- `proofshot.config.json` is optional — defaults to `localhost:8788` if absent; include for custom captures/seed
-- **Prerequisite:** `RIPTIDE_PROOFSHOT_CLI` must point at an existing proofshot CLI;
-  if the dev instance is down, captures are skipped (never faked)
+- Checks for UI file changes, then captures against a target the repo must
+  **declare**: `url` in `proofshot.config.json`, or `RIPTIDE_PROOFSHOT_URL`. There
+  is no default — a repo declaring neither is skipped (`skipped(no-target)` in the
+  run summary) instead of inheriting a dev port.
+- The dedicated test instance for the Hermes WebUI suite is **:8790**, booted with
+  `HERMES_WEBUI_SKIP_ONBOARDING=1` (see
+  `hermes-webui-tests/.github/workflows/visual.yml`). :8788 is
+  `hermes-webui-dev.service` — the developer's own running instance — so capturing
+  it both races with that user and cannot show a PR's change (`dev` serves
+  `master`, not the PR branch). The auth fixture in `hermes-webui-tests` is a
+  no-op: it does not log in, it relies on that skip-onboarding flag.
+- Before anything is posted, the captured page is checked for a login gate
+  (`_assert_capture_is_app_shell`). A login page answers 200, so a status code
+  cannot tell it from the app shell, and posting one as evidence is a false claim;
+  a refusal fails the capture loudly rather than posting.
+- **Prerequisite:** `RIPTIDE_PROOFSHOT_CLI` must point at an existing proofshot CLI,
+  and `playwright` (package *and* a browser build) must be importable by the
+  service's interpreter; if any of that is missing, or the declared target is down,
+  captures are skipped (never faked)
 - Posts visual evidence (GIF/screenshots) as PR comment
 - Dedup: SHA-based only — new commits with UI changes automatically retrigger (no 24h cooldown)
 
@@ -144,8 +177,11 @@ The load-bearing rules:
 - A findings-bearing review must carry the `Riptide Review ·` sign-off (always
   emitted by `assemble_review.py`) **and** the 🔴/🟡 severity table. The
   `## Review:` header is human-facing — the gate does **not** test for it. The
-  table rows are what keep the gate red until a follow-up commit lands, and the
-  sign-off is what makes the comment match at all. The gate also ignores the
+  table rows are what keep the gate red until a commit **touching a file a row
+  names** lands — not any follow-up commit; the sign-off is what makes the
+  comment match under the selector's *current* anchored-first-line format (a
+  later non-review comment that merely names the sign-off must not match).
+  The gate also ignores the
   Companion's `## ✨ Review Required` complexity pre-pass: it posts *before* the
   review and carries 🟡 rows, so treating it as a review reddens clean PRs.
 - `## Riptide Pass: ✅ No findings` is the Companion's deterministic pass — **not**
@@ -201,6 +237,25 @@ it at the root to rot.
 - Conventional Commits: `feat(scope): …`, `fix(scope): …`, `chore(deps): …`
 - One change per PR
 - `fix:`/`feat:` commits must carry tests — the `test-required` gate enforces it
+- The gate is `scripts/check_test_required.sh` (tested by
+  `riptide/tests/test_test_required_gate.py`); `.github/workflows/test-required.yml`
+  only feeds it the PR's commits. A `fix:`/`feat:` commit passes when it touches a
+  test file **or** carries a `No-Tests: <reason>` trailer in the commit body. Use
+  that trailer only when there is genuinely no test to add, and say what you
+  checked in place of one — restoring code a merge dropped, or a CI/config-only
+  fix. A `fix:`/`feat:` commit with neither is still red, and an empty reason is
+  not an exemption:
+
+  ```text
+  fix(state): restore the review_memory schema
+
+  No-Tests: restores a hunk a merge dropped; riptide/tests/test_state.py already
+  covers the path, so there is no new behaviour to test.
+  ```
+
+  The trailer must be the trailing block of the commit body (a `No-Tests:` line in
+  the subject, or one followed by a later paragraph, is not a trailer), the token
+  is matched case-insensitively, and the reason must be non-empty.
 
 ## What not to do
 

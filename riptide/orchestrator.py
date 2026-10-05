@@ -270,15 +270,38 @@ class T0Orchestrator:
     def _dispatch_t3_visual(self, profile: TaskProfile) -> dict:
         """Dispatch to T3 (proofshot visual capture)."""
         try:
-            from riptide.proofshotter import _checkout_pr, _run_proofshot, _upload_gif, _post_proofshot_comment
-            
+            from riptide.proofshotter import (
+                _check_proofshot_config, _checkout_pr, _post_proofshot_comment,
+                _resolve_capture_target, _run_proofshot, _upload_gif,
+            )
+
+            # Same contract as the poller, which this path used to bypass with its
+            # own `RIPTIDE_PROOFSHOT_URL` or `http://localhost:8788` default. That
+            # default captured whatever was listening on the dev port — currently
+            # the Hermes WebUI's login page — and posted it as this PR's evidence.
+            # A target must be declared by the PR's `proofshot.config.json` or by
+            # the environment; nothing is captured on a guess.
+            config = _check_proofshot_config(
+                profile.owner, profile.repo, profile.pr_number, profile.head_sha,
+            ) or {}
+            target = _resolve_capture_target(config)
+            if not target:
+                return {
+                    "status": "error",
+                    "tier": "t3_visual",
+                    "body": (
+                        "No capture target declared — set \"url\" in the repo's "
+                        "proofshot.config.json or RIPTIDE_PROOFSHOT_URL"
+                    ),
+                }
+
             work_dir = _checkout_pr(profile.owner, profile.repo, profile.pr_number)
             if not work_dir:
                 return {"status": "error", "tier": "t3_visual", "body": "Checkout failed"}
             
             result = _run_proofshot(
                 profile.pr_number,
-                url=os.environ.get("RIPTIDE_PROOFSHOT_URL", "http://localhost:8788"),
+                url=target,
                 seed_path=None,
                 output_dir=Path(f"/tmp/proofshot-pr-{profile.owner}-{profile.repo}-{profile.pr_number}"),
                 captures=[],

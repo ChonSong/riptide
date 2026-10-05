@@ -481,16 +481,23 @@ class TestHandleFixCommand:
                 result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "test-user", "")
         assert "⚠️ Failed to spawn fix session for #42" in result
 
-    def test_returns_error_when_spawn_not_reserved(self):
+    def test_cron_unavailable_reports_it_cannot_start(self):
         client = _make_client(pr_details=_pr_details())
-        with patch("riptide.state.StateStore") as mock_store:
+        # The Hermes cron CLI is absent on this host → spawning is impossible.
+        # The command must say so and must NOT queue: nothing drains fix_queue,
+        # so a row would block this PR forever.
+        with patch("riptide.state.StateStore") as mock_store, \
+             patch("riptide.fixer._is_cron_available", return_value=False):
             mock_store.return_value.has_running_fix.return_value = False
             mock_store.return_value.get_queue_length.return_value = 0
-            mock_store.return_value.enqueue_fix.return_value = 1
-            mock_store.return_value.get_queue_position.return_value = 1
             with patch("riptide.fixer._spawn_fix", return_value=False):
                 result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "test-user", "")
-        assert "queued" in result
+
+        mock_store.return_value.enqueue_fix.assert_not_called()
+        assert "Hermes cron CLI is not available on this host" in result
+        assert "Could not start a fix for #42" in result
+        assert "Nothing was queued" in result
+        assert "Riptide Fix triggered" not in result
 
     def test_db_lock_retry_then_success(self):
         """If DB locks once then succeeds, command proceeds normally."""
@@ -519,6 +526,353 @@ class TestHandleFixCommand:
         assert result is not None
         assert "triggered" in result
         assert call_count[0] == 2  # First call locked, retry succeeded
+
+
+# ── ack ↔ job name, and fix_queue as a fallback only ────────────────────────
+
+
+class TestFixAckNamesTheJob:
+    """The ack must name the job a reader can chase (`hermes cron list`).
+
+    The name comes from `_fix_job_name` — the same helper `_spawn_fix` hands to
+    `hermes cron create --name` — so the two cannot drift apart.
+    """
+
+    def test_ack_names_the_hermes_job(self):
+        client = _make_client(pr_details=_pr_details())
+        with patch("riptide.state.StateStore") as mock_store:
+            mock_store.return_value.has_running_fix.return_value = False
+            mock_store.return_value.get_queue_length.return_value = 0
+            with patch("riptide.fixer._spawn_fix", return_value=True):
+                result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "test-user", "")
+        assert "riptide-fix-ChonSong-riptide-42" in result
+        assert "hermes cron list" in result
+
+    def test_ack_keeps_the_trigger_marker(self):
+        """`Riptide Fix triggered` is load-bearing (poller.py keys off it)."""
+        client = _make_client(pr_details=_pr_details())
+        with patch("riptide.state.StateStore") as mock_store:
+            mock_store.return_value.has_running_fix.return_value = False
+            mock_store.return_value.get_queue_length.return_value = 0
+            with patch("riptide.fixer._spawn_fix", return_value=True):
+                result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "test-user", "")
+        assert "🛠 **Riptide Fix triggered for #42!**" in result
+        assert "Riptide Fix triggered" in result
+
+    def test_ack_job_name_is_the_name_handed_to_hermes(self):
+        """Byte-equality: `cron create --name` value == the name quoted in the ack."""
+        # What the real spawn path puts on the command line
+        with patch("riptide.state.StateStore") as mock_state, \
+             patch("riptide.fixer._is_cron_available", return_value=True), \
+             patch("subprocess.run") as mock_run:
+            mock_state.return_value.reserve_job.return_value = True
+            mock_run.return_value = MagicMock(returncode=0, stdout="Created job", stderr="")
+            spawned_ok = _spawn_fix(
+                owner="ChonSong", repo="riptide", pr_number=42,
+                pr_title="fix: repair flaky test", pr_author="test-user",
+                total_loc=150, head_sha="abc123def4567890", head_ref="fix-branch",
+                description="", push_eligible=True,
+            )
+        assert spawned_ok is True
+        cmd = mock_run.call_args[0][0]
+        hermes_name = cmd[cmd.index("--name") + 1]
+
+        client = _make_client(pr_details=_pr_details())
+        with patch("riptide.state.StateStore") as mock_store:
+            mock_store.return_value.has_running_fix.return_value = False
+            mock_store.return_value.get_queue_length.return_value = 0
+            with patch("riptide.fixer._spawn_fix", return_value=True):
+                ack = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "test-user", "")
+
+        assert hermes_name in ack
+
+
+class TestFixQueueIsFallbackOnly:
+    """fix_queue is never written by `@riptide-bot fix`.
+
+    Regression cover for two defects:
+      * PR #208 — one trigger both spawned a session and wrote a fix_queue row
+        nothing drains (the row landed 71s after the fix had already pushed).
+      * PR #215 review — the "Hermes cron CLI unavailable" path wrote that row
+        as its fallback, and the busy check counted it, so the row blocked every
+        later `@riptide-bot fix` on the PR forever, silently. Nothing drains
+        fix_queue (`process_fix_queue` is unwired), so the path must refuse out
+        loud instead of queueing.
+    """
+
+    def _client(self):
+        return _make_client(pr_details=_pr_details())
+
+    def test_successful_spawn_does_not_enqueue(self):
+        client = self._client()
+        with patch("riptide.state.StateStore") as mock_store:
+            mock_store.return_value.has_running_fix.return_value = False
+            mock_store.return_value.get_queue_length.return_value = 0
+            with patch("riptide.fixer._spawn_fix", return_value=True):
+                result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "test-user", "")
+        mock_store.return_value.enqueue_fix.assert_not_called()
+        mock_store.return_value.get_queue_position.assert_not_called()
+        assert "Riptide Fix triggered" in result
+
+    def test_successful_spawn_leaves_fix_queue_empty(self, tmp_path, monkeypatch):
+        """Real StateStore: one successful trigger writes zero fix_queue rows."""
+        from riptide.state import StateStore
+        from riptide import state as state_mod
+
+        db_path = str(tmp_path / "test.db")
+        monkeypatch.setattr(state_mod, "StateStore", lambda: StateStore(db_path=db_path))
+
+        with patch("riptide.fixer._spawn_fix", return_value=True):
+            result = handle_fix_command(self._client(), 1, "ChonSong", "riptide", 42, "test-user", "")
+
+        assert "Riptide Fix triggered" in result
+        store = StateStore(db_path=db_path)
+        rows = store._get_conn().execute("SELECT COUNT(*) FROM fix_queue").fetchone()[0]
+        assert rows == 0, "a spawned fix must not also write a fix_queue row"
+
+    def test_busy_same_pr_does_not_enqueue_a_duplicate(self):
+        """A fix already pending for this PR: answer, write nothing, spawn nothing."""
+        client = self._client()
+        with patch("riptide.state.StateStore") as mock_store, \
+             patch("riptide.fixer._spawn_fix") as mock_spawn:
+            mock_store.return_value.has_running_fix.return_value = True
+            mock_store.return_value.get_running_fix_pr.return_value = 42
+            result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "test-user", "")
+
+        mock_store.return_value.enqueue_fix.assert_not_called()
+        mock_spawn.assert_not_called()
+        assert "already in progress" in result
+        assert "Riptide Fix triggered" not in result
+
+    def test_busy_other_pr_does_not_enqueue_a_duplicate(self):
+        """Global gate held by another PR: tell the reader, write nothing."""
+        client = self._client()
+        with patch("riptide.state.StateStore") as mock_store, \
+             patch("riptide.fixer._spawn_fix") as mock_spawn:
+            mock_store.return_value.has_running_fix.return_value = True
+            mock_store.return_value.get_running_fix_pr.return_value = 7
+            result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "test-user", "")
+
+        mock_store.return_value.enqueue_fix.assert_not_called()
+        mock_spawn.assert_not_called()
+        assert "#7" in result
+        assert "not queued" in result
+
+    def test_spawn_refused_with_cron_available_does_not_enqueue(self):
+        """Spawn came back False while the CLI exists → duplicate, never queued."""
+        client = self._client()
+        with patch("riptide.state.StateStore") as mock_store, \
+             patch("riptide.fixer._is_cron_available", return_value=True):
+            mock_store.return_value.has_running_fix.return_value = False
+            mock_store.return_value.get_queue_length.return_value = 0
+            with patch("riptide.fixer._spawn_fix", return_value=False):
+                result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "test-user", "")
+
+        mock_store.return_value.enqueue_fix.assert_not_called()
+        assert "No fix session started" in result
+        assert "Riptide Fix triggered" not in result
+
+    def test_cron_unavailable_writes_no_queue_row(self):
+        """The one path that used to write the queue: it must not any more."""
+        client = self._client()
+        with patch("riptide.state.StateStore") as mock_store, \
+             patch("riptide.fixer._is_cron_available", return_value=False):
+            mock_store.return_value.has_running_fix.return_value = False
+            mock_store.return_value.get_queue_length.return_value = 0
+            with patch("riptide.fixer._spawn_fix", return_value=False):
+                result = handle_fix_command(
+                    client, 1, "ChonSong", "riptide", 42, "test-user", "fix the flake"
+                )
+
+        mock_store.return_value.enqueue_fix.assert_not_called()
+        mock_store.return_value.get_queue_position.assert_not_called()
+        assert "Hermes cron CLI is not available on this host" in result
+        assert "fix the flake" in result
+        assert "Riptide Fix triggered" not in result
+
+    def test_cron_unavailable_writes_no_row_and_does_not_block_the_pr(
+        self, tmp_path, monkeypatch
+    ):
+        """Real StateStore: the refusal writes no row, so the PR stays spawnable.
+
+        The defect this pins: with an un-drained `queued` row written, the next
+        `@riptide-bot fix` on the same PR was answered "already in progress"
+        while nothing ever started. Both halves are asserted here — no row, and
+        a later trigger still spawns.
+        """
+        from riptide.state import StateStore
+        from riptide import state as state_mod
+
+        db_path = str(tmp_path / "test.db")
+        monkeypatch.setattr(state_mod, "StateStore", lambda: StateStore(db_path=db_path))
+
+        with patch("riptide.fixer._is_cron_available", return_value=False), \
+             patch("riptide.fixer._spawn_fix", return_value=False):
+            result = handle_fix_command(
+                self._client(), 1, "ChonSong", "riptide", 42, "test-user", "fix the flake"
+            )
+
+        assert "Could not start a fix for #42" in result
+        assert "Hermes cron CLI is not available on this host" in result
+        assert "Nothing was queued" in result
+
+        store = StateStore(db_path=db_path)
+        rows = store._get_conn().execute("SELECT COUNT(*) FROM fix_queue").fetchone()[0]
+        assert rows == 0, "the cron-unavailable path must not write a fix_queue row"
+        assert store.get_queue_length(42, owner="ChonSong", repo="riptide") == 0
+
+        # The PR is not blocked: the same PR can be triggered again.
+        with patch("riptide.fixer._is_cron_available", return_value=True), \
+             patch("riptide.fixer._spawn_fix", return_value=True) as mock_spawn:
+            second = handle_fix_command(
+                self._client(), 1, "ChonSong", "riptide", 42, "test-user", ""
+            )
+        assert "Riptide Fix triggered" in second
+        mock_spawn.assert_called_once()
+        assert store._get_conn().execute("SELECT COUNT(*) FROM fix_queue").fetchone()[0] == 0
+
+    def test_successful_spawn_writes_no_row_through_the_real_spawn_path(
+        self, tmp_path, monkeypatch
+    ):
+        """Real StateStore + real `_spawn_fix` (only the CLI is mocked).
+
+        The reservation in `jobs` is what tracks a spawned fix; a fix_queue row
+        here is the PR #208 duplicate.
+        """
+        from riptide.state import StateStore
+        from riptide import state as state_mod
+
+        db_path = str(tmp_path / "test.db")
+        monkeypatch.setattr(state_mod, "StateStore", lambda: StateStore(db_path=db_path))
+
+        with patch("riptide.fixer._is_cron_available", return_value=True), \
+             patch("riptide.fixer.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="Created job", stderr="")
+            result = handle_fix_command(
+                self._client(), 1, "ChonSong", "riptide", 42, "test-user", ""
+            )
+
+        assert "Riptide Fix triggered" in result
+        mock_run.assert_called_once()
+
+        store = StateStore(db_path=db_path)
+        conn = store._get_conn()
+        assert conn.execute("SELECT COUNT(*) FROM fix_queue").fetchone()[0] == 0, (
+            "a spawned fix must not also write a fix_queue row"
+        )
+        assert conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE id LIKE 'riptide-fix-%'"
+        ).fetchone()[0] == 1, "the spawned fix is tracked by its reserved job"
+
+    def test_busy_check_bounds_the_queue_lookup_by_age(self):
+        """The busy check must ask for recent rows only — the gate cannot be
+        held by a row nothing will ever drain."""
+        from riptide.fixer import QUEUE_BLOCK_MAX_AGE_SECONDS
+
+        client = self._client()
+        with patch("riptide.state.StateStore") as mock_store, \
+             patch("riptide.fixer._spawn_fix", return_value=True):
+            mock_store.return_value.has_running_fix.return_value = False
+            mock_store.return_value.get_queue_length.return_value = 0
+            handle_fix_command(client, 1, "ChonSong", "riptide", 42, "test-user", "")
+
+        kwargs = mock_store.return_value.get_queue_length.call_args[1]
+        assert kwargs["owner"] == "ChonSong"
+        assert kwargs["repo"] == "riptide"
+        assert kwargs["max_age_seconds"] == QUEUE_BLOCK_MAX_AGE_SECONDS
+
+    def test_queue_block_age_is_the_fix_ttl(self):
+        """One TTL, not two: the age bound is `has_running_fix`'s TTL."""
+        from riptide.fixer import QUEUE_BLOCK_MAX_AGE_SECONDS
+        from riptide.state import FIX_TTL_SECONDS
+
+        assert QUEUE_BLOCK_MAX_AGE_SECONDS == FIX_TTL_SECONDS == 7200
+
+    def test_spawn_without_cron_never_calls_hermes(self):
+        """`_spawn_fix` with no CLI: no subprocess, no success, retries skipped."""
+        with patch("riptide.state.StateStore") as mock_state, \
+             patch("riptide.fixer._is_cron_available", return_value=False), \
+             patch("riptide.fixer.time.sleep") as mock_sleep, \
+             patch("subprocess.run") as mock_run:
+            mock_state.return_value.reserve_job.return_value = True
+            spawned = _spawn_fix(
+                owner="ChonSong", repo="riptide", pr_number=42,
+                pr_title="fix: repair flaky test", pr_author="test-user",
+                total_loc=150, head_sha="abc123def4567890", head_ref="fix-branch",
+                description="", push_eligible=True,
+            )
+        assert spawned is False
+        mock_run.assert_not_called()
+        assert mock_sleep.call_count == 2  # backoff before attempts 2 and 3 only
+        mock_state.return_value.mark_failed.assert_called_once()
+
+
+class TestStaleQueuedRowDoesNotBlock:
+    """An un-drained `queued` row must not block a spawn forever.
+
+    Rows written by a pre-fix deployment are still in the state DB. Counting
+    them unconditionally made `@riptide-bot fix` answer "already pending" for
+    good while nothing ever started.
+    """
+
+    def _client(self):
+        return _make_client(pr_details=_pr_details())
+
+    def _store(self, tmp_path, monkeypatch):
+        from riptide.state import StateStore
+        from riptide import state as state_mod
+
+        db_path = str(tmp_path / "test.db")
+        monkeypatch.setattr(state_mod, "StateStore", lambda: StateStore(db_path=db_path))
+        return StateStore(db_path=db_path)
+
+    def test_old_queued_row_does_not_block_a_spawn(self, tmp_path, monkeypatch):
+        import time
+        from riptide.fixer import QUEUE_BLOCK_MAX_AGE_SECONDS
+
+        store = self._store(tmp_path, monkeypatch)
+        qid = store.enqueue_fix(
+            42, "ChonSong/riptide#42", "test-user", "old request",
+            owner="ChonSong", repo="riptide",
+        )
+        conn = store._get_conn()
+        conn.execute(
+            "UPDATE fix_queue SET created_at = ? WHERE id = ?",
+            (time.time() - QUEUE_BLOCK_MAX_AGE_SECONDS - 60, qid),
+        )
+        conn.commit()
+
+        with patch("riptide.fixer._spawn_fix", return_value=True) as mock_spawn:
+            result = handle_fix_command(
+                self._client(), 1, "ChonSong", "riptide", 42, "test-user", ""
+            )
+
+        mock_spawn.assert_called_once()
+        assert "Riptide Fix triggered" in result
+        # The stale row is neither resurrected nor duplicated.
+        assert conn.execute(
+            "SELECT status, COUNT(*) FROM fix_queue GROUP BY status"
+        ).fetchall() == [("queued", 1)]
+
+    def test_fresh_queued_row_still_blocks(self, tmp_path, monkeypatch):
+        """The age bound must not disable the gate for recent requests."""
+        store = self._store(tmp_path, monkeypatch)
+        store.enqueue_fix(
+            42, "ChonSong/riptide#42", "test-user", "just now",
+            owner="ChonSong", repo="riptide",
+        )
+
+        with patch("riptide.fixer._spawn_fix") as mock_spawn:
+            result = handle_fix_command(
+                self._client(), 1, "ChonSong", "riptide", 42, "test-user", ""
+            )
+
+        mock_spawn.assert_not_called()
+        assert "already in progress" in result
+        assert "Riptide Fix triggered" not in result
+        assert store._get_conn().execute(
+            "SELECT COUNT(*) FROM fix_queue"
+        ).fetchone()[0] == 1, "no duplicate row for a request already pending"
 
 
 class TestProcessFixQueue:

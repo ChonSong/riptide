@@ -1,0 +1,6 @@
+{
+  "_comment": "Optional per-repo ProofShot config for Bot 3. A capture target must be declared: with no `url` here and no RIPTIDE_PROOFSHOT_URL, proofshotter.py skips the PR and reports skipped(no-target) rather than capturing a dev port. `captures` is optional -- each entry is captured after the page loads (name, optional selector, optional wait in ms); omit it for a single full-page capture. `seed` may name a .js or .json file in this repo, resolved against the checked-out PR, to prime the page before capturing.",
+  "captures": [
+    { "name": "shell", "wait": 800 }
+  ]
+}

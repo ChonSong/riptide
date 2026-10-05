@@ -18,6 +18,22 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 
 log = logging.getLogger("riptide.state")
 
+
+def _metadata_json(metadata) -> Optional[str]:
+    """Serialise ``review_memory.metadata`` exactly once.
+
+    ``review_memory.store_review_outcome`` already encodes its dict, so the old
+    ``json.dumps(metadata)`` here encoded it a second time and the column held a
+    JSON *string literal* instead of the object it was given — reading it back
+    yielded a string, not the dict the caller recorded. Accept either form so the
+    column is always readable JSON.
+    """
+    if not metadata:
+        return None
+    if isinstance(metadata, str):
+        return metadata
+    return json.dumps(metadata)
+
 # ── Constants ────────────────────────────────────────────────────────────────
 
 # Deliveries stuck in 'processing' longer than this are considered stale
@@ -594,11 +610,17 @@ class StateStore:
         assert cur.lastrowid is not None
         return cur.lastrowid
 
-    def get_queue_length(self, pr_number: int, owner: str = "", repo: str = "") -> int:
+    def get_queue_length(self, pr_number: int, owner: str = "", repo: str = "",
+                         max_age_seconds: int | None = None) -> int:
         """Count queued (not yet started) fix requests for this PR.
 
         owner/repo narrow the count to one repository; omitting them counts
         every queued request for the PR number (legacy callers).
+
+        max_age_seconds, when set, counts only rows created within that window.
+        Callers that treat a queued row as "a fix is already pending" must set
+        it: nothing drains fix_queue, so a row's presence otherwise blocks the PR
+        forever (PR #215 review). Omitting it returns the raw backlog.
         """
         self.init_fix_queue()
         conn = self._get_conn()
@@ -610,6 +632,9 @@ class StateStore:
         if repo:
             query += " AND repo = ?"
             params.append(repo)
+        if max_age_seconds is not None:
+            query += " AND created_at > ?"
+            params.append(time.time() - max_age_seconds)
         row = conn.execute(query, params).fetchone()
         return row[0]
 
@@ -874,7 +899,7 @@ class StateStore:
                 verdict,
                 0,  # user_feedback — default 0 (no feedback yet)
                 now,
-                json.dumps(metadata) if metadata else None,
+                _metadata_json(metadata),
             ),
         )
 

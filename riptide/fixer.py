@@ -33,6 +33,8 @@ from typing import Optional
 
 import structlog
 
+from riptide.state import FIX_TTL_SECONDS
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -56,6 +58,18 @@ FIX_PROVIDER = os.environ.get("RIPTIDE_FIX_PROVIDER", "longcat")
 # Workspace root for spawned sessions (PYTHONPATH pitfall — spawned
 # sessions have no PYTHONPATH; the prompt must insert this path).
 WORKSPACE_ROOT = os.environ.get("RIPTIDE_WORKSPACE_ROOT", "/home/sc/workspace")
+
+# How long a `queued` fix_queue row may block new work for its PR.
+#
+# Nothing in production drains fix_queue (`process_fix_queue` is unwired), so a
+# row counted unconditionally blocks `@riptide-bot fix` for that PR FOREVER and
+# silently swallows every later request — the one-way door the PR #215 review
+# found. FIX_TTL_SECONDS is the established bound for "a fix can still be in
+# flight" (`has_running_fix`, `cleanup_stale_queue_items` both expire at it), so
+# a row left `queued` for longer than that cannot represent pending work and
+# must not hold the gate. Reusing that constant keeps the two in step; there is
+# deliberately no second TTL to drift.
+QUEUE_BLOCK_MAX_AGE_SECONDS = FIX_TTL_SECONDS
 
 
 def _with_db_retry(fn, max_retries=3, base_delay=0.5):
@@ -88,8 +102,10 @@ def handle_fix_command(
 
     Called from webhook.py when a user comments @riptide-bot fix on a PR.
     Fetches PR details via the GitHub API client, checks push eligibility,
-    spawns the fix session (or queues if busy), and returns a user-facing
-    confirmation message (or error message).
+    spawns the fix session, and returns a user-facing confirmation message
+    (or error message). It never writes fix_queue: nothing drains that queue,
+    so a row would block every later request for the PR. When spawning is
+    impossible (Hermes cron CLI unavailable) the returned message says so.
 
     description: optional free-text after `fix` (already stripped).
     delivery_id: trace ID from the originating webhook event (for log correlation).
@@ -150,49 +166,70 @@ def handle_fix_command(
     # Fork PRs authored by us are push-eligible (we own the head branch).
     push_eligible = _is_push_eligible(owner, repo, author) and _is_fork_push_eligible(is_fork, author)
 
-    pr_key = f"{owner}/{repo}#{pr_number}"
-
-    # Check if there's already a fix running for this PR — with retry on lock contention
+    # Busy check — with retry on lock contention.
+    #
+    # This must NOT enqueue. A successful spawn reserves a `jobs` row for this
+    # PR and nothing marks it complete when the spawned session finishes, so
+    # `has_running_fix()` stays true for FIX_TTL (2h) after the fix has already
+    # pushed. The old unconditional enqueue therefore wrote a duplicate
+    # fix_queue row for a PR whose fix was already done (PR #208: row id 1,
+    # created 71s after the commit was pushed). No production code drains the
+    # queue (process_fix_queue has no caller), so handle_fix_command no longer
+    # writes it at all — a row there is a one-way door for its PR (PR #215
+    # review). The queue methods stay for the drain path, if one is ever wired.
     from riptide.state import StateStore
 
-    def check_and_queue():
+    def check_busy():
         state = StateStore()
-        # Use global gate OR PR-specific queue (AND logic: must check both to avoid races)
-        if state.has_running_fix() or state.get_queue_length(pr_number, owner=owner, repo=repo) > 0:
-            queue_id = state.enqueue_fix(pr_number, pr_key, commenter, description.strip(), installation_id=installation_id, owner=owner, repo=repo)
-            position = state.get_queue_position(queue_id)
-            running_pr = state.get_running_fix_pr()
-            return queue_id, position, running_pr
-        return None, None, None
+        # Use global gate OR PR-specific queue (both, to avoid races).
+        #
+        # The queue half is age-bounded: nothing drains fix_queue, so a row left
+        # `queued` must not block this PR forever. A row older than
+        # QUEUE_BLOCK_MAX_AGE_SECONDS cannot be pending work (the same age
+        # expires a `running` fix in has_running_fix) and is ignored.
+        queued = state.get_queue_length(
+            pr_number,
+            owner=owner,
+            repo=repo,
+            max_age_seconds=QUEUE_BLOCK_MAX_AGE_SECONDS,
+        )
+        if queued:
+            log.info(
+                "Blocking fix for %s/%s#%d on %d queued fix row(s) younger than %ss",
+                owner, repo, pr_number, queued, QUEUE_BLOCK_MAX_AGE_SECONDS,
+            )
+        busy = state.has_running_fix() or queued > 0
+        return busy, (state.get_running_fix_pr() if busy else None)
 
     try:
-        result = _with_db_retry(check_and_queue)
+        busy, running_pr = _with_db_retry(check_busy)
     except sqlite3.OperationalError:
         log.error(f"DB locked after retries for #{pr_number}")
         return f"⚠️ Database temporarily locked for #{pr_number}. Please retry in a few seconds."
-    
-    queue_id, position, running_pr = result
 
-    if queue_id is not None:
+    if busy:
+        log.info(
+            "Skipping fix for %s/%s#%d — a fix is already pending (running_pr=%s); not queueing a duplicate",
+            owner, repo, pr_number, running_pr,
+        )
         if running_pr and running_pr != pr_number:
-            # Another PR's fix is running — queue globally
+            # Another PR's fix is running — answer honestly instead of queueing
+            # a row that nothing ever drains.
             return (
-                f"⏳ **Fix queued for #{pr_number}.**\n\n"
-                f"Another fix is currently running for PR #{running_pr}. "
-                f"Your request has been added to the queue (position: {position}).\n\n"
-                f"**Scope:** {description.strip() or 'all outstanding review findings'}\n"
-                f"**Estimated start:** after the current fix completes (~5-15 min)."
+                f"⏳ **A fix is already running for PR #{running_pr}.**\n\n"
+                f"#{pr_number} was not queued: the fix queue has no drainer, so a row "
+                f"would sit there without starting. Re-comment `@riptide-bot fix` once "
+                f"that fix finishes.\n\n"
+                f"**Scope:** {description.strip() or 'all outstanding review findings'}"
             )
-        else:
-            # Same PR fix running or queued
-            return (
-                f"⏳ **Fix queued for #{pr_number}.**\n\n"
-                f"A fix is already in progress for this PR. "
-                f"Your request has been added to the queue (position: {position}). "
-                f"It will run automatically when the current fix completes.\n\n"
-                f"**Scope:** {description.strip() or 'all outstanding review findings'}\n"
-                f"**Estimated start:** ~5 min after current fix finishes."
-            )
+        # Same PR: the fix already in flight covers this request.
+        return (
+            f"⏳ **A fix is already in progress for #{pr_number}.**\n\n"
+            f"Nothing was queued — the fix already running for this PR covers it. "
+            f"Re-comment `@riptide-bot fix` with a description if you want a "
+            f"follow-up run after it finishes.\n\n"
+            f"**Scope:** {description.strip() or 'all outstanding review findings'}"
+        )
 
     # No existing fix — try to spawn immediately (with lock retry)
     def do_spawn():
@@ -219,21 +256,41 @@ def handle_fix_command(
         return f"⚠️ Failed to spawn fix session for #{pr_number}: {e}"
 
     if not spawned:
-        # Reserve failed — something else grabbed the slot. Queue this request.
-        def queue_on_race():
-            state = StateStore()
-            qid = state.enqueue_fix(pr_number, pr_key, commenter, description.strip(), installation_id=installation_id, owner=owner, repo=repo)
-            return state.get_queue_position(qid)
-        try:
-            position = _with_db_retry(queue_on_race)
-        except sqlite3.OperationalError:
-            position = "?"
+        if _is_cron_available():
+            # Spawning was possible but the reservation was taken concurrently
+            # (or the attempt failed): this request is a duplicate of a fix that
+            # already has the slot. Queueing it is what produced the dead rows —
+            # do not.
+            log.info(
+                "Spawned=False for %s/%s#%d with cron available — not queueing a duplicate",
+                owner, repo, pr_number,
+            )
+            return (
+                f"⚠️ **No fix session started for #{pr_number}.**\n\n"
+                f"A fix for this PR already holds the slot (or the spawn was rejected). "
+                f"Nothing was queued. Re-comment `@riptide-bot fix` once the running "
+                f"fix finishes."
+            )
+
+        # Spawning is impossible without the Hermes cron CLI. Do NOT enqueue:
+        # nothing in production drains fix_queue, so a row written here would
+        # block this PR for good — the busy check above counts it, and every
+        # later `@riptide-bot fix` would be answered "already in progress" while
+        # nothing ever starts (the one-way door from the PR #215 review). Tell
+        # the user it cannot start instead; no row, no block, no silent swallow.
+        log.warning(
+            "Hermes cron CLI unavailable — cannot start fix for %s/%s#%d; not queueing",
+            owner, repo, pr_number,
+        )
         return (
-            f"⏳ **Fix queued for #{pr_number}.**\n\n"
-            f"A fix just started for this PR (dedup race). "
-            f"Your request has been added to the queue (position: {position}). "
-            f"It will run automatically when the current fix completes.\n\n"
-            f"**Scope:** {description.strip() or 'all outstanding review findings'}"
+            f"⚠️ **Could not start a fix for #{pr_number}.**\n\n"
+            f"The Hermes cron CLI is not available on this host, so no fix session "
+            f"could be scheduled. Nothing was queued: the fix queue has no drainer "
+            f"(`process_fix_queue` is unwired), so a queued row would sit there and "
+            f"block every later `@riptide-bot fix` on this PR.\n\n"
+            f"**Scope:** {description.strip() or 'all outstanding review findings'}\n"
+            f"**Next step:** make sure `hermes` is installed and on PATH for the host "
+            f"running Riptide, then re-comment `@riptide-bot fix`."
         )
 
     log.info(
@@ -251,6 +308,7 @@ def handle_fix_command(
         if description.strip()
         else "all outstanding review findings"
     )
+    job_name = _fix_job_name(owner, repo, pr_number)
     return (
         f"🛠 **Riptide Fix triggered for #{pr_number}!**\n\n"
         f"A Hermes fix session has been scheduled and will begin within 2 minutes. "
@@ -258,7 +316,8 @@ def handle_fix_command(
         f"**PR:** {title}\n"
         f"**Author:** @{author}\n"
         f"**Changes:** +{additions}/-{deletions} ({total_loc} LOC)\n"
-        f"**Commit:** `{head_sha[:12]}`"
+        f"**Commit:** `{head_sha[:12]}`\n"
+        f"**Track it:** Hermes job `{job_name}` (`hermes cron list`)"
     )
 
 
@@ -282,6 +341,16 @@ def _is_cron_available() -> bool:
     return shutil.which("hermes") is not None
 
 
+def _fix_job_name(owner: str, repo: str, pr_number: int) -> str:
+    """Deterministic Hermes cron job name for one PR's fix session.
+
+    Single source of truth for the name: `_spawn_fix` hands this exact string to
+    `hermes cron create --name`, and the ack comment quotes it so a reader can
+    chase the job (`hermes cron list`) instead of asking where it went.
+    """
+    return f"riptide-fix-{owner}-{repo}-{pr_number}"
+
+
 def _spawn_fix(
     owner: str,
     repo: str,
@@ -302,7 +371,7 @@ def _spawn_fix(
     """
     max_retries = 3
     base_delay = 5  # seconds
-    name = f"riptide-fix-{owner}-{repo}-{pr_number}"
+    name = _fix_job_name(owner, repo, pr_number)
     run_at = (datetime.now() + timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%S")
 
     # Cross-session awareness: clean up stale jobs, then atomically reserve
@@ -392,6 +461,12 @@ def process_fix_queue(client, owner: str = "ChonSong", repo: str = "riptide") ->
     Pops the oldest 'queued' item, marks it 'running', fetches PR details,
     and spawns a fix session directly (bypassing handle_fix_command's busy
     check, since we already hold the queue slot).
+
+    Unwired: nothing in production calls this today, and nothing writes
+    fix_queue either (handle_fix_command stopped enqueueing once the PR #215
+    review showed a row there is a one-way door — no drainer exists, so the row
+    only blocked the PR). Kept as the deterministic drain path for any future
+    writer or manual backfill.
 
     Returns a status message if a fix was started, None if queue is empty.
     """

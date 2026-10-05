@@ -134,3 +134,36 @@ def test_fixer_check_and_queue_sequence_does_not_raise(store):
     queued = store.enqueue_fix(42, "o/r#42", "gina", "second", owner="o", repo="r")
     assert store.get_queue_position(queued) == 1
     assert store.get_queue_length(42, owner="o", repo="r") == 1
+
+
+def test_queue_length_age_bound_ignores_rows_no_worker_will_drain(store):
+    """`max_age_seconds` bounds the count so an abandoned row cannot hold the gate.
+
+    Nothing drains fix_queue in production, so a `queued` row older than the
+    window cannot be pending work. Callers that gate on "is a fix already
+    pending" pass the bound (fixer.py passes FIX_TTL_SECONDS); the raw backlog
+    is still available by omitting it.
+    """
+    old = store.enqueue_fix(606, "o/r#606", "helen", "long ago", owner="o", repo="r")
+    fresh = store.enqueue_fix(606, "o/r#606", "helen", "just now", owner="o", repo="r")
+
+    connection = sqlite3.connect(store.db_path)
+    connection.execute(
+        "UPDATE fix_queue SET created_at = ? WHERE id = ?",
+        (time.time() - FIX_TTL_SECONDS - 60, old),
+    )
+    connection.commit()
+    connection.close()
+
+    assert store.get_queue_length(606, owner="o", repo="r") == 2, "raw backlog is unchanged"
+    assert store.get_queue_length(606, owner="o", repo="r", max_age_seconds=FIX_TTL_SECONDS) == 1
+
+    # The fresh row is real work the gate still sees; the drain path pops FIFO
+    # (oldest first), so the stale row is the one that starts.
+    started = store.start_next_queued_fix()
+    assert started["id"] == old
+    assert store.get_queue_length(606, owner="o", repo="r") == 1
+    assert store.get_queue_length(
+        606, owner="o", repo="r", max_age_seconds=FIX_TTL_SECONDS
+    ) == 1
+    assert fresh == old + 1
