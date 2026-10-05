@@ -76,7 +76,10 @@ class TestSpawnDeepthink:
         skills = [cmd[i + 1] for i, x in enumerate(cmd) if x == "--skill"]
         assert "github-pr-lifecycle" in skills
         assert "deep-think" in skills
-        assert "excalidraw" in skills
+        # excalidraw is a disabled skill (skills_disabled/creative/excalidraw):
+        # requesting it only produced a "skill not found and skipped" warning in
+        # every spawned session. The diagram is rendered by grafiphy/orchestrator.
+        assert "excalidraw" not in skills
 
         # Verify --deliver and --name
         assert "--deliver" in cmd
