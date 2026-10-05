@@ -33,6 +33,7 @@ import structlog
 from riptide.state import StateStore
 from riptide.depth import ReviewDepth, classify_review_depth, select_skills  # noqa: F401 (re-exported for back-compat)
 from riptide.review_memory import get_memory_context
+from riptide.assemble_review import review_job_name
 from riptide.finding_status import refresh_review_status
 
 logging.basicConfig(
@@ -406,7 +407,9 @@ def _spawn_deepthink(
     """
     max_retries = 3
     base_delay = 5  # seconds
-    name = f"riptide-review-{owner}-{repo}-{pr_number}"
+    # The job name is also the Conductor track id and the sign-off's handle, so it
+    # is built in exactly one place (`assemble_review.review_job_name`).
+    name = review_job_name(owner, repo, pr_number)
     run_at = (datetime.now() + timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%S")
     triggered_at = datetime.now(timezone.utc).isoformat()
 
@@ -879,10 +882,10 @@ def _build_conductor_prompt(
 {deterministic_hint}
 
 ## Task
-1. Import and instantiate the Conductor for track "riptide-review-{owner}-{repo}-{pr_number}":
+1. Import and instantiate the Conductor for track "{review_job_name(owner, repo, pr_number)}":
    ```python
    from riptide.pipeline.conductor import Conductor
-   conductor = Conductor("riptide-review-{owner}-{repo}-{pr_number}")
+   conductor = Conductor("{review_job_name(owner, repo, pr_number)}")
    result = conductor.run()
    ```
 2. The Conductor will dispatch workers: Probe → Judge → Artisan → Engine → Scribe.
