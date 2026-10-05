@@ -187,6 +187,147 @@ Plus loaded skills (deep-think: 20k chars, github-pr-lifecycle: 53k chars). Tota
 - Verify with `python -m py_compile` + `python -m pytest`, not just claims of working
 - Test isolation: use `tempfile.mkdtemp()` and patch module-level path constants
 
+## Bot 3 (proofshotter) — capture target and guards
+
+Scope: the target/guard behaviour in this section lands in **#220** (it is not on
+`main`); the instance facts and the playwright trap are true today. Read the
+contract below as intended, not deployed, until #220 merges.
+
+- **`proofshot/cli.py` is a single-file CLI, not a package.** It carries no
+  `pyproject.toml`/`setup.py`, so `pip install -e ~/workspace/proofshot` fails.
+  `proofshotter.py` does NOT call `cli.py pr`; it loads `ProofshotSession` from that
+  file via importlib, so the dependency to satisfy is the class, not the subcommand.
+- **`cli.py pr <n>` requires `--url`** (argparse `required=True`) and is a hardcoded
+  chat-tiling walkthrough that posts its own comment and release upload. Do not wire
+  it into CI — it cannot run as written and duplicates the bot's own path.
+- **A capture target must be declared** (`url` in `proofshot.config.json`, or
+  `RIPTIDE_PROOFSHOT_URL`). Never reintroduce a `localhost:8788` default: a repo
+  declaring nothing must be skipped (`skipped(no-target)`), not captured.
+- **8788 is `hermes-webui-dev.service`** — this project's own dev instance serving
+  `master`, not "an unrelated application". A capture there races its user and cannot
+  show a PR's change. The dedicated test instance is **8790**, booted with
+  `HERMES_WEBUI_SKIP_ONBOARDING=1`. `hermes-webui-tests/lib/auth-fixture.ts` is a
+  **no-op** — it does not log in; that skip-onboarding flag is what bypasses the gate.
+- **A login gate answers HTTP 200**, so a status code can never tell it from the app
+  shell. Check the rendered DOM (`_assert_capture_is_app_shell`) before posting.
+- **The playwright browser is already installed — do not reinstall it.** The venv's
+  playwright (1.62.0) expects chromium revision **1234** and
+  `~/.cache/ms-playwright/chromium-1234` matches it (installed 2026-09-17, with
+  `headless_shell` alongside). A real capture against `:8790` produced a GIF, so the
+  capture half works on this host. What breaks a launch is
+  **`NODE_OPTIONS=--gc-interval=100`**, the value agent terminal sessions carry:
+  playwright's bundled node aborts and the API reports `Connection closed while
+  reading from the driver`, which is easily misread as a missing browser.
+  `--max-old-space-size=4096` (what the services run with) is fine. Run captures as
+  `env -u NODE_OPTIONS ...`. Microsoft's CDN does answer a reinstall with
+  `400 GatewayExceptionResponse` here — that is why the reinstall fails, not because
+  the browser is absent, and no reinstall is needed.
+
+## Worktrees DO exercise their own code
+
+AGENTS.md's warning is stale on this host: from `/tmp/wt-<name>`, `import riptide`
+resolves to the **worktree's** `riptide/`, not the shared checkout. Confirm it rather
+than assuming either way:
+
+```bash
+cd /tmp/wt-<name> && /home/sc/.hermes/hermes-agent/venv/bin/python3 \
+  -c "import riptide; print(riptide.__file__)"
+```
+
+Take a real before/after inside the same worktree (`git checkout --detach origin/main`,
+run, then `git checkout <branch>`); the collected test count is the tell that the
+intended tree ran.
+
+Caveat — the editable install still wins in a **subprocess that runs a module as a
+script**. `riptide/tests/test_entrypoints.py` spawns
+`python3 riptide/deepthink.py --help` with `PYTHONPATH=""`, so `sys.path[0]` is the
+worktree's `riptide/` (which holds no `riptide` package) and `import riptide` falls
+through to the editable install → the **shared checkout's** package runs against the
+worktree's script. That is how a worktree run can report one failure that CI never
+sees (it appeared as `ImportError: cannot import name ... from
+'/home/sc/workspace/riptide/riptide/...'`). For an answer that matches CI, copy the
+changed files into the shared checkout, run there, then `git checkout --` them
+(only tracked files; delete any file the branch adds).
+
+## Review provenance
+
+Scope: the `review_memory` and sign-off behaviour below lands in **#219**; `main`
+still writes no provenance. The "one builder" rule is what a review of #219 asked
+for, and #219's follow-up commit enforces it in `deepthink` and `conductor` too.
+
+- **`review_memory` was written only on merge** (zero counts, no attribution), and its
+  `metadata` column was **double-encoded** — `json.dumps` applied to an
+  already-encoded string, so the column parsed back to a string, not a dict. Rows are
+  now written when a review posts, carrying `{job, model, provider, head_sha}`. The
+  merge-time writer cannot know which model reviewed, so capture that on the review
+  path instead of reconstructing it later.
+- **The sign-off handle is `riptide-review-<owner>-<repo>-<n>`** — the same string the
+  spawner passes to `hermes cron create --name`. Keep one builder for it.
+  `Riptide Review ·` must stay byte-identical: the CI gate and the fixer's
+  review-detection both match that literal.
+- **A cron-spawned session really does know its own session id**
+  (`agent.agent_init._publish_session_id` →
+  `gateway.session_context.set_current_session_id`, published to `os.environ` as
+  `cron_<job_id>_<YYYYmmdd_HHMMSS>`); the webhook/service process has none. Render
+  `session:` only when present — never invent one.
+- **Verify a parked patch's call sites before building on it.** A patch that adds
+  parameters to a helper is dead code unless its caller passes them; a diff's
+  description is not evidence. Grep the call sites.
+
+## A capture guard must test visibility, not presence
+
+Matching a login-gate selector by **presence** refuses legitimate captures. Measured
+on hermes-webui:
+
+| | `:8790` app shell | `:8788` login gate |
+|---|---|---|
+| final URL | `/` | `/login?next=/` |
+| password inputs | 2, **0 visible** (`#settingsPassword`, `#settingsCurrentPassword`) | 1, **visible** (`#pw` inside `#login-form`) |
+| app markers | `main`, `nav`, `.sidebar`, `header` | none |
+| body | `Chat \| WebUI sessions (0)` | `Enter your password to continue` |
+
+So a gate match only counts when the element is **rendered** (`element.is_visible()`),
+and the URL path is checked separately: the real gate redirects to `/login` on the
+**same host**, so a cross-origin check alone does not catch it.
+
+A guard that fires on the app is worse than no guard — Bot 3 then reports every
+capture as impossible, and the symptom looks like a missing target rather than a
+bad predicate. Verify a guard against the real app before trusting it; a unit test
+with a hand-built page double cannot tell you this.
+
+## The Companion's nesting metric is diff-scoped and mis-attributes
+
+`DiffAnalyzer` (`riptide/diff_analyzer.py`) measures nesting over the patch's
+**added lines** using indentation, and only resets `current_func` on an added line
+at or below the function's definition indent. Two consequences:
+
+- a changed argument inside a multi-line call whose **opening line is unchanged
+  context** is counted as a statement at its raw indent (e.g. level 5), because the
+  open bracket is invisible to the counter — even though it is a call continuation,
+  not a nesting level;
+- the finding is then attached to **whichever function the counter last saw**, not
+  the function containing the line. A 🟡 naming function X can be about a line in
+  function Y.
+
+So verify before "fixing" one. Re-run the analyzer over your diff and print the
+stack progression (`_get_added_lines` + `_nesting_level` + `_bracket_delta`) to see
+which line actually crosses `MAX_NESTING_DEPTH`. A real example: a 🟡 against
+`_assert_capture_is_app_shell` was really `captured_url=url,` in the poll path's
+`_post_proofshot_comment(...)` call — pre-existing indentation, tripped only because
+that argument was the added line.
+
+**Do not restructure working code to satisfy the metric.** Extracting a function to
+reduce real nesting is fine on its own merits, but it will not clear this finding;
+say so rather than implying it did.
+
+## Corrupt clones
+
+A workspace directory holding only `.git` + `node_modules` where `git` reports
+"fatal: not a git repository" is an aborted clone. `~/workspace/proofshot` and
+`~/workspace/hermes-webui-tests*` were all in this state. Re-clone from the remote
+(`git clone https://github.com/ChonSong/<repo>.git <dir>`); do not try to repair
+the `.git`.
+
 ## References
 
 - `references/unified-pipeline-design.md` — WS-3 architecture, 5-stage model
