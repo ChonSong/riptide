@@ -157,6 +157,7 @@ class Scribe:
         model: Optional[str] = None,
         findings_path: Optional[str] = None,
         provider: Optional[str] = None,
+        head_sha: Optional[str] = None,
     ) -> dict:
         """Post review using assemble_review.py.
 
@@ -190,6 +191,11 @@ class Scribe:
         
         if diagram_url:
             cmd.extend(["--diagram-url", diagram_url])
+
+        # The reviewed revision travels with the pipeline so review_memory can
+        # record which commit the verdict belongs to.
+        if head_sha:
+            cmd.extend(["--head-sha", head_sha])
         
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         

@@ -177,8 +177,11 @@ The load-bearing rules:
 - A findings-bearing review must carry the `Riptide Review ·` sign-off (always
   emitted by `assemble_review.py`) **and** the 🔴/🟡 severity table. The
   `## Review:` header is human-facing — the gate does **not** test for it. The
-  table rows are what keep the gate red until a follow-up commit lands, and the
-  sign-off is what makes the comment match at all. The gate also ignores the
+  table rows are what keep the gate red until a commit **touching a file a row
+  names** lands — not any follow-up commit; the sign-off is what makes the
+  comment match under the selector's *current* anchored-first-line format (a
+  later non-review comment that merely names the sign-off must not match).
+  The gate also ignores the
   Companion's `## ✨ Review Required` complexity pre-pass: it posts *before* the
   review and carries 🟡 rows, so treating it as a review reddens clean PRs.
 - `## Riptide Pass: ✅ No findings` is the Companion's deterministic pass — **not**

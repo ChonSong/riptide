@@ -33,6 +33,8 @@ import structlog
 from riptide.state import StateStore
 from riptide.depth import ReviewDepth, classify_review_depth, select_skills  # noqa: F401 (re-exported for back-compat)
 from riptide.review_memory import get_memory_context
+from riptide.assemble_review import review_job_name
+from riptide.finding_status import refresh_review_status
 
 logging.basicConfig(
     level=logging.INFO,
@@ -134,8 +136,29 @@ def _cron_job_states() -> "dict[str, dict] | None":
                 "state": job.get("state"),
                 "last_status": job.get("last_status"),
                 "enabled": job.get("enabled"),
+                # Kept so a spawn can tell "this attempt's job" from an earlier
+                # review of the same PR — the name alone is not enough.
+                "run_at": (job.get("schedule") or {}).get("run_at"),
             }
     return states
+
+
+def _job_already_scheduled(name: str, run_at: str) -> bool:
+    """True when a cron job called `name` is already scheduled for `run_at`.
+
+    `hermes cron create` can create the job and *then* outlive the subprocess
+    timeout, so a timed-out attempt may already have scheduled the review.
+    Matching on the name alone would also match an earlier review of the same PR
+    (the name is deterministic per PR), hence run_at.
+
+    An unreadable store returns False on purpose: "unknown" must not read as
+    "already scheduled", or a genuinely failed spawn would be swallowed.
+    """
+    jobs = _cron_job_states()
+    if not jobs:
+        return False
+    info = jobs.get(name)
+    return bool(info) and info.get("run_at") == run_at
 
 
 def _release_finished_reservations(
@@ -377,14 +400,16 @@ def _spawn_deepthink(
     1. Creates a Conductor track with workstreams (probe → judge → artisan → engine → scribe)
     2. Spawns a Hermes cron session that runs the Conductor
 
-    Retries up to 3 times with exponential backoff (5s/15s/30s).
+    Retries up to 3 times with exponential backoff (5s/10s/20s).
     Reserves a pending job before spawning the review; marks the job as
     complete on success or failed if all attempts fail.
     Returns True if spawned successfully, False otherwise.
     """
     max_retries = 3
     base_delay = 5  # seconds
-    name = f"riptide-review-{owner}-{repo}-{pr_number}"
+    # The job name is also the Conductor track id and the sign-off's handle, so it
+    # is built in exactly one place (`assemble_review.review_job_name`).
+    name = review_job_name(owner, repo, pr_number)
     run_at = (datetime.now() + timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%S")
     triggered_at = datetime.now(timezone.utc).isoformat()
 
@@ -559,6 +584,17 @@ def _spawn_deepthink(
     try:
         for attempt in range(max_retries):
             if attempt > 0:
+                # The previous attempt may have created the job before it timed out
+                # (the CLI is sometimes slower than the 15s subprocess timeout).
+                # Recreating with the same --name and run_at would schedule a second
+                # review for the same PR: two Hermes sessions, two bills, one PR.
+                if _job_already_scheduled(name, run_at):
+                    log.info(
+                        f"✓ Spawn already landed for {owner}/{repo}#{pr_number} "
+                        f"({name} at {run_at}) — not recreating"
+                    )
+                    scheduled = True
+                    return True
                 delay = base_delay * (2 ** attempt)  # 5s, 10s, 20s
                 log.info(f"Retry {attempt+1}/{max_retries} for {owner}/{repo}#{pr_number} in {delay}s...")
                 time.sleep(delay)
@@ -846,10 +882,10 @@ def _build_conductor_prompt(
 {deterministic_hint}
 
 ## Task
-1. Import and instantiate the Conductor for track "riptide-review-{owner}-{repo}-{pr_number}":
+1. Import and instantiate the Conductor for track "{review_job_name(owner, repo, pr_number)}":
    ```python
    from riptide.pipeline.conductor import Conductor
-   conductor = Conductor("riptide-review-{owner}-{repo}-{pr_number}")
+   conductor = Conductor("{review_job_name(owner, repo, pr_number)}")
    result = conductor.run()
    ```
 2. The Conductor will dispatch workers: Probe → Judge → Artisan → Engine → Scribe.
@@ -917,6 +953,15 @@ def run():
             total_loc = pr.get("additions", 0) + pr.get("deletions", 0)
             updated_at_str = pr.get("updatedAt", "")
             head_sha = pr.get("headRefOid", "")
+
+            # A review's findings outlive the code they describe: keep the newest
+            # findings review's status block current so a reader (and the CI gate)
+            # can see what still stands. Cheap when there is nothing to do — one
+            # comment fetch, no writes — and it must never stop the poll.
+            try:
+                refresh_review_status(owner, repo_name, pr_number)
+            except Exception as exc:
+                log.warning(f"  #{pr_number} finding-status refresh failed: {exc}")
 
             # Filter 3: Ownership
             if owner != OUR_ORG and pr_author != OUR_USERNAME:

@@ -31,6 +31,11 @@ from .warden import Warden
 from .scribe import Scribe
 from .ci_verifier import CIVerifier
 
+# The review job name has exactly one builder: it doubles as the spawner's
+# `hermes cron create --name` and as this module's track id, so a second copy of
+# the format would silently break the sign-off's handle.
+from riptide.assemble_review import review_job_name
+
 
 def _canonical_output_path(pr_number: int, role: str, track_id: str = "") -> str:
     """Per-workstream output path for one review run.
@@ -363,6 +368,7 @@ class Conductor:
                 brief.inputs.get("diagram_url"),
                 model=brief.inputs.get("model"),
                 provider=brief.inputs.get("provider"),
+                head_sha=brief.inputs.get("head_sha", ""),
             )
         elif action == "record_review":
             findings, err = self._resolve_findings(brief)
@@ -486,7 +492,7 @@ def create_deepthink_review_pipeline(
 
     Returns the created track dict with all workstreams staged.
     """
-    track_id = f"riptide-review-{owner}-{repo}-{pr_number}"
+    track_id = review_job_name(owner, repo, pr_number)
 
     track = get_track(track_id)
     if not track:
@@ -644,6 +650,9 @@ def create_webhook_review_pipeline(
             # code default instead of the model that actually reviewed.
             "model": model,
             "provider": provider,
+            # The reviewed revision, so the sign-off's job handle and the
+            # review_memory row both name the commit the verdict belongs to.
+            "head_sha": pr_details.get("head", {}).get("sha", ""),
         },
         acceptance={"posted": True},
         role="scribe",
