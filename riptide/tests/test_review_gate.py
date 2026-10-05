@@ -432,6 +432,32 @@ def test_a_quoted_row_is_not_a_finding(tmp_path):
     assert "finding row(s)" not in proc.stdout
 
 
+FENCED_ROW_REVIEW = f"""## Review: no findings. The format is:
+
+```
+| | Finding | File |
+|---|---|---|
+| 🟡 | A format example, fenced | `_render_bucket_row()` |
+```
+
+{SIGNOFF}
+"""
+
+
+def test_a_fenced_row_is_not_a_finding(tmp_path):
+    """A severity row inside a fenced code block documents the format; the row
+    predicate cannot see fences, so without stripping them the quoted row's
+    File cell (`_render_bucket_row()`) would be demanded as a path — a red no
+    push can clear, the same trap as the blockquoted row above."""
+    data = write_data(tmp_path, reviews=[(42, REVIEWED_AT, FENCED_ROW_REVIEW)])
+
+    proc = run_gate(data)
+
+    assert proc.returncode == 0
+    assert "is clean" in proc.stdout
+    assert "_render_bucket_row" not in proc.stdout
+
+
 # ── Ordering ties, and File cells the parser must read as paths ─────────────
 
 

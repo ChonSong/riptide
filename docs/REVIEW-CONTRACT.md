@@ -25,16 +25,25 @@ table.
 | `## Riptide Pass: ✅ No findings` | `companion.py` deterministic pass | "The deterministic pass ran and found nothing" — not a review | **Yes** | **No** |
 
 - **The CI gate** is `scripts/check_riptide_review.sh`; the workflow only builds its
-  data file from the API and runs the script. It matches a body containing
-  `## 🔍 Findings`, `## 🎯 Summary`, or `Riptide Review ·` as a review, and treats
-  `## Riptide Pass:` as a non-review. Both exclusions — the Companion's complexity
-  pre-pass (`## ✨ Review Required`) and the pass — are anchored to a comment's
-  **first line**, so a review that merely *quotes* those headings is still a
-  review. It does **not** test for `## Review:` — that header is presentational.
-  What carries a real review past the gate is the `Riptide Review ·` sign-off,
+  data file from the API and runs the script. A comment is a review when its
+  **first line** starts `## Review:` **and** its body carries the
+  `Riptide Review ·` sign-off. Exclusions — the Companion's complexity
+  pre-pass (`## ✨ Review Required`) and the pass (`## Riptide Pass:`) — are
+  anchored to a comment's **first line**, so a review that merely *quotes*
+  those headings is still a review; inclusion is anchored the same way, so a
+  later non-review comment that merely *names* the sign-off (a fix summary, a
+  session log) is not a review and cannot clear the gate. The 🔍 Findings /
+  🎯 Summary headers are presentational: emitted inside real reviews, not
+  matched by the selector. What carries a real review past the gate is the
+  `Riptide Review ·` sign-off,
   which `assemble_review.py` always writes (both `_build_signoff()` and
   `_build_success_footer()`) — for the current format. A legacy body matches on
-  its `## 🔍 Findings` / `## 🎯 Summary` heading alone.
+  its `## 🔍 Findings` / `## 🎯 Summary` heading alone. Severity rows quoted
+  inside fenced code blocks are documentation, not findings — the gate strips
+  fenced regions before collecting rows. A commit's `files` array is capped
+  at 300 entries by the API (it is not paginated) — a larger commit can lose
+  filenames past the cap and draw a false red, clearable by any later commit
+  touching a named file.
 - **The poller's skip decision** uses `deepthink.RIPTIDE_REVIEW_MARKERS`, which
   deliberately excludes `## Riptide Pass:`. A deterministic pass must not make a
   PR look deep-reviewed, or a PR whose review never landed looks reviewed forever.

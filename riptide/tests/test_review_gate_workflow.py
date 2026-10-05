@@ -110,12 +110,43 @@ def test_the_pass_is_used_when_it_is_the_only_marker(tmp_path):
 def test_gate_matches_the_markers_a_real_review_carries():
     text = _script_text()
     for marker in (
-        "## 🔍 Findings",
-        "## 🎯 Summary",
         "Riptide Review ·",
         "## Riptide Pass:",
     ):
         assert marker in text, f"the selector lost the {marker!r} marker"
+    # Inclusion is anchored to the first line: a real review starts `## Review:`
+    # and carries the sign-off; a later non-review comment that merely names a
+    # marker in its body must not be selected (the sign-off-shadow regression).
+    assert '[[ "$head" == "## Review:"* && "$body" == *"Riptide Review ·"* ]]' in text, (
+        "the anchored review-inclusion predicate is gone from the selector"
+    )
+
+
+def test_a_later_non_review_comment_naming_the_signoff_does_not_shadow(tmp_path):
+    """The regression: inclusion markers tested the WHOLE body, so a fix
+    summary that merely names the sign-off in prose was selected as the newest
+    review and, carrying no severity rows, reported clean with no commit
+    required — the findings review was never judged. Inclusion is now anchored
+    to the first line (real reviews start `## Review:`) plus the sign-off."""
+    fix_summary = (
+        "## 🛠 Riptide Fix — #223 @ `abc` → `def`\n\n"
+        "Both merge blockers addressed:\n\n"
+        "1. Stale failure path guard — added the generation check.\n"
+        "2. The `Riptide Review ·` sign-off now travels with the payload.\n"
+    )
+    chosen = _judge(tmp_path, [
+        _record(REVIEW, "2026-01-01T00:01:00Z", 10),
+        _record(fix_summary, "2026-01-01T00:02:00Z", 11),
+    ])
+    assert chosen == "review 10", chosen
+
+
+def test_a_review_is_still_chosen_when_a_later_review_shares_the_header(tmp_path):
+    chosen = _judge(tmp_path, [
+        _record(REVIEW, "2026-01-01T00:01:00Z", 20),
+        _record(REVIEW, "2026-01-01T00:03:00Z", 21),
+    ])
+    assert chosen == "review 21", chosen
 
 
 def test_gate_does_not_use_a_loose_critical_warning_clause():
@@ -146,12 +177,21 @@ def test_the_workflow_runs_the_script_and_keeps_no_inline_selector():
     )
 
 
-def test_the_workflow_paginates_a_commit_s_changed_files():
-    """A commit's `files` array is paginated. Without `--paginate` the data file
-    loses the filenames past the first page, and the gate rejects a commit that did
-    touch the file a finding names."""
-    lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
+def test_the_workflow_does_not_claim_commit_file_pagination():
+    """A commit's `files` array is NOT paginated (no Link header), so the old
+    `--paginate` on the per-commit request was a no-op protecting nothing. The
+    real limit is API-side (300 files per commit); the workflow states the cap
+    instead of testing a flag that does nothing."""
+    text = WORKFLOW.read_text(encoding="utf-8")
+    lines = text.splitlines()
     files_request = next(i for i, line in enumerate(lines) if "file \\(.filename)" in line)
-    request = "\n".join(lines[max(0, files_request - 3):files_request])
-
-    assert "gh api" in request and "--paginate" in request, request
+    request = "\n".join(lines[max(0, files_request - 3):files_request + 1])
+    assert "gh api" in request, request
+    assert "--paginate" not in request, (
+        "the per-commit files request carries --paginate again — it is a no-op "
+        "on this endpoint and the comment above it must not claim pagination"
+    )
+    assert "300" in text, (
+        "the workflow no longer states the API's 300-file cap for a commit's "
+        "`files` array"
+    )

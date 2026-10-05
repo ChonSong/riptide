@@ -195,7 +195,15 @@ for i in "${!REVIEW_IDS[@]}"; do
     continue
   fi
 
-  if [[ "$body" == *"## 🔍 Findings"* || "$body" == *"## 🎯 Summary"* || "$body" == *"Riptide Review ·"* ]]; then
+  # Inclusion is anchored to the first line too, for the same reason as the
+  # exclusions: a later non-review comment whose body merely NAMES a marker —
+  # a fix summary quoting the sign-off, a session log — would be selected as
+  # the newest review and, carrying no severity rows, report clean with no
+  # commit required, clearing the gate without a review ever existing. Every
+  # real review starts `## Review:` (assemble_review.py's first emitted
+  # part); the `Riptide Review ·` sign-off is still required in the body,
+  # which no fix summary or log carries.
+  if [[ "$head" == "## Review:"* && "$body" == *"Riptide Review ·"* ]]; then
     if [ "$review_index" -eq -1 ] || newer_than "${REVIEW_TS[$i]}" "${REVIEW_IDS[$i]}" \
       "${REVIEW_TS[$review_index]}" "${REVIEW_IDS[$review_index]}"; then
       review_index="$i"
@@ -227,7 +235,24 @@ REVIEW_TIME="${REVIEW_TS[$review_index]}"
 
 ROW_RE='^[[:space:]]*\|[[:space:]]*(🔴|🟡)'
 
-rows="$(printf '%s' "$REVIEW_BODY" | grep -E "$ROW_RE" || true)"
+# A severity row quoted inside a fenced code block is documentation (a format
+# example), not a finding — but the row predicate cannot tell a fence apart,
+# so a quoted row's File cell would be demanded as a path no push can satisfy.
+# Drop fenced regions before collecting rows.
+strip_fenced() {
+  python3 - "$1" << 'PYEOF'
+import re, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+stripped = re.sub(r"```.*?```", "", text, flags=re.DOTALL)
+open(sys.argv[1], "w", encoding="utf-8").write(stripped)
+PYEOF
+}
+
+rows_file="$(mktemp)"
+printf '%s' "$REVIEW_BODY" > "$rows_file"
+strip_fenced "$rows_file"
+rows="$(grep -E "$ROW_RE" "$rows_file" || true)"
+rm -f "$rows_file"
 row_count="$(printf '%s\n' "$rows" | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')"
 
 if [ "$row_count" -eq 0 ]; then

@@ -56,11 +56,13 @@ jobs:
             [ -n "${sha}" ] || continue
             gh api "repos/${REPO}/commits/${sha}" \
               --jq '"commit \(.sha) \(.commit.committer.date // .commit.author.date)"' >>"${data}"
-            # A commit's `files` array is paginated, so fetch every page: a commit
-            # that changed more files than one page returns would otherwise lose the
-            # filenames past the first page, and the gate would reject a commit that
-            # did touch the file a finding names.
-            gh api "repos/${REPO}/commits/${sha}" --paginate \
+            # Fetch every changed file per commit. NOTE: a commit's `files`
+            # array is NOT paginated (no Link header — the flag is a no-op
+            # here, kept off); the real limit is API-side: `files` is capped
+            # at 300 entries, so a commit beyond that can still lose
+            # filenames and draw a false red, clearable by any later commit
+            # touching a named file.
+            gh api "repos/${REPO}/commits/${sha}" \
               --jq '(.files // [])[] | "file \(.filename)"' >>"${data}"
           done <"${shas}"
 
