@@ -532,6 +532,17 @@ async def handle_issue_comment(payload: dict, delivery_id: str) -> Response:
             log.info(f"[{delivery_id}] Skipping own bot comment: {bot_login}")
             return Response(status_code=200)
 
+    # Owner-authored failure reports must not self-trigger review spawns: the
+    # comment body intentionally does NOT contain the literal command phrase,
+    # but a future edit could reintroduce it — the marker is the second gate.
+    failure_marker = "⚠️ Riptide review job FAILED:"
+    if failure_marker in body:
+        log.info(
+            f"[{delivery_id}] Skipping review-failure report (self-trigger guard): "
+            f"{comment.get('user', {}).get('login', 'unknown')}"
+        )
+        return Response(status_code=200)
+
     is_pr = bool(issue.get("pull_request"))
     if not is_pr:
         return Response(status_code=200)

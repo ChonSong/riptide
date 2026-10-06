@@ -5,7 +5,9 @@ Covers spawn logic, LOC filtering, state save/load, and dedup.
 """
 
 import json
+import os
 import subprocess
+import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -835,12 +837,17 @@ class TestFailedJobReporting:
         post.assert_not_called()
 
     def test_failure_comment_names_job_and_is_deduped(self):
-        """The posted body carries the job name (chaseable) and the dedup check
-        gates the post: marker absent -> comment posted with the name inside."""
+        """The posted body carries the job name + failed-run stamp (chaseable)
+        and the dedup check gates the post: marker absent -> comment posted
+        with the name inside. The body must NOT contain the literal command
+        phrase — the webhook self-trigger guard keys on the marker instead."""
         from riptide.deepthink import _post_failure_comment
         import riptide.deepthink as dt
 
-        marker = "⚠️ Riptide review job FAILED: `riptide-review-ChonSong-riptide-214`"
+        marker = (
+            "⚠️ Riptide review job FAILED: "
+            "`riptide-review-ChonSong-riptide-214` (2026-10-05T23:18:22Z)"
+        )
         captured = {}
 
         def fake_run(cmd, **kwargs):
@@ -863,10 +870,83 @@ class TestFailedJobReporting:
                 {"last_run_at": "2026-10-05T23:18:22Z"},
             )
         assert marker in captured.get("body", ""), (
-            "the failure comment body never carried the job name"
+            "the failure comment body never carried the job name + run stamp"
         )
-        assert "last_status: error" in captured["body"]
-        assert "@riptide-bot review" in captured["body"]
+        assert "last_status: error" in captured[ "body"]
+        # The literal command phrase must never appear in the body: an
+        # owner-authored comment containing it parses as a real review request.
+        assert "`@riptide-bot review`" not in captured["body"]
+
+    def test_failure_comment_marker_varies_per_failed_run(self):
+        """Dedup is per failure run: the dedup marker embeds last_run_at, so a
+        NEW failed run of the same job produces a different marker and is
+        reportable (the old once-forever marker suppressed later failures)."""
+        from riptide.deepthink import _post_failure_comment
+        import riptide.deepthink as dt
+
+        markers = []
+
+        def fake_run(cmd, **kwargs):
+            r = MagicMock()
+            r.returncode = 0
+            r.stderr = ""
+            jq_idx = [i for i, a in enumerate(cmd) if a == "--jq"]
+            if jq_idx:
+                markers.append(cmd[jq_idx[0] + 1])
+                r.stdout = "true\n"  # already posted: skip the post
+            return r
+
+        with patch.object(dt.subprocess, "run", side_effect=fake_run):
+            _post_failure_comment(
+                "ChonSong", "riptide", 214,
+                "riptide-review-ChonSong-riptide-214",
+                {"last_run_at": "2026-10-05T23:18:22Z"},
+            )
+            _post_failure_comment(
+                "ChonSong", "riptide", 214,
+                "riptide-review-ChonSong-riptide-214",
+                {"last_run_at": "2026-10-06T09:00:00Z"},
+            )
+        assert len(markers) == 2
+        assert markers[0] != markers[1], (
+            "two different failed runs produced the same dedup marker — "
+            "the second failure would be silently suppressed"
+        )
+
+    def test_cron_job_states_projects_last_run_at(self):
+        """The store projection must carry last_run_at: it feeds both the
+        failure-comment run stamp and the per-run dedup marker. Dropping it
+        made every failure read 'last run (unknown)' and made dedup
+        once-per-job-name forever."""
+        import riptide.deepthink as dt
+
+        store = {
+            "jobs": [
+                {
+                    "name": "riptide-review-X",
+                    "state": "completed",
+                    "last_status": "error",
+                    "enabled": False,
+                    "last_run_at": "2026-10-05T23:18:22Z",
+                    "schedule": {"run_at": "2026-10-05T23:18:20+00:00"},
+                }
+            ]
+        }
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump(store, f)
+            tmp_path = f.name
+        try:
+            with patch.object(dt, "CRON_JOBS_PATH", Path(tmp_path)):
+                states = dt._cron_job_states()
+        finally:
+            os.unlink(tmp_path)
+        assert states is not None
+        info = states["riptide-review-X"]
+        assert info["last_run_at"] == "2026-10-05T23:18:22Z", (
+            "_cron_job_states dropped last_run_at — failure dedup degrades to "
+            "once-per-job-name and the comment shows 'last run (unknown)'"
+        )
+        assert info["run_at"] == "2026-10-05T23:18:20+00:00"
 
     def test_failure_comment_skipped_when_already_posted(self):
         from riptide.deepthink import _post_failure_comment

@@ -139,6 +139,11 @@ def _cron_job_states() -> "dict[str, dict] | None":
                 # Kept so a spawn can tell "this attempt's job" from an earlier
                 # review of the same PR — the name alone is not enough.
                 "run_at": (job.get("schedule") or {}).get("run_at"),
+                # Real store field (set by the scheduler after each run). Needed
+                # by _post_failure_comment's per-run dedup marker; dropping it
+                # made every failure read "last run (unknown)" and made the
+                # once-per-failure docstring a lie (dedup was once forever).
+                "last_run_at": job.get("last_run_at"),
             }
     return states
 
@@ -232,11 +237,16 @@ def _post_failure_comment(
     A spawned session that dies after the ack (LLM quota, crash) otherwise
     leaves "🧠 triggered!" as the last word on the PR — silent from the
     requester's side. This says the run FAILED, names the job to chase, and
-    carries the store's own evidence. Deduped on ``last_run_at``: the same
-    failure is reported once, not once per poll.
+    carries the store's own evidence. Deduped per failure run: the marker
+    embeds the failed run's ``last_run_at``, so the same failure is reported
+    once while a genuinely new failed run of the same job posts a fresh
+    comment instead of being suppressed forever.
     """
-    marker = f"⚠️ Riptide review job FAILED: `{job_name}`"
     last_run = str(info.get("last_run_at") or "unknown")
+    # The run stamp makes the marker per-failure-run (a later failed run must
+    # be reportable) and keeps bot-authored reports from re-triggering the
+    # webhook (which drops comments carrying this marker).
+    marker = f"⚠️ Riptide review job FAILED: `{job_name}` ({last_run})"
     jq = f'[.[].body] | any(contains("{marker}"))'
     try:
         proc = subprocess.run(
@@ -258,8 +268,9 @@ def _post_failure_comment(
         f"`last_status: error`, so no review was produced.\n\n"
         f"**Chase it:** `hermes cron list | grep {job_name}` and "
         f"`hermes cron output {job_name}` for the session log.\n\n"
-        f"Re-trigger with `@riptide-bot review` once the cause is fixed "
-        f"(common cause: the configured review provider is out of quota)."
+        f"To re-trigger, comment `@riptide-bot` `review` on this PR once the "
+        f"cause is fixed (common cause: the configured review provider is out "
+        f"of quota)."
     )
     proc = subprocess.run(
         [
