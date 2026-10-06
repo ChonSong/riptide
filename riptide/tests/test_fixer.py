@@ -7,6 +7,7 @@ import pytest
 
 from riptide.fixer import (
     FIX_RE,
+    FIX_MODEL,
     OUR_USERNAME,
     handle_fix_command,
     process_fix_queue,
@@ -15,6 +16,7 @@ from riptide.fixer import (
     _is_cron_available,
     _spawn_fix,
     _build_fix_prompt,
+    fix_job_name,
 )
 
 
@@ -331,6 +333,71 @@ class TestSpawnFix:
         mock_state.return_value.mark_failed.assert_called_once()
 
 
+# ── _spawn_fix ↔ create_fix_pipeline wiring ─────────────────────────────────
+
+
+class TestSpawnFixStagesPipeline:
+    """`_spawn_fix` must stage the fix pipeline and hand its track id to the
+    prompt — and fall back to a prompt without a track when staging fails."""
+
+    def _kwargs(self, **overrides) -> dict:
+        base: dict = dict(
+            owner="ChonSong",
+            repo="riptide",
+            pr_number=42,
+            pr_title="fix: repair flaky test",
+            pr_author="test-user",
+            total_loc=150,
+            head_sha="abc123def4567890",
+            head_ref="fix-branch",
+            description="",
+            push_eligible=True,
+        )
+        base.update(overrides)
+        return base
+
+    def test_spawn_stages_pipeline_and_embeds_track_id(self):
+        with patch("riptide.state.StateStore") as mock_state, \
+             patch("riptide.pipeline.conductor.create_fix_pipeline") as mock_pipeline, \
+             patch("subprocess.run") as mock_run:
+            mock_state.return_value.reserve_job.return_value = True
+            mock_pipeline.return_value = {"track_id": "riptide-fix-ChonSong-riptide-42"}
+            mock_run.return_value = MagicMock(returncode=0)
+            result = _spawn_fix(**self._kwargs(files=[{"filename": "a.py"}]))
+
+        assert result is True
+        mock_pipeline.assert_called_once()
+        args, kwargs = mock_pipeline.call_args
+        assert args == ("ChonSong", "riptide", 42)
+        assert kwargs["pr_details"] == {}
+        assert kwargs["files"] == [{"filename": "a.py"}]
+        assert kwargs["description"] == ""
+        assert kwargs["push_eligible"] is True
+
+        prompt = mock_run.call_args[0][0][4]
+        assert "riptide-fix-ChonSong-riptide-42" in prompt
+
+    def test_spawn_falls_back_when_pipeline_creation_raises(self):
+        with patch("riptide.state.StateStore") as mock_state, \
+             patch("riptide.pipeline.conductor.create_fix_pipeline",
+                   side_effect=RuntimeError("state store down")), \
+             patch("subprocess.run") as mock_run:
+            mock_state.return_value.reserve_job.return_value = True
+            mock_run.return_value = MagicMock(returncode=0)
+            result = _spawn_fix(**self._kwargs())
+
+        assert result is True
+        prompt = mock_run.call_args[0][0][4]
+        assert "No pipeline track was staged" in prompt
+
+    def test_fix_job_name_public_builder_backed_by_private_alias(self):
+        """Task contract: fix_job_name is the public builder; the private name
+        stays importable for pre-W2 callers."""
+        assert fix_job_name("ChonSong", "riptide", 42) == "riptide-fix-ChonSong-riptide-42"
+        from riptide import fixer
+        assert fixer._fix_job_name is fixer.fix_job_name
+
+
 # ── _build_fix_prompt ────────────────────────────────────────────────────────
 
 
@@ -379,6 +446,25 @@ class TestBuildFixPrompt:
     def test_prompt_not_push_eligible_says_do_not_push(self):
         prompt = _build_fix_prompt(**self._kwargs(push_eligible=False))
         assert "Do NOT push" in prompt
+
+    def test_prompt_names_track_findings_and_footer_without_procedural_steps(self):
+        """Thin mission statement: track id + findings pointer + footer in,
+        inline gh-api fetches and PYTHONPATH preamble out."""
+        prompt = _build_fix_prompt(**self._kwargs(track_id="riptide-fix-ChonSong-riptide-7"))
+        assert "gh api" not in prompt
+        assert "sys.path.insert" not in prompt
+        assert "riptide-fix-ChonSong-riptide-7" in prompt
+        assert "review_findings" in prompt
+        assert "Riptide Fix via Hermes" in prompt
+        assert f"model: {FIX_MODEL}" in prompt
+
+    def test_prompt_without_track_still_carries_the_mission(self):
+        """Pipeline staging failed at spawn: the fallback prompt must still
+        scope the work, gate the verdicts, and carry the footer."""
+        prompt = _build_fix_prompt(**self._kwargs(track_id=""))
+        assert "No pipeline track was staged" in prompt
+        assert "skip-already-addressed" in prompt
+        assert "Riptide Fix via Hermes" in prompt
 
 
 # ── handle_fix_command integration ───────────────────────────────────────────

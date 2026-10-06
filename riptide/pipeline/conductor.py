@@ -683,9 +683,18 @@ def create_fix_pipeline(
     5. ci_verifier → poll GitHub CI, classify failures
     6. scribe → post summary comment with CI results
 
+    The track id is the same string `fixer.fix_job_name` hands to
+    `hermes cron create --name`, so the spawned fix session and its staged
+    StateStore workstreams share one chaseable handle.
+
     Returns the created track dict with all workstreams staged.
     """
-    track_id = f"riptide-fix-{owner}-{repo}-{pr_number}"
+    # fixer imports nothing from riptide.pipeline (only riptide.state, a leaf),
+    # so this import cannot cycle. Kept local so importing conductor for the
+    # review pipelines never pays fixer's import cost.
+    from riptide.fixer import fix_job_name
+
+    track_id = fix_job_name(owner, repo, pr_number)
 
     track = get_track(track_id)
     if not track:
@@ -698,6 +707,11 @@ def create_fix_pipeline(
 
     head_sha = pr_details.get("head", {}).get("sha", "")
 
+    # Probe's gather() runs _get_review_findings (Riptide review comments,
+    # CodeRabbit, other reviewers) and writes the whole context — findings
+    # included — to the canonical probe artifact; the file-existence acceptance
+    # therefore also gates the findings the judge consumes.
+    probe_output_path = _canonical_output_path(pr_number, "probe")
     create_workstream(
         track_id,
         "ws-1-probe",
@@ -707,6 +721,7 @@ def create_fix_pipeline(
             "repo": repo,
             "files": files,
             "head_sha": head_sha,
+            "review_findings_path": probe_output_path,
         },
         acceptance={"output_exists": True},
         role="probe",
@@ -717,7 +732,9 @@ def create_fix_pipeline(
         track_id,
         "ws-2-judge",
         inputs={
-            "context_path": f"/tmp/pr-{pr_number}-context.json",
+            # Must be the probe's real output path: the judge fails loudly on
+            # a missing context file, and a guessed path would fail every run.
+            "context_path": probe_output_path,
             "description": description,
         },
         acceptance={"findings_valid": True},
@@ -729,7 +746,7 @@ def create_fix_pipeline(
         track_id,
         "ws-3-artisan",
         inputs={
-            "findings_path": "/tmp/findings.json",
+            "findings_path": _canonical_output_path(pr_number, "judge"),
             "files": files,
             "push_eligible": push_eligible,
         },
@@ -780,4 +797,7 @@ def create_fix_pipeline(
         pipeline=["format_summary", "post_comment"],
     )
 
+    # Annotate (not mutate StateStore): _new_track() records carry no track_id
+    # key, but the spawner needs the handle for the prompt's mission statement.
+    track["track_id"] = track_id
     return track

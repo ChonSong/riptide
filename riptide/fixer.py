@@ -244,6 +244,7 @@ def handle_fix_command(
             head_ref=head_ref,
             description=description.strip(),
             push_eligible=push_eligible,
+            files=_get_pr_files(client, installation_id, owner, repo, pr_number),
         )
 
     try:
@@ -308,7 +309,7 @@ def handle_fix_command(
         if description.strip()
         else "all outstanding review findings"
     )
-    job_name = _fix_job_name(owner, repo, pr_number)
+    job_name = fix_job_name(owner, repo, pr_number)
     return (
         f"🛠 **Riptide Fix triggered for #{pr_number}!**\n\n"
         f"A Hermes fix session has been scheduled and will begin within 2 minutes. "
@@ -341,14 +342,36 @@ def _is_cron_available() -> bool:
     return shutil.which("hermes") is not None
 
 
-def _fix_job_name(owner: str, repo: str, pr_number: int) -> str:
+def _get_pr_files(client, installation_id: int | None, owner: str, repo: str,
+                  pr_number: int) -> list[dict]:
+    """Fetch the PR's changed files; degrade to [] on any API failure.
+
+    Staged into the fix pipeline's workstream inputs. The probe workstream
+    re-fetches authoritative data via gather(), so a failure here only costs
+    the artisan stage its file hints — it must never block the spawn.
+    """
+    try:
+        return client.get_pr_files(installation_id, owner, repo, pr_number) or []
+    except Exception as e:
+        log.warning("Could not fetch PR files for %s/%s#%d: %s", owner, repo, pr_number, e)
+        return []
+
+
+def fix_job_name(owner: str, repo: str, pr_number: int) -> str:
     """Deterministic Hermes cron job name for one PR's fix session.
 
     Single source of truth for the name: `_spawn_fix` hands this exact string to
-    `hermes cron create --name`, and the ack comment quotes it so a reader can
-    chase the job (`hermes cron list`) instead of asking where it went.
+    `hermes cron create --name`, the ack comment quotes it so a reader can
+    chase the job (`hermes cron list`) instead of asking where it went, and
+    create_fix_pipeline reuses it as the StateStore track id so the staged
+    workstreams and the spawned job share one handle. Public so conductor.py
+    can import it without reaching into fixer privates.
     """
     return f"riptide-fix-{owner}-{repo}-{pr_number}"
+
+
+# Back-compat alias — pre-W2 callers (and tests) import the private name.
+_fix_job_name = fix_job_name
 
 
 def _spawn_fix(
@@ -362,17 +385,26 @@ def _spawn_fix(
     head_ref: str,
     description: str,
     push_eligible: bool,
+    files: Optional[list[dict]] = None,
 ) -> bool:
     """Spawn a Hermes cron session that edits, commits, and pushes the fix.
 
     Retries up to 3 times with exponential backoff (5s/10s/20s).
     Reserves a pending job before spawning; marks failed if all attempts
     fail. Returns True if spawned successfully, False otherwise.
+
+    files: the PR's changed files, staged into the fix pipeline's workstream
+    inputs. Optional — callers without a fetched list omit it.
     """
     max_retries = 3
     base_delay = 5  # seconds
-    name = _fix_job_name(owner, repo, pr_number)
+    name = fix_job_name(owner, repo, pr_number)
     run_at = (datetime.now() + timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%S")
+
+    # Files in the PR's diff, staged into the pipeline's workstream inputs.
+    # Callers with an API client pass it; direct callers (and the spawned
+    # session itself, via probe.gather()) re-fetch authoritative data.
+    files = list(files or [])
 
     # Cross-session awareness: clean up stale jobs, then atomically reserve
     from riptide.state import StateStore
@@ -393,6 +425,32 @@ def _spawn_fix(
         log.info(f"Skipping {owner}/{repo}#{pr_number} — fix already pending")
         return False
 
+    # Stage the fix pipeline (probe → judge → artisan → engine → ci_verifier →
+    # scribe) in StateStore and hand its track id to the prompt, so the spawned
+    # session resumes at the failed stage instead of replaying a procedure.
+    # Prompt-building must survive a StateStore outage, so failure here falls
+    # back to the thin prompt with no track — the fixer itself never breaks.
+    track_id = ""
+    try:
+        from riptide.pipeline.conductor import create_fix_pipeline
+
+        track = create_fix_pipeline(
+            owner,
+            repo,
+            pr_number,
+            pr_details={},
+            files=files,
+            description=description,
+            push_eligible=push_eligible,
+        )
+        track_id = track.get("track_id", "") if isinstance(track, dict) else ""
+        log.info(f"Staged fix pipeline track {track_id} for {owner}/{repo}#{pr_number}")
+    except Exception as e:
+        log.warning(
+            "create_fix_pipeline failed for %s/%s#%d — falling back to prompt without pipeline: %s",
+            owner, repo, pr_number, e,
+        )
+
     try:
         prompt = _build_fix_prompt(
             owner=owner,
@@ -406,6 +464,7 @@ def _spawn_fix(
             description=description,
             push_eligible=push_eligible,
             job_id=job_id,
+            track_id=track_id,
         )
     except Exception as e:
         state.mark_failed(job_id)
@@ -516,6 +575,7 @@ def process_fix_queue(client, owner: str = "ChonSong", repo: str = "riptide") ->
             head_ref=head_ref,
             description=description or "",
             push_eligible=push_eligible,
+            files=_get_pr_files(client, installation_id, owner, repo, pr_number),
         )
     except Exception as e:
         log.error(f"Failed to spawn queued fix: {e}")
@@ -542,14 +602,15 @@ def _build_fix_prompt(
     description: str,
     push_eligible: bool,
     job_id: str,
+    track_id: str = "",
 ) -> str:
     """Build the orchestrator prompt for the spawned fix session.
 
-    Self-aware and grounded: the session verifies each finding against the
-    current code before editing, edits only files in the PR's diff, runs
-    tests before pushing, and reports per-finding verdicts.
+    Thin by design: the procedure lives in the StateStore track staged by
+    create_fix_pipeline (probe → judge → artisan → engine → ci_verifier →
+    scribe). This prompt is the mission statement that points at it, so a
+    killed session resumes at the failed stage instead of replaying steps.
     """
-    today = datetime.now().strftime("%Y-%m-%d")
     scope_text = (
         f"Fix ONLY the problem described here: {description}"
         if description
@@ -569,67 +630,31 @@ Do NOT push. Instead post a PR comment containing the full patch
 apply this patch manually or open a PR in the base repository."
 Never stay silent."""
     )
+    track_line = (
+        f"Track {track_id}: run the staged workstreams in order — probe, judge, artisan, "
+        "engine, ci_verifier, scribe. Each stage's acceptance criteria gate the next; "
+        "StateStore work-state.json tracks progress and a killed session resumes at the "
+        "failed stage."
+        if track_id
+        else "No pipeline track was staged (StateStore unavailable at spawn): verify each "
+        "finding, apply minimal fixes, run the tests, then report."
+    )
 
     return f"""## Mission
 {scope_text}
 
-PR: #{pr_number} in {owner}/{repo} — "{pr_title}" by @{pr_author}
-HEAD: {head_sha[:12]} (branch: {head_ref}) · Changes: {total_loc} LOC
+PR: #{pr_number} in {owner}/{repo} — "{pr_title}" by @{pr_author} · HEAD {head_sha[:12]} (branch: {head_ref}) · {total_loc} LOC
 
-## Pre-flight (mandatory, in order)
-1. import sys; sys.path.insert(0, '{WORKSPACE_ROOT}')   # PYTHONPATH pitfall
-2. Clone/update the repo at the PR HEAD (fork-safe — `git fetch origin {head_ref}`
-   fails for fork PRs whose head lives on the fork, not the base repo):
-   `gh repo clone {owner}/{repo} /tmp/riptide-fix-{pr_number} -- --depth 50`
-   then `cd /tmp/riptide-fix-{pr_number} && git fetch origin pull/{pr_number}/head:pr-{pr_number} && git checkout {head_sha}`
-3. `gh pr view {pr_number} --repo {owner}/{repo} --json files,additions,deletions,headRefOid`
-4. Graphify first-pass (blast radius before editing anything):
-   `graphify query "<what does the file I'm changing touch>" --graph graphify-out/{today}/graph.json`
-   `graphify path <fileA> <fileB>` for callers of anything you will change.
+{track_line}
 
-## Verification gate (run BEFORE any edit — one finding at a time, sequential)
-Read the latest Riptide review comment on the PR:
-`gh api repos/{owner}/{repo}/issues/{pr_number}/comments --paginate` (take the last body that
-starts with `## Review:` or contains `## 🔍 Findings`), plus inline review threads
-(`gh api repos/{owner}/{repo}/pulls/{pr_number}/comments`).
-Current reviews lead with `## Review: <verdict>`, then numbered findings, then a 🔴/🟡 severity
-table; older reviews use a `## 🔍 Findings` section. Read whichever is present — a `## Riptide Pass:
-✅ No findings` comment is NOT a review and carries no findings.
-For EACH finding, verify it against the CURRENT code at {head_sha[:12]}:
-  - Fetch the file at the PR HEAD (never trust stale line numbers — match by code context).
-  - Verdict: `valid` (still present) | `skip-already-addressed` | `skip-stale-false-positive`.
-Only `valid` findings proceed to implementation. Skip the rest with a one-line reason.
+Findings (from all reviewers — Riptide, CodeRabbit, human) are in the probe stage's review_findings output. Verify each against the current code before editing: valid / skip-already-addressed / skip-stale-false-positive, with one line of evidence each.
 
-## Deep-think loop
-SURFACE → EXPLORE (graphify) → CHALLENGE → SYNTHESIZE → VALIDATE
-
-## Constraints (hard)
-- ONLY touch files in this PR's diff. Scope isolation.
-- NEVER edit github-private-key.pem, .env, or any credential/secret file.
-- NO force-push. NO rewriting pushed history.
-- Run the repo's test suite before pushing. No push on red tests.
-- Run `python -m py_compile` on every changed .py file.
-- Conventional Commits (fix(scope): ...).
-- Model attribution footer REQUIRED on the summary comment:
-  <sub>🤖 Riptide Fix via Hermes · model: {FIX_MODEL} · provider: {FIX_PROVIDER}</sub>
-  (use exactly this string — do not guess or substitute another model name)
-
-## Execution (sequential subagents — one at a time, never parallel)
-1. Verification subagent → per-finding verdicts (above).
-2. Implementation subagent → minimal, targeted edits for `valid` findings only.
-3. Test + validate → run repo tests; iterate until green.
+## Rules
+Only files in this PR's diff. NEVER edit github-private-key.pem, .env, or any credential/secret file. Run the repo's tests before pushing — No push on red tests. Conventional Commits (fix(scope): ...). NO force-push.
 {push_instructions}
 
-## Summary comment (always posted when done)
-Post a PR comment listing per-finding verdict + one-line reason, files
-touched, test results, and the commit SHA (or the patch if push was not
-authorized). Include the model attribution footer.
+Post a summary comment: per-finding verdict + one-line reason, files touched, test results, commit SHA (or the patch if push was not authorized). Attribution footer REQUIRED, exact string:
+<sub>🤖 Riptide Fix via Hermes · model: {FIX_MODEL} · provider: {FIX_PROVIDER}</sub>
 
-## Cleanup (mandatory — run AFTER posting the summary comment)
-import sys; sys.path.insert(0, '/home/sc/workspace/riptide')
-from riptide.orchestrator import StateStore
-state = StateStore()
-# Call ONE of these based on outcome:
-state.mark_complete('{job_id}')  # success: fixes applied and tested
-# state.mark_failed('{job_id}')   # failure: red tests, could not complete
+Cleanup: the scribe workstream handles StateStore mark_complete/mark_failed for job {job_id} — do not run StateStore calls manually.
 """

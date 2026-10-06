@@ -484,18 +484,24 @@ class TestFixerPromptReadiness:
             pr_title="t", pr_author="ChonSong", total_loc=10,
             head_sha="dcd7a5a1234567890", head_ref="fix/x", description="d",
             push_eligible=True, job_id="job-1",
+            track_id="riptide-fix-ChonSong-riptide-191",
         )
 
-    def test_points_at_the_current_review_format(self):
+    def test_points_at_the_staged_pipeline_and_findings(self):
+        """The thin prompt points at the track and the probe findings artifact,
+        not at inline gh-api fetch instructions."""
         prompt = self._prompt()
-        assert "## Review:" in prompt
-        assert "## Riptide Pass:" in prompt, "must warn that a pass is not a review"
-        assert "issues/191/comments" in prompt
+        assert "riptide-fix-ChonSong-riptide-191" in prompt
+        assert "review_findings" in prompt
+        assert "probe" in prompt
+        assert "gh api" not in prompt
+        assert "sys.path.insert" not in prompt
 
     def test_footer_names_the_configured_model(self):
         from riptide import fixer
         prompt = self._prompt()
         assert fixer.FIX_MODEL in prompt
+        assert "Riptide Fix via Hermes" in prompt
         assert "<model_name>" not in prompt
 
 
