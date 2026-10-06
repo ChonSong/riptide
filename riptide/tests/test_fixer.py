@@ -359,6 +359,8 @@ class TestSpawnFixStagesPipeline:
     def test_spawn_stages_pipeline_and_embeds_track_id(self):
         with patch("riptide.state.StateStore") as mock_state, \
              patch("riptide.pipeline.conductor.create_fix_pipeline") as mock_pipeline, \
+             patch("shutil.which", return_value="/usr/bin/hermes"), \
+             patch("time.sleep"), \
              patch("subprocess.run") as mock_run:
             mock_state.return_value.reserve_job.return_value = True
             mock_pipeline.return_value = {"track_id": "riptide-fix-ChonSong-riptide-42"}
@@ -381,6 +383,8 @@ class TestSpawnFixStagesPipeline:
         with patch("riptide.state.StateStore") as mock_state, \
              patch("riptide.pipeline.conductor.create_fix_pipeline",
                    side_effect=RuntimeError("state store down")), \
+             patch("shutil.which", return_value="/usr/bin/hermes"), \
+             patch("time.sleep"), \
              patch("subprocess.run") as mock_run:
             mock_state.return_value.reserve_job.return_value = True
             mock_run.return_value = MagicMock(returncode=0)
@@ -878,7 +882,7 @@ class TestFixQueueIsFallbackOnly:
         """`_spawn_fix` with no CLI: no subprocess, no success, retries skipped."""
         with patch("riptide.state.StateStore") as mock_state, \
              patch("riptide.fixer._is_cron_available", return_value=False), \
-             patch("riptide.fixer.time.sleep") as mock_sleep, \
+             patch("time.sleep") as mock_sleep, \
              patch("subprocess.run") as mock_run:
             mock_state.return_value.reserve_job.return_value = True
             spawned = _spawn_fix(
