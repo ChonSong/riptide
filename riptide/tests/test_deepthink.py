@@ -769,3 +769,121 @@ class TestHandleReviewCommand:
             assert "🧠" in result
             assert "triggered" in result
 
+
+
+# ── failed-job reporting: _release_finished_reservations + _post_failure_comment
+
+
+class TestFailedJobReporting:
+    """A spawned job whose session died after the ack (LLM 402, crash) must not
+    leave 'triggered!' as the PR's last word: the reservation is released AND a
+    chaseable failure comment lands on the PR, deduped so one failure = one comment."""
+
+    def _store_with_pending(self):
+        store = MagicMock(spec=StateStore)
+        store.list_pending_jobs.return_value = [
+            {"id": "job-1", "pr_number": 214, "job_name": "riptide-review-ChonSong-riptide-214"}
+        ]
+        return store
+
+    def test_failed_job_releases_and_posts_comment(self):
+        from riptide.deepthink import _release_finished_reservations
+        import riptide.deepthink as dt
+
+        store = self._store_with_pending()
+        states = {
+            "riptide-review-ChonSong-riptide-214": {
+                "state": None, "last_status": "error",
+                "enabled": False, "run_at": None,
+                "last_run_at": "2026-10-05T23:18:22Z",
+            }
+        }
+        with patch.object(dt, "_cron_job_states", return_value=states), \
+             patch.object(dt, "_post_failure_comment") as post:
+            released = _release_finished_reservations(
+                store, "riptide-review-ChonSong-riptide-214",
+                "ChonSong", "riptide", 214,
+            )
+        assert released == 1
+        store.mark_failed.assert_called_once_with("job-1")
+        post.assert_called_once()
+        args = post.call_args.args
+        assert args[:4] == ("ChonSong", "riptide", 214, "riptide-review-ChonSong-riptide-214")
+
+    def test_healthy_job_does_not_post_failure_comment(self):
+        from riptide.deepthink import _release_finished_reservations
+        import riptide.deepthink as dt
+
+        store = self._store_with_pending()
+        states = {
+            "riptide-review-ChonSong-riptide-214": {
+                "state": "completed", "last_status": "success",
+                "enabled": False, "run_at": None,
+                "last_run_at": "2026-10-05T23:18:22Z",
+            }
+        }
+        with patch.object(dt, "_cron_job_states", return_value=states), \
+             patch.object(dt, "_post_failure_comment") as post:
+            released = _release_finished_reservations(
+                store, "riptide-review-ChonSong-riptide-214",
+                "ChonSong", "riptide", 214,
+            )
+        assert released == 1
+        post.assert_not_called()
+
+    def test_failure_comment_names_job_and_is_deduped(self):
+        """The posted body carries the job name (chaseable) and the dedup check
+        gates the post: marker absent -> comment posted with the name inside."""
+        from riptide.deepthink import _post_failure_comment
+        import riptide.deepthink as dt
+
+        marker = "⚠️ Riptide review job FAILED: `riptide-review-ChonSong-riptide-214`"
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            r = MagicMock()
+            r.returncode = 0
+            r.stderr = ""
+            if any("contains" in str(a) for a in cmd):
+                r.stdout = "false\n"  # dedup check: not yet posted
+            else:
+                # the gh pr comment post: capture its --body value
+                r.stdout = "comment-url"
+                body_idx = list(cmd).index("--body")
+                captured["body"] = cmd[body_idx + 1]
+            return r
+
+        with patch.object(dt.subprocess, "run", side_effect=fake_run):
+            _post_failure_comment(
+                "ChonSong", "riptide", 214,
+                "riptide-review-ChonSong-riptide-214",
+                {"last_run_at": "2026-10-05T23:18:22Z"},
+            )
+        assert marker in captured.get("body", ""), (
+            "the failure comment body never carried the job name"
+        )
+        assert "last_status: error" in captured["body"]
+        assert "@riptide-bot review" in captured["body"]
+
+    def test_failure_comment_skipped_when_already_posted(self):
+        from riptide.deepthink import _post_failure_comment
+        import riptide.deepthink as dt
+
+        def fake_run(cmd, **kwargs):
+            r = MagicMock()
+            r.returncode = 0
+            r.stdout = "true\n" if any("contains" in a for a in cmd) else ""
+            r.stderr = ""
+            return r
+
+        with patch.object(dt.subprocess, "run", side_effect=fake_run) as run:
+            _post_failure_comment(
+                "ChonSong", "riptide", 214,
+                "riptide-review-ChonSong-riptide-214",
+                {"last_run_at": "2026-10-05T23:18:22Z"},
+            )
+        posted = [
+            c for c in run.call_args_list
+            if len(c.args) > 0 and "pr" in c.args[0] and "comment" in c.args[0]
+        ]
+        assert not posted, "a second failure comment was posted for the same failure"
