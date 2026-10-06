@@ -695,7 +695,7 @@ class Companion:
                     self._handle_degradation(installation_id, owner, repo, pr_number, full_name, client=active_client)
                     return
 
-                # Detect UI files for ProofShot section
+                # Detect UI files (drives the interactive ProofShot checkbox)
                 ui_extensions = {'.css', '.scss', '.less', '.html', '.jsx', '.tsx', '.vue', '.svelte', '.astro'}
                 ui_files = [f for f in files if any(f.get("filename", "").endswith(ext) for ext in ui_extensions)]
                 eli5 = self._generate_eli5(title, files, is_delta=is_delta, ollama_healthy=ollama_healthy)
@@ -762,7 +762,7 @@ class Companion:
                 logger.error("Failed to post pass confirmation: %s", e)
             return
 
-        # Detect UI files for ProofShot section
+        # Detect UI files (drives the interactive ProofShot checkbox)
         ui_extensions = {'.css', '.scss', '.less', '.html', '.jsx', '.tsx', '.vue', '.svelte', '.astro'}
         ui_files = [f for f in files if any(f.get("filename", "").endswith(ext) for ext in ui_extensions)]
 
@@ -949,17 +949,19 @@ class Companion:
         return ". ".join(parts) + ".", ui_files
 
     def _generate_tldr(self, title, author, files, graph_context, is_delta=False):
-        diff_analysis, ui_files = self._analyze_diffs(files)
+        diff_analysis, _ = self._analyze_diffs(files)
         impact = f"Blast radius: {graph_context['nodes']} code paths. " if graph_context and graph_context.get("nodes", 0) > 0 else ""
 
-        # ProofShot instruction for UI changes
-        proofshot_section = ""
-        if ui_files:
-            ui_list = ", ".join(f.get("filename", "").split("/")[-1] for f in ui_files[:5])
-            proofshot_section = f"""
-## 📸 ProofShot Required
-UI files changed: {ui_list}
-After applying fixes, run: proofshot start → verify UI → proofshot stop → proofshot pr <number>"""
+        # RETIRED: the proofshot-required claim is gone from the TL;DR prompt.
+        # Companion used to instruct the model to tell authors that ProofShot
+        # visual verification was required, and to hand it a screenshot header to
+        # paste in. Bot 3 could not produce that evidence: the capture target
+        # defaulted to localhost:8788, which is `hermes-webui-dev.service` — the
+        # Hermes WebUI dev instance, a different application from Riptide — so a
+        # capture there would have posted that app's login page as this PR's
+        # evidence. That default is gone (#220): a repo must declare its target,
+        # and a login gate is refused at capture time. Re-arm the claim only for
+        # a repo whose PRs change a capturable app that declares one.
 
         if is_delta:
             prompt = f"""Write a 2-3 sentence TL;DR focusing on what CHANGED in this latest push to the PR.
@@ -978,7 +980,7 @@ Instructions:
 - Sentence 1: What files/functions/patterns were added or modified in this push
 - Sentence 2: How these new changes affect the codebase
 - Sentence 3: What to double-check before merging
-- If UI files changed: ProofShot visual verification required{proofshot_section}
+- Never claim visual evidence was captured or is required (proofshot is retired)
 
 TLDR:"""
         else:
@@ -997,7 +999,7 @@ Instructions:
 - Sentence 1: What changed (mention specific files/functions/patterns)
 - Sentence 2: Impact on codebase
 - Sentence 3: What to double-check before merging
-- If UI files changed: ProofShot visual verification required{proofshot_section}
+- Never claim visual evidence was captured or is required (proofshot is retired)
 
 TLDR:"""
 
@@ -1279,10 +1281,21 @@ ELI5:"""
         if eli5:
             parts.append(f"\n**🧒 ELI5**\n{eli5}")
 
-        # ProofShot section for UI changes
-        if ui_files:
-            ui_names = ", ".join(f.get("filename", "").split("/")[-1] for f in ui_files[:5])
-            parts.append(f"\n**📸 ProofShot Required**\nUI files changed: {ui_names}\nPlease run ProofShot visual verification before merging.")
+        # RETIRED: UI-file changes no longer append a proofshot-required flag to
+        # the posted body. Companion claimed visual verification was required on
+        # every UI change, but Bot 3 had no target to produce it from:
+        #   * the capture target defaulted to port 8788, which is not dead — it is
+        #     `hermes-webui-dev.service` (`HERMES_WEBUI_PORT=8788`), the Hermes
+        #     WebUI dev instance and a different application from Riptide. A
+        #     capture there would have posted that app's login page as evidence
+        #     for this PR's UI change. No default survives (#220): the repo
+        #     declares its target, and a login gate is refused at capture time;
+        #   * `~/workspace/proofshot/cli.py` exists again (re-cloned 2026-09-21),
+        #     so proofshotter.py's importlib load of `ProofshotSession` resolves.
+        # The flag promised evidence no repo had declared; do not re-add it until
+        # a repo whose PRs change a capturable app declares a target and the
+        # posted capture proves that app. `ui_files` is still used below, for the
+        # interactive checkbox actions only.
 
         # GIF reaction
         gif_url = select_gif(emoji, title or "", files or [])

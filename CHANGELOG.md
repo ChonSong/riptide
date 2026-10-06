@@ -2,6 +2,42 @@
 
 ## [Unreleased]
 
+### Fixed (2026-09-22)
+
+- **This repo no longer declares a foreign capture target.**
+  `proofshot.config.json` pointed `ChonSong/riptide` at `:8790`, which is the
+  Hermes WebUI suite's instance — an app this repo's PRs do not change, and one
+  whose skip-onboarding boot leaves no login gate for the guard to catch. The file
+  is a schema example again, with no `url`, and its `_comment` records why. The
+  older, unreferenced `proofshot.config.example.json` no longer documents the
+  removed `localhost:8788` default.
+- **The t3 dispatch path kept its own dev-port default.** `orchestrator.py`
+  resolved its capture target from `RIPTIDE_PROOFSHOT_URL` or
+  `http://localhost:8788`, bypassing the declared-target contract. It now resolves
+  the PR's declared target like the poller and refuses to capture when none is
+  declared — the last of the three `8788` fallbacks.
+- **The `companion.py` notes still called :8788 "an unrelated application".** It is
+  `hermes-webui-dev.service` (`HERMES_WEBUI_PORT=8788`), the Hermes WebUI dev
+  instance: a different application from Riptide, and not a mystery one. The two
+  comments and the two `test_companion.py` docstrings now say so.
+
+### Fixed (2026-09-21)
+
+- **Bot 3 captured whatever happened to be on the developer's dev port.**
+  `proofshotter.py` fell back to `http://localhost:8788` in three places, so any
+  watched repo with a UI change captured whatever was listening there — a login
+  page, or another app — and posted it as that PR's visual verification. That port
+  is `hermes-webui-dev.service`, this project's own dev instance serving `master`,
+  so a capture there could not show a PR's change and raced with its user. A target
+  must now be declared (`url` in `proofshot.config.json`, or
+  `RIPTIDE_PROOFSHOT_URL`); a repo declaring neither is skipped
+  (`skipped(no-target)` in the run summary) instead of inheriting a guess.
+- **Nothing visual is posted until the captured page is checked.** A login gate
+  answers 200, so a status code cannot tell it from the app shell: the page is now
+  verified against the rendered DOM, and a gate fails the capture loudly rather
+  than posting. The evidence line names the verified target, and a failed evidence
+  comment is reported as a failure instead of "ProofShot complete".
+
 ### Fixed (2026-09-14)
 
 - **`@riptide-bot fix` wrote a duplicate `fix_queue` row.** A spawned fix left its

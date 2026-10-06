@@ -18,6 +18,22 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 
 log = logging.getLogger("riptide.state")
 
+
+def _metadata_json(metadata) -> Optional[str]:
+    """Serialise ``review_memory.metadata`` exactly once.
+
+    ``review_memory.store_review_outcome`` already encodes its dict, so the old
+    ``json.dumps(metadata)`` here encoded it a second time and the column held a
+    JSON *string literal* instead of the object it was given — reading it back
+    yielded a string, not the dict the caller recorded. Accept either form so the
+    column is always readable JSON.
+    """
+    if not metadata:
+        return None
+    if isinstance(metadata, str):
+        return metadata
+    return json.dumps(metadata)
+
 # ── Constants ────────────────────────────────────────────────────────────────
 
 # Deliveries stuck in 'processing' longer than this are considered stale
@@ -883,7 +899,7 @@ class StateStore:
                 verdict,
                 0,  # user_feedback — default 0 (no feedback yet)
                 now,
-                json.dumps(metadata) if metadata else None,
+                _metadata_json(metadata),
             ),
         )
 
