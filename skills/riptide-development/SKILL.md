@@ -21,6 +21,9 @@ When editing config-bearing code (URLs, paths), preserve the `os.environ.get()` 
 
 GitHub push protection blocks commits containing strings that look like secrets. In test fixtures that need to trigger secret-detection patterns, construct values at runtime via string concatenation with split fragments.
 
+## Visuals / docs enhancement — check the native renderer before external tools
+Riptide generates its own diagrams: `grafiphy/excalidraw_renderer.py` (render_review → upload_excalidraw) + the `diagram_analyst` skill, wired into the review pipeline (PR #166). Before reaching for external image/video tools (Ming-Image, hyperframes, etc.), grep the local skill corpus for the capability first: `grep -rli --include=SKILL.md -E "diagram|render|video" ~/.hermes/skills`. Docs-path diagrams should be mermaid fenced blocks — GitHub renders them natively, they diff in PRs, zero deps; Excalidraw is for generated review artifacts, not for docs files.
+
 ## Code Review Discipline
 
 When the user asks for a review-and-fix pass on a PR:
