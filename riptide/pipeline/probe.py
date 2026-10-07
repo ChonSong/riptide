@@ -295,32 +295,61 @@ class Probe:
                             reply_groups[rid] = []
                         reply_groups[rid].append(finding)
                     else:
-                        # Root comment
+                        # Root comment — remember its comment id so replies
+                        # (grouped by in_reply_to_id) can be merged into it.
                         finding["source"] = "coderabbitai"
+                        finding["_cr_comment_id"] = comment.get("id")
                         root_comments.append(finding)
                 continue
 
             # Other PR comments — skip
             continue
 
-        # Collapse reply chains: keep root comments only
-        # All replies are merged into the root via dedup later
+        # Collapse reply chains to roots, but do not drop reply content:
+        # each reply's body is appended to its root's body (the #227 review's
+        # repro: a reply adding a distinct issue never reached the output
+        # because only group[0] survived). Roots keep their identity; the fix
+        # session reads the full thread in the body.
         for f in root_comments:
             findings.append(f)
-
-        # Also add the reply-group roots (they carry the finding content)
         for rid, group in reply_groups.items():
-            if group:
-                findings.append(group[0])
+            if not group:
+                continue
+            # Attach replies to the root finding when the root exists in this
+            # batch; a reply whose root was not parsed stands alone.
+            root = next(
+                (f for f in root_comments if str(f.get("_cr_comment_id")) == rid),
+                None,
+            )
+            for reply in group:
+                if root is not None:
+                    reply_body = (reply.get("body") or "").strip()
+                    if reply_body:
+                        root["body"] = (
+                            f"{(root.get('body') or '').strip()} | reply: {reply_body}"
+                        )[:400]
+                else:
+                    findings.append(reply)
 
         # ---- Dedupe ----
-        seen: dict[tuple[str | None, int | None], dict] = {}
+        # Key = (file, line, normalized body). Keying on (file, line) alone
+        # collapsed every distinct finding that shared a location — and when
+        # line was unassigned, ALL findings keyed to (None, None) and only
+        # one survived (finding 1 of the #227 review). The normalized-body
+        # component keeps the intended behavior: the same finding reported by
+        # two sources merges (sources joined), distinct findings survive.
+        def _dedupe_key(f: dict) -> tuple:
+            body = re.sub(
+                r"[🔴🟡⚠️*`_#>]", "", (f.get("body") or "").lower()
+            )
+            body = re.sub(r"\s+", " ", body).strip()[:120]
+            return (f.get("file"), f.get("line"), body)
+
+        seen: dict[tuple, dict] = {}
         final_findings: list[dict] = []
 
         for finding in findings:
-            key_file = finding.get("file")
-            key_line = finding.get("line")
-            key = (key_file, key_line)
+            key = _dedupe_key(finding)
 
             if key in seen:
                 # Merge sources
@@ -337,6 +366,8 @@ class Probe:
                 final_findings.append(finding)
 
         # Sort: 🔴 first then 🟡
+        for f in final_findings:
+            f.pop("_cr_comment_id", None)  # internal key — never serialized
         severity_order = {"🔴": 0, "🟡": 1}
         final_findings.sort(key=lambda f: severity_order.get(f.get("severity", "🟡"), 1))
 
@@ -396,6 +427,16 @@ class Probe:
             code_span_cell = cells[3]
             code_span_match = re.findall(r"`([^`]+)`", code_span_cell)
             if not code_span_match:
+                # Fileless row — `| sev | title | — |` is a shape the review
+                # gate itself documents (check_riptide_review.sh); dropping it
+                # made Riptide reviews in that shape invisible to the fix
+                # pipeline (finding 7 of the #227 review). Emit file=None.
+                findings.append({
+                    "severity": severity,
+                    "file": None,
+                    "line": None,
+                    "body": cells[2].strip(),
+                })
                 continue
 
             file_path = code_span_match[-1]  # last code-span
@@ -421,8 +462,10 @@ class Probe:
         """
         # Strip HTML comments <!-- ... -->
         cleaned = re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL)
-        # Strip markdown headers (# ...)
-        cleaned = re.sub(r"^#+\\s+", "", cleaned, flags=re.MULTILINE)
+        # Strip markdown headers (# ...) — single-escaped: the double-escaped
+        # form (`\\s`) matched a literal backslash and never stripped anything
+        # (finding 4 of the #227 review).
+        cleaned = re.sub(r"^#+\s+", "", cleaned, flags=re.MULTILINE)
 
         # Extract severity from body
         severity_emoji = self._map_severity(cleaned)
@@ -442,18 +485,23 @@ class Probe:
 
     @staticmethod
     def _map_severity(text: str) -> str:
-        """Map CodeRabbit severity markers to emoji."""
-        # Check for emoji markers first
+        """Map CodeRabbit severity markers to emoji.
+
+        Matches structured markers only — emoji, or a severity label at the
+        START of a line (e.g. `**Warning**` / `MAJOR:`). A bare substring
+        match escalated any prose merely containing "major"/"minor" to a
+        critical finding (finding 5 of the #227 review).
+        """
         if "🟡" in text:
             return "🟡"
         if "⚠️" in text:
             return "🔴"
-        # Check for text labels
-        text_upper = text.upper()
-        if "MAJOR" in text_upper:
-            return "🔴"
-        if "MINOR" in text_upper:
-            return "🟡"
+        for line in text.splitlines():
+            first = line.strip().lstrip("*#> ").upper()
+            if first.startswith("MAJOR"):
+                return "🔴"
+            if first.startswith("MINOR") or first.startswith("WARNING"):
+                return "🟡"
         return "🟡"  # default
 
     def _run_gh(self, cmd: list[str]) -> list[dict]:

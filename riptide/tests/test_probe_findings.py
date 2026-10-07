@@ -36,13 +36,6 @@ class TestGetReviewFindings:
             "body": mock_body.strip(),
         }
 
-        mock_body = (
-            "## Review: 2 warning(s).\n\n"
-            "| | Finding | File |\n|---|---|---|\n"
-            "| 🔴 | Title 1 | `path.py:123` |\n"
-            "| 🟡 | Title 2 | `other.py` |\n\n"
-            "More text after the table"
-        )
         mock_issue_comment = {
             "id": 456,
             "user": {"login": "riptide-review[bot]"},
@@ -294,3 +287,126 @@ class TestGetReviewFindings:
                 result = probe.gather()
         assert "review_findings" in result
         assert result["review_findings"] == [{"body": "x"}]
+
+
+class TestFindingFidelity:
+    """Regression tests for the #229 probe defects: findings collapsed,
+    discarded, or mis-severitized on their way into the fix pipeline."""
+
+    @pytest.fixture
+    def probe(self):
+        return Probe(pr_number=1, owner="ChonSong", repo="riptide")
+
+    def _run(self, mock_run, pr_comments):
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout=json.dumps([])),   # PR reviews
+            MagicMock(returncode=0, stdout=json.dumps([])),   # issue comments
+            MagicMock(returncode=0, stdout=json.dumps(pr_comments)),
+        ]
+        return mock_run
+
+    def test_distinct_findings_same_file_survive(self, probe):
+        """Two CodeRabbit inline comments on the same path with different
+        bodies -> 2 findings. (Was: both keyed (path, None) -> 1 survived.)"""
+        crs = [
+            {"id": 1, "user": {"login": "coderabbitai[bot]"}, "path": "a.py",
+             "line": 3, "body": "🟡 Possible race here"},
+            {"id": 2, "user": {"login": "coderabbitai[bot]"}, "path": "a.py",
+             "line": 40, "body": "🟡 Missing timeout on this request"},
+        ]
+        with patch("riptide.pipeline.probe.subprocess.run") as mock_run:
+            self._run(mock_run, crs)
+            findings = probe._get_review_findings()
+        assert len(findings) == 2
+        bodies = " ".join(f["body"] for f in findings)
+        assert "race" in bodies and "timeout" in bodies
+
+    def test_fileless_findings_survive_dedupe(self, probe):
+        """Two fileless CodeRabbit review bodies with distinct content -> 2
+        findings. (Was: both keyed (None, None) -> 1 survived.)"""
+        review_bodies = [
+            {"id": 1, "user": {"login": "coderabbitai[bot]"},
+             "body": "🟡 First walk-through finding about the retry logic"},
+            {"id": 2, "user": {"login": "coderabbitai[bot]"},
+             "body": "🟡 Second walk-through finding about the cache key"},
+        ]
+        with patch("riptide.pipeline.probe.subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                MagicMock(returncode=0, stdout=json.dumps(review_bodies)),
+                MagicMock(returncode=0, stdout=json.dumps([])),
+                MagicMock(returncode=0, stdout=json.dumps([])),
+            ]
+            findings = probe._get_review_findings()
+        assert len(findings) == 2
+
+    def test_reply_content_merged_into_root(self, probe):
+        """A CodeRabbit reply adding a distinct issue must reach the output
+        merged into its root's body — not be dropped. (Was: only group[0],
+        the first REPLY, survived; the root's thread was lost.)"""
+        root = {"id": 10, "user": {"login": "coderabbitai[bot]"}, "path": "a.py",
+                "line": 3, "body": "🟡 Possible race here"}
+        reply = {"id": 11, "in_reply_to_id": 10,
+                 "user": {"login": "coderabbitai[bot]"}, "path": "a.py",
+                 "line": 3, "body": "the lock is held across await"}
+        with patch("riptide.pipeline.probe.subprocess.run") as mock_run:
+            self._run(mock_run, [root, reply])
+            findings = probe._get_review_findings()
+        assert len(findings) == 1
+        body = findings[0]["body"]
+        assert "Possible race" in body
+        assert "lock is held across await" in body
+
+    def test_orphan_reply_still_emitted(self, probe):
+        """A CodeRabbit reply whose root was not parsed stands alone rather
+        than vanishing with its root."""
+        reply = {"id": 12, "in_reply_to_id": 999,
+                 "user": {"login": "coderabbitai[bot]"}, "path": "b.py",
+                 "line": 1, "body": "🟡 Orphaned thread issue"}
+        with patch("riptide.pipeline.probe.subprocess.run") as mock_run:
+            self._run(mock_run, [reply])
+            findings = probe._get_review_findings()
+        assert len(findings) == 1
+        assert "Orphaned thread issue" in findings[0]["body"]
+
+    def test_coderabbit_headers_stripped(self, probe):
+        """Markdown headers are stripped from CodeRabbit bodies. (Was: the
+        double-escaped regex matched a literal backslash — headers passed
+        through verbatim.)"""
+        cr = {"id": 1, "user": {"login": "coderabbitai[bot]"}, "path": "a.py",
+              "line": 1, "body": "## ⚠️ Major issue\n\nbuffer overrun possible"}
+        with patch("riptide.pipeline.probe.subprocess.run") as mock_run:
+            self._run(mock_run, [cr])
+            findings = probe._get_review_findings()
+        assert len(findings) == 1
+        assert "## " not in findings[0]["body"]
+        assert "buffer overrun" in findings[0]["body"]
+
+    def test_severity_prose_not_escalated(self, probe):
+        """Prose merely containing 'major'/'minor' must not become 🔴.
+        (Was: bare substring match escalated it.) Structured leading labels
+        still map."""
+        assert Probe._map_severity("this is not a major issue, but note the retry") == "🟡"
+        assert Probe._map_severity("**MAJOR** buffer overrun") == "🔴"
+        assert Probe._map_severity("MINOR: naming nit") == "🟡"
+        assert Probe._map_severity("plain observation") == "🟡"
+
+    def test_fileless_severity_row_emitted(self, probe):
+        """`| sev | title | — |` rows are a shape the review gate documents;
+        the parser must emit them as file=None findings. (Was: dropped, so
+        such reviews parsed to zero findings.)"""
+        mock_body = (
+            "## Review: 1 warning(s).\n\n"
+            "| | Finding | File |\n|---|---|---|\n"
+            "| 🟡 | Doc drift in AGENTS.md | — |"
+        )
+        ic = {"id": 9, "user": {"login": "riptide-review[bot]"}, "body": mock_body}
+        with patch("riptide.pipeline.probe.subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                MagicMock(returncode=0, stdout=json.dumps([])),
+                MagicMock(returncode=0, stdout=json.dumps([ic])),
+                MagicMock(returncode=0, stdout=json.dumps([])),
+            ]
+            findings = probe._get_review_findings()
+        assert len(findings) == 1
+        assert findings[0]["file"] is None
+        assert "Doc drift" in findings[0]["body"]
