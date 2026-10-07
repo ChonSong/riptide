@@ -181,6 +181,17 @@ async def health_check():
     return {"status": "ok", "app": "riptide"}
 
 
+@app.get("/")
+async def landing_page():
+    """Landing page for riptide.codeovertcp.com (self-contained HTML).
+
+    HTMLResponse so browsers render it instead of JSON-encoding the string.
+    """
+    from fastapi.responses import HTMLResponse
+    from riptide.homepage import HOME_PAGE
+    return HTMLResponse(content=HOME_PAGE)
+
+
 @app.get("/metrics")
 async def metrics_endpoint():
     """Prometheus-compatible /metrics endpoint for scraping."""
