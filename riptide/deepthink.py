@@ -139,6 +139,11 @@ def _cron_job_states() -> "dict[str, dict] | None":
                 # Kept so a spawn can tell "this attempt's job" from an earlier
                 # review of the same PR — the name alone is not enough.
                 "run_at": (job.get("schedule") or {}).get("run_at"),
+                # Real store field (set by the scheduler after each run). Needed
+                # by _post_failure_comment's per-run dedup marker; dropping it
+                # made every failure read "last run (unknown)" and made the
+                # once-per-failure docstring a lie (dedup was once forever).
+                "last_run_at": job.get("last_run_at"),
             }
     return states
 
@@ -177,6 +182,14 @@ def _release_finished_reservations(
     job reports completion, has vanished, has no further runs scheduled, or when
     the PR already carries a delivered review (which is the outcome the lock was
     protecting).
+
+    When the job's last run FAILED (``last_status == "error"``) the reservation
+    is also released and a failure comment is posted on the PR naming the job
+    and its status — otherwise a spawn that died after its ack (an LLM 402, a
+    crashed session) leaves the PR with "triggered!" and nothing else, and no
+    way to tell the run died. The comment is posted once per failure: it is
+    keyed on the job's ``last_run_at``, so a released reservation re-spawning
+    under the same name cannot duplicate it unless the job errors again.
     """
     states = _cron_job_states()
     if states is None:
@@ -189,6 +202,7 @@ def _release_finished_reservations(
         or info.get("enabled") is False
         or (info.get("last_run_at") and not info.get("next_run_at"))
     )
+    job_failed = bool(info) and info.get("last_status") == "error"
 
     # The job record can lag a long-running or already-delivered session, so
     # check the outcome the reservation exists to protect.
@@ -206,7 +220,72 @@ def _release_finished_reservations(
             "Released stale review reservation %s (job state=%s, review_delivered=%s)",
             job["id"], (info or {}).get("state", "absent"), job_finished,
         )
+    if released and job_failed and owner and repo and pr_number:
+        _post_failure_comment(owner, repo, pr_number, name_prefix, info or {})
     return released
+
+
+def _post_failure_comment(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    job_name: str,
+    info: dict,
+) -> None:
+    """Post a chaseable failure comment on the PR whose review job errored.
+
+    A spawned session that dies after the ack (LLM quota, crash) otherwise
+    leaves "🧠 triggered!" as the last word on the PR — silent from the
+    requester's side. This says the run FAILED, names the job to chase, and
+    carries the store's own evidence. Deduped per failure run: the marker
+    embeds the failed run's ``last_run_at``, so the same failure is reported
+    once while a genuinely new failed run of the same job posts a fresh
+    comment instead of being suppressed forever.
+    """
+    last_run = str(info.get("last_run_at") or "unknown")
+    # The run stamp makes the marker per-failure-run (a later failed run must
+    # be reportable) and keeps bot-authored reports from re-triggering the
+    # webhook (which drops comments carrying this marker).
+    marker = f"⚠️ Riptide review job FAILED: `{job_name}` ({last_run})"
+    jq = f'[.[].body] | any(contains("{marker}"))'
+    try:
+        proc = subprocess.run(
+            [
+                "gh", "api",
+                f"repos/{owner}/{repo}/issues/{pr_number}/comments",
+                "--paginate", "--jq", jq,
+            ],
+            capture_output=True, text=True, timeout=60,
+        )
+        already = proc.returncode == 0 and proc.stdout.strip().lower() == "true"
+    except Exception as e:
+        log.warning("  #%d failure-comment dedup check error: %s", pr_number, e)
+        already = True  # fail closed: skip posting rather than risk spam
+    if already:
+        return
+    body = (
+        f"{marker} — its last run ({last_run}) exited with "
+        f"`last_status: error`, so no review was produced.\n\n"
+        f"**Chase it:** `hermes cron list | grep {job_name}` and "
+        f"`hermes cron output {job_name}` for the session log.\n\n"
+        f"To re-trigger, comment `@riptide-bot` `review` on this PR once the "
+        f"cause is fixed (common cause: the configured review provider is out "
+        f"of quota)."
+    )
+    proc = subprocess.run(
+        [
+            "gh", "pr", "comment", str(pr_number),
+            "--repo", f"{owner}/{repo}", "--body", body,
+        ],
+        capture_output=True, text=True, timeout=60,
+    )
+    if proc.returncode == 0:
+        log.info("  #%d posted failure comment for %s", pr_number, job_name)
+    else:
+        log.warning(
+            "  #%d failure comment post failed: %s",
+            pr_number, (proc.stderr or "").strip()[:160],
+        )
 
 
 def _has_riptide_review(owner: str, repo: str, pr_number: int) -> bool:

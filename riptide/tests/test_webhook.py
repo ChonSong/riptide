@@ -279,3 +279,70 @@ class TestRoute2GhCliFallback:
         mock_gh_api.return_value.post_pr_comment.assert_called_once()
         assert len(fake_cli.posted) == 1
         assert fake_cli.posted[0]["body"] == "🤖 Companion reply"
+
+
+class TestFailureReportSelfTriggerGuard:
+    """A review-failure report comment must never self-trigger a review spawn.
+
+    The failure report is posted by the repo owner (gh CLI, not the app bot),
+    and handle_command authorizes the owner — so the only protections are that
+    the body omits the literal command phrase and carries the marker, which
+    handle_issue_comment must treat as a self-authored report, not a command.
+    """
+
+    def _payload(self, body, commenter="ChonSong", user_type="User"):
+        return {
+            "action": "created",
+            "comment": {
+                "id": 999,
+                "body": body,
+                "user": {"login": commenter, "type": user_type},
+            },
+            "issue": {
+                "number": 226,
+                "pull_request": {"head": {"sha": "abc123"}},
+            },
+            "repository": {
+                "full_name": "ChonSong/riptide",
+                "name": "riptide",
+            },
+            "installation": {"id": 12345},
+        }
+
+    def test_failure_report_marker_short_circuits_before_command_routing(self):
+        from riptide import webhook as wh
+
+        body = (
+            "⚠️ Riptide review job FAILED: `riptide-review-X` "
+            "(2026-10-06T09:00:00Z) — its last run exited with "
+            "`last_status: error`, so no review was produced.\n\n"
+            "To re-trigger, comment `@riptide-bot` `review` on this PR."
+        )
+        called = {"handle_command": False}
+
+        def _boom(*a, **k):
+            called["handle_command"] = True
+            return "would-spawn"
+
+        with patch.object(wh, "get_companion", side_effect=RuntimeError("no companion")), \
+             patch("riptide.interaction_handler.handle_command", side_effect=_boom):
+            result = asyncio.run(
+                wh.handle_issue_comment(self._payload(body), "delivery-test-1")
+            )
+        assert result.status_code == 200
+        assert not called["handle_command"], (
+            "failure-report comment reached the command router — it would "
+            "self-trigger an unrequested review spawn"
+        )
+
+    def test_normal_owner_command_still_reaches_router(self):
+        from riptide import webhook as wh
+
+        body = "@riptide-bot review"
+        with patch.object(wh, "get_companion", side_effect=RuntimeError("no companion")), \
+             patch("riptide.interaction_handler.handle_command", return_value="ack") as hc:
+            result = asyncio.run(
+                wh.handle_issue_comment(self._payload(body), "delivery-test-2")
+            )
+        assert result.status_code == 200
+        assert hc.called, "a normal owner review command was blocked by the guard"
