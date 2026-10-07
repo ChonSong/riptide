@@ -1304,9 +1304,10 @@ ELI5:"""
 
         if total_loc > min_loc:
             return (
-                f"Deep-think runs automatically for PRs over {min_loc} changed LOC "
-                f"once they have settled {settled}+ min — this one qualifies, so it "
-                f"will be queued; ask for one now with `@riptide-bot review`."
+                f"PRs over {min_loc} changed LOC are candidates for automatic "
+                f"deep-think once they have settled {settled}+ min; this one meets "
+                f"the LOC threshold, but the poller applies additional eligibility "
+                f"checks before queueing; ask for one now with `@riptide-bot review`."
             )
         return (
             f"Too small for an automatic deep review (needs {min_loc} changed LOC "

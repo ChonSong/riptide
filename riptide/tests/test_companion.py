@@ -966,7 +966,8 @@ class TestPassCommentContent:
         big = self._run(list(DOCS_ONLY_FILES))
         assert f"over {MIN_LOC_CHANGED} changed LOC" in big
         assert f"settled {STALENESS_MINUTES}+ min" in big
-        assert "will be queued" in big
+        assert "are candidates for automatic deep-think" in big
+        assert "will be queued" not in big
         assert "`@riptide-bot review`" in big
 
         small = self._run(list(TINY_DOC_FILE))
