@@ -70,6 +70,7 @@ riptide/
 ├── server.py              # Uvicorn entry point
 ├── scripts/deploy.sh      # Auto-deploy (invoked by webhook on merge)
 ├── docs/REVIEW-CONTRACT.md # Review markers, gate, reservations, attribution
+├── docs/DATA-AND-PROMPTS.md # Findings dict, cron-store projection, real prompt texts, API shapes, linked specimens
 ├── docs/archive/          # Superseded planning docs (historical, not current)
 ├── requirements.txt       # fastapi, uvicorn, pydantic, cryptography, requests, graphifyy
 ├── Dockerfile
