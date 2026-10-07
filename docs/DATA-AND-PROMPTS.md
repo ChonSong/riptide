@@ -10,6 +10,38 @@ and real PR artifacts exemplifying all of it.**
 
 ---
 
+## 0. The pipeline in one diagram
+
+```mermaid
+flowchart LR
+    subgraph triggers [Triggers]
+        CMD["@riptide-bot review / fix<br/>(webhook → handle_review_command)"]
+        POLL["15-min poller<br/>(SHA dedup + staleness)"]
+    end
+    subgraph spawn [Hermes session spawn]
+        P["_build_conductor_prompt (§4a)<br/>_build_fix_prompt (§4b)<br/>+ --skill riptide-review"]
+    end
+    subgraph pipeline [Conductor stages — StateStore track, resumable]
+        PROBE["Probe<br/>3 sources → findings dict (§2)"]
+        JUDGE["Judge<br/>stamps judged: true"]
+        ART["Artisan"]
+        ENG["Engine"]
+        CIV["ci_verifier"]
+        SCR["Scribe<br/>posts via gh"]
+    end
+    CMD --> P
+    POLL --> P
+    P -->|"review → Conductor.run()"| PROBE
+    P -->|"fix → staged track"| PROBE
+    PROBE -->|"findings[ ]"| JUDGE --> ART --> ENG --> CIV --> SCR
+    SCR --> PR["PR comment<br/>(§1 specimens)"]
+    CIV -.->|"failure"| FR["⚠️ FAILED marker comment<br/>(webhook guard, §1)"]
+```
+
+Every box links to a section below with its data contract.
+
+---
+
 ## 1. Real specimens (every artifact type, with links)
 
 | Artifact | Real example | What to look at |
