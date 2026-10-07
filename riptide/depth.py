@@ -24,6 +24,12 @@ class ReviewDepth(Enum):
     ARCH = "arch"              # Multi-file, >200 LOC, high graphify impact → +brooks-lint
 
 
+# Extensions that make a change "logic". One definition, two users: the
+# classifier below (any logic file defeats TRIVIAL) and anything that has to
+# describe a diff to a human — the Companion's pass comment prints these kinds.
+LOGIC_EXTENSIONS = ('.py', '.js', '.ts', '.go', '.rs', '.java', '.c', '.cpp', '.h')
+
+
 def classify_review_depth(data: dict) -> ReviewDepth:
     """
     Rule-based classification of PR depth from pre-gathered data.
@@ -42,9 +48,8 @@ def classify_review_depth(data: dict) -> ReviewDepth:
     god_nodes = data.get("god_nodes", [])
 
     # TRIVIAL: tiny change, no logic files
-    logic_extensions = ('.py', '.js', '.ts', '.go', '.rs', '.java', '.c', '.cpp', '.h')
     has_logic = any(
-        any(f.get("filename", "").endswith(ext) for ext in logic_extensions)
+        any(f.get("filename", "").endswith(ext) for ext in LOGIC_EXTENSIONS)
         for f in files_changed
     )
     if total_loc < 10 and not has_logic:
@@ -60,6 +65,40 @@ def classify_review_depth(data: dict) -> ReviewDepth:
             return ReviewDepth.ARCH
 
     return ReviewDepth.STANDARD
+
+
+# The human-readable half of each rule above: what the class means, why the PR
+# landed in it. Kept next to the thresholds so the two cannot drift — the
+# Companion's pass comment prints this, and a reader who sees "trivial" without
+# a reason has learned nothing.
+_DEPTH_REASONS = {
+    ReviewDepth.TRIVIAL.value:
+        "under 10 changed LOC and no logic files",
+    ReviewDepth.INLINE_ONLY.value:
+        "a single file with under 50 changed LOC",
+    ReviewDepth.STANDARD.value:
+        "not small enough to skip, and no high-impact god nodes in the blast radius",
+    ReviewDepth.ARCH.value:
+        "more than 5 files or 200+ changed LOC together with high graphify impact",
+}
+
+
+def describe_depth(depth) -> str:
+    """
+    One-sentence reason for a depth class, for humans reading a comment.
+
+    Args:
+        depth: a ReviewDepth, or its string value (`companion._depth` is a str).
+
+    Returns:
+        The reason sentence (no trailing period), or an honest statement that
+        the class is unknown — never a guess.
+    """
+    key = depth.value if isinstance(depth, ReviewDepth) else str(depth or "").strip().lower()
+    reason = _DEPTH_REASONS.get(key)
+    if reason is None:
+        return f"no depth rule matched `{depth}`"
+    return reason
 
 
 def select_skills(depth: ReviewDepth) -> list[str]:
