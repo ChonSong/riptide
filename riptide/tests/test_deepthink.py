@@ -1057,3 +1057,32 @@ class TestReportFailedReviewJobs:
         assert reported == 1
         args = post.call_args.args
         assert args[:4] == ("ChonSong", "my-repo", 42, "riptide-review-ChonSong-my-repo-42")
+
+    def test_releases_stale_reservation(self):
+        """The sweep must release the failed run's pending reservation,
+        otherwise the next @riptide-bot review is blocked by 'Already
+        pending' even though the job already died."""
+        from riptide.deepthink import _report_failed_review_jobs
+        import riptide.deepthink as dt
+
+        states = {
+            "riptide-review-ChonSong-riptide-234": {
+                "state": None, "last_status": "error",
+                "enabled": False, "run_at": None,
+                "last_run_at": "2026-10-08T23:34:40Z",
+            }
+        }
+        mock_store = MagicMock()
+        mock_store.list_pending_jobs.return_value = [
+            {"id": "riptide-review-ChonSong-riptide-234-ea07173b832c-de4f1965f772",
+             "pr_number": 234, "tier": "t1", "created_at": 1791505488.0}
+        ]
+        with patch.object(dt, "_cron_job_states", return_value=states), \
+             patch.object(dt, "_post_failure_comment"), \
+             patch.object(dt, "_release_finished_reservations") as release, \
+             patch("riptide.deepthink.StateStore", return_value=mock_store):
+            reported = _report_failed_review_jobs()
+        assert reported == 1
+        release.assert_called_once()
+        args = release.call_args.args
+        assert args[1:] == ("riptide-review-ChonSong-riptide-234", "ChonSong", "riptide", 234)

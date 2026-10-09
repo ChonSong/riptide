@@ -1027,6 +1027,11 @@ def _report_failed_review_jobs() -> int:
             log.warning("  Could not parse review job name: %s", name)
             continue
         _post_failure_comment(owner, repo, pr_number, name, info)
+        # Also release any stale reservation from the failed run — otherwise
+        # the next @riptide-bot review on this PR is blocked by "Already
+        # pending" even though the job already died.
+        from riptide.state import StateStore
+        _release_finished_reservations(StateStore(), name, owner, repo, pr_number)
         reported += 1
     if reported:
         log.info("Reported %d failed review job(s) to their PRs", reported)
