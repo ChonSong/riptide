@@ -970,3 +970,90 @@ class TestFailedJobReporting:
             if len(c.args) > 0 and "pr" in c.args[0] and "comment" in c.args[0]
         ]
         assert not posted, "a second failure comment was posted for the same failure"
+
+
+class TestReportFailedReviewJobs:
+    """The poller sweep must report failed review jobs that have no upcoming
+    re-spawn — manually-triggered reviews that die on LLM quota/crash leave
+    the PR with 'triggered!' as its last word unless this catches them."""
+
+    def test_reports_failed_review_job(self):
+        from riptide.deepthink import _report_failed_review_jobs
+        import riptide.deepthink as dt
+
+        states = {
+            "riptide-review-ChonSong-riptide-234": {
+                "state": None, "last_status": "error",
+                "enabled": False, "run_at": None,
+                "last_run_at": "2026-10-08T23:34:40Z",
+            }
+        }
+        with patch.object(dt, "_cron_job_states", return_value=states), \
+             patch.object(dt, "_post_failure_comment") as post:
+            reported = _report_failed_review_jobs()
+        assert reported == 1
+        post.assert_called_once()
+        args = post.call_args.args
+        assert args[:4] == ("ChonSong", "riptide", 234, "riptide-review-ChonSong-riptide-234")
+
+    def test_skips_successful_jobs(self):
+        from riptide.deepthink import _report_failed_review_jobs
+        import riptide.deepthink as dt
+
+        states = {
+            "riptide-review-ChonSong-riptide-234": {
+                "state": "completed", "last_status": "success",
+                "enabled": False, "run_at": None,
+                "last_run_at": "2026-10-08T23:34:40Z",
+            }
+        }
+        with patch.object(dt, "_cron_job_states", return_value=states), \
+             patch.object(dt, "_post_failure_comment") as post:
+            reported = _report_failed_review_jobs()
+        assert reported == 0
+        post.assert_not_called()
+
+    def test_skips_non_review_jobs(self):
+        from riptide.deepthink import _report_failed_review_jobs
+        import riptide.deepthink as dt
+
+        states = {
+            "riptide-proofshot-poll": {
+                "state": None, "last_status": "error",
+                "enabled": True, "run_at": None,
+                "last_run_at": "2026-10-08T23:34:40Z",
+            }
+        }
+        with patch.object(dt, "_cron_job_states", return_value=states), \
+             patch.object(dt, "_post_failure_comment") as post:
+            reported = _report_failed_review_jobs()
+        assert reported == 0
+        post.assert_not_called()
+
+    def test_handles_unreadable_store(self):
+        from riptide.deepthink import _report_failed_review_jobs
+        import riptide.deepthink as dt
+
+        with patch.object(dt, "_cron_job_states", return_value=None), \
+             patch.object(dt, "_post_failure_comment") as post:
+            reported = _report_failed_review_jobs()
+        assert reported == 0
+        post.assert_not_called()
+
+    def test_parses_repo_with_hyphens(self):
+        from riptide.deepthink import _report_failed_review_jobs
+        import riptide.deepthink as dt
+
+        states = {
+            "riptide-review-ChonSong-my-repo-42": {
+                "state": None, "last_status": "error",
+                "enabled": False, "run_at": None,
+                "last_run_at": "2026-10-08T23:34:40Z",
+            }
+        }
+        with patch.object(dt, "_cron_job_states", return_value=states), \
+             patch.object(dt, "_post_failure_comment") as post:
+            reported = _report_failed_review_jobs()
+        assert reported == 1
+        args = post.call_args.args
+        assert args[:4] == ("ChonSong", "my-repo", 42, "riptide-review-ChonSong-my-repo-42")
