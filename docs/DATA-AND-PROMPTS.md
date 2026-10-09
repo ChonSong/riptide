@@ -15,7 +15,7 @@ and real PR artifacts exemplifying all of it.**
 ```mermaid
 flowchart LR
     subgraph triggers [Triggers]
-        CMD["@riptide-bot review / fix<br/>(webhook → handle_review_command)"]
+        CMD["@riptide-bot review / fix<br/>(webhook → interaction_handler.handle_command)"]
         POLL["15-min poller<br/>(SHA dedup + staleness)"]
     end
     subgraph spawn [Hermes session spawn]
@@ -51,7 +51,7 @@ Every box links to a section below with its data contract.
 | Pass-only review (no findings) | [#230 comment 6029494352](https://github.com/ChonSong/riptide/pull/230#issuecomment-6029494352) | `## Review: ✅ No findings` + sign-off — still a *review* for gate purposes |
 | Deterministic pass (NOT a review) | any docs-only PR, e.g. via `companion.py` | `## Riptide Pass: ✅ No findings` byte-exact line 0; states what ran, evidence, why no deep review — see REVIEW-CONTRACT §1a |
 | Fix run report (per-finding verdicts) | [#214 comment 6028133295](https://github.com/ChonSong/riptide/pull/214#issuecomment-6028133295) | Multi-source findings consumed (Riptide + CodeRabbit), 6 verdicts with evidence, test results, commit SHA, attribution footer |
-| Trigger acks | [#230](https://github.com/ChonSong/riptide/pull/230#issuecomment-6029455819) `🧠 Riptide Review triggered` / [#214](https://github.com/ChonSong/riptide/pull/214#issuecomment-6027663103) `🛠 Riptide Fix triggered` | Name the spawned cron job — chase with `hermes cron list` |
+| Trigger acks | [#230](https://github.com/ChonSong/riptide/pull/230#issuecomment-6029455819) `🧠 Riptide Review triggered` / [#214](https://github.com/ChonSong/riptide/pull/214#issuecomment-6027664458) `🛠 Riptide Fix triggered` | Name the spawned cron job — chase with `hermes cron list` |
 | Failure report | any PR whose review job 402'd, e.g. the 2026-10-05 #214 case | `⚠️ Riptide review job FAILED: <job> (<last_run_at>)` — marker is the webhook self-trigger guard; body never contains the literal command phrase |
 
 ---
@@ -187,9 +187,11 @@ including the resume contract when sessions die mid-track.
 ### 4c. Inline small-LLM prompts (`companion.py`, `labeler.py`)
 
 Companion's TLDR / explain-like-I'm-5 one-liners and the labeler's JSON-only
-classification prompt live next to their callers (`companion.py:1059`, `:1087`;
-`labeler.py:37`). They are one-shot, deterministic-parsing prompts: the output format
-is part of the contract (e.g. "Return ONLY a JSON array of label names").
+classification prompt live next to their callers (`companion.py:1059`, `:1087`
+on `origin/main` at 059229c; pinned-SHA refs in the review on #231 were
+off-by-one at c6e8833, now corrected for the current commit). They are
+one-shot, deterministic-parsing prompts: the output format is part of the
+contract (e.g. "Return ONLY a JSON array of label names").
 
 ---
 
@@ -203,9 +205,9 @@ in these paths):
 | `probe._get_review_findings` | `GET /repos/{o}/{r}/pulls/{n}/reviews` (`--paginate`) | `user.login`, `body`, `state` |
 | | `GET /repos/{o}/{r}/issues/{n}/comments` (`--paginate`) | Riptide severity-table rows; ack/failure-marker skip rules |
 | | `GET /repos/{o}/{r}/pulls/{n}/comments` (`--paginate`) | inline comments: `body`, `path`, `line`, `in_reply_to_id`, `id` (reply→root merge key) |
-| `probe` diff/files | `GET /repos/{o}/{r}/pulls/{n}/files` | `filename`, `additions`, `deletions` (**capped at 300 entries, not paginated** — a larger commit can lose filenames past the cap) |
+| `probe` diff/files | `GET /repos/{o}/{r}/pulls/{n}/files` (`--paginate`) | `filename`, `additions`, `deletions` (paginated; the only [:300] slice in `probe.py` truncates comment bodies, never the file list — see `probe.py:80-84`) |
 | `deepthink` poller | `gh pr list/view`, issue comments | PR state, last-comment routing |
-| `webhook` | `POST /github/webhook` (App) → `handle_issue_comment` | routes `@riptide-bot` commands; self-filters bot comments + the failure-report marker |
+| `webhook` | `POST /webhook/github` (App) → `handle_issue_comment` | routes `@riptide-bot` commands; self-filters bot comments + the failure-report marker (route at `riptide/webhook.py:257`) |
 | scribe/fixer | `gh pr comment`, `gh api repos/...` | posting reviews, fix reports, failure reports |
 
 Shape traps that have bitten: `path`/`line` live on *inline* comments only (review
