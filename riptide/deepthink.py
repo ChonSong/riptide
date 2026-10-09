@@ -989,11 +989,64 @@ def format_repo_tree(repo_tree: list) -> str:
     return "\n".join(lines)
 
 
+def _report_failed_review_jobs() -> int:
+    """Report any failed review jobs that have no upcoming re-spawn.
+
+    ``_post_failure_comment`` only fires inside ``_spawn_deepthink`` — when a
+    *later* review is requested for the same job name. A review triggered
+    manually via ``@riptide-bot review`` and then failing (LLM 429/quota,
+    crash) has no next spawn: the poller skips the PR on LOC or dedup before
+    ever reaching the spawn path, so the failure is never reported and the
+    PR is left with "triggered!" as its last word.
+
+    This sweep closes that gap by scanning the cron store once per poll
+    cycle for review jobs with ``last_status == 'error'`` and posting the
+    failure comment for each (deduped per ``last_run_at`` by
+    ``_post_failure_comment`` itself).
+    """
+    states = _cron_job_states()
+    if states is None:
+        return 0
+
+    reported = 0
+    for name, info in states.items():
+        if not name.startswith("riptide-review-"):
+            continue
+        if info.get("last_status") != "error":
+            continue
+        # Parse owner/repo/pr_number from the deterministic job name.
+        parts = name.split("-")
+        # riptide-review-{owner}-{repo}-{pr_number}
+        if len(parts) < 5:
+            continue
+        try:
+            pr_number = int(parts[-1])
+            owner = parts[2]
+            repo = "-".join(parts[3:-1])
+        except (ValueError, IndexError):
+            log.warning("  Could not parse review job name: %s", name)
+            continue
+        _post_failure_comment(owner, repo, pr_number, name, info)
+        # Also release any stale reservation from the failed run — otherwise
+        # the next @riptide-bot review on this PR is blocked by "Already
+        # pending" even though the job already died.
+        from riptide.state import StateStore
+        _release_finished_reservations(StateStore(), name, owner, repo, pr_number)
+        reported += 1
+    if reported:
+        log.info("Reported %d failed review job(s) to their PRs", reported)
+    return reported
+
+
 def run():
     """Poll watched repos and spawn deep-think sessions on qualifying PRs."""
     if not _is_cron_available():
         log.error("hermes binary not found — can't spawn sessions")
         sys.exit(1)
+
+    # Report any failed review jobs whose PRs were skipped below (LOC/dedup
+    # filters prevent the normal next-spawn path from ever seeing them).
+    _report_failed_review_jobs()
 
     state_store = StateStore()
     now = datetime.now(timezone.utc)
