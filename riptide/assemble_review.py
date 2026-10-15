@@ -360,6 +360,18 @@ def review_job_name(owner: str, repo: str, pr_number: int) -> str:
     return f"riptide-review-{owner}-{repo}-{pr_number}"
 
 
+def review_job_name_prefix(owner: str) -> str:
+    """The shared prefix of every review job for a given owner.
+
+    The only place this format lives — sibling of :func:`review_job_name`.
+    Use this when you need to match ``riptide-review-{owner}-`` against a
+    name from the cron store (the only path that has to recover the trio
+    from the name alone, since the prompt file is gone after the session
+    runs and the cron job entry does not carry owner/repo).
+    """
+    return f"riptide-review-{owner}-"
+
+
 def _current_session_id() -> Optional[str]:
     """The Hermes session rendering this review, or None when there is no session.
 

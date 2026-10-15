@@ -33,7 +33,7 @@ import structlog
 from riptide.state import StateStore
 from riptide.depth import ReviewDepth, classify_review_depth, select_skills  # noqa: F401 (re-exported for back-compat)
 from riptide.review_memory import get_memory_context
-from riptide.assemble_review import review_job_name
+from riptide.assemble_review import review_job_name, review_job_name_prefix
 from riptide.finding_status import refresh_review_status
 
 logging.basicConfig(
@@ -989,11 +989,105 @@ def format_repo_tree(repo_tree: list) -> str:
     return "\n".join(lines)
 
 
+def _report_failed_review_jobs() -> int:
+    """Report any failed review jobs that have no upcoming re-spawn.
+
+    ``_post_failure_comment`` only fires inside ``_spawn_deepthink`` — when a
+    *later* review is requested for the same job name. A review triggered
+    manually via ``@riptide-bot review`` and then failing (LLM 429/quota,
+    crash) has no next spawn: the poller skips the PR on LOC or dedup before
+    ever reaching the spawn path, so the failure is never reported and the
+    PR is left with "triggered!" as its last word.
+
+    This sweep closes that gap by scanning the cron store once per poll
+    cycle for review jobs with ``last_status == 'error'`` and posting the
+    failure comment for each (deduped per ``last_run_at`` by
+    ``_post_failure_comment`` itself).
+    """
+    states = _cron_job_states()
+    if states is None:
+        return 0
+
+    # Build the (prefix, owner, repo) lookup once per call. The job name is
+    # ``riptide-review-{owner}-{repo}-{pr_number}`` (assemble_review.review_job_name
+    # is the only builder) — we match by the longest known owner prefix so
+    # hyphenated owners (e.g. ``Chon-Song``) parse correctly. ``parts.split('-')``
+    # would silently misroute failure comments for hyphenated owners.
+    prefixes = sorted(
+        (
+            (review_job_name_prefix(owner), owner, repo)
+            for owner, repo in (
+                tuple(r.split("/", 1))
+                for r in WATCHED_REPOS
+                if "/" in r
+            )
+        ),
+        key=lambda t: len(t[0]),
+        reverse=True,
+    )
+
+    reported = 0
+    for name, info in states.items():
+        if not name.startswith("riptide-review-"):
+            continue
+        if info.get("last_status") != "error":
+            continue
+        owner, repo, pr_number = _parse_review_job_name(name, prefixes)
+        if owner is None:
+            log.warning("  Could not parse review job name: %s", name)
+            continue
+        _post_failure_comment(owner, repo, pr_number, name, info)
+        # Also release any stale reservation from the failed run — otherwise
+        # the next @riptide-bot review on this PR is blocked by "Already
+        # pending" even though the job already died.
+        from riptide.state import StateStore
+        _release_finished_reservations(StateStore(), name, owner, repo, pr_number)
+        reported += 1
+    if reported:
+        log.info("Reported %d failed review job(s) to their PRs", reported)
+    return reported
+
+
+def _parse_review_job_name(
+    name: str,
+    prefixes: list[tuple[str, str, str]],
+) -> tuple[str | None, str | None, int]:
+    """Recover ``(owner, repo, pr_number)`` from a review job name.
+
+    Returns ``(None, None, 0)`` when the name does not start with any known
+    owner prefix or the trailing token is not an int. ``prefixes`` must be
+    sorted longest-first so the most specific owner matches before a shorter
+    one could swallow it.
+    """
+    for prefix, owner, repo in prefixes:
+        if not name.startswith(prefix):
+            continue
+        rest = name[len(prefix):]
+        # rest is ``{repo}-{pr_number}``; pr is the last ``-``-separated token.
+        if "-" not in rest:
+            return None, None, 0
+        parsed_repo, pr_str = rest.rsplit("-", 1)
+        try:
+            pr_number = int(pr_str)
+        except ValueError:
+            return None, None, 0
+        if parsed_repo != repo:
+            # The longest matching owner prefix took a bite that did not match
+            # the repo it implies — try the next-shortest owner.
+            continue
+        return owner, repo, pr_number
+    return None, None, 0
+
+
 def run():
     """Poll watched repos and spawn deep-think sessions on qualifying PRs."""
     if not _is_cron_available():
         log.error("hermes binary not found — can't spawn sessions")
         sys.exit(1)
+
+    # Report any failed review jobs whose PRs were skipped below (LOC/dedup
+    # filters prevent the normal next-spawn path from ever seeing them).
+    _report_failed_review_jobs()
 
     state_store = StateStore()
     now = datetime.now(timezone.utc)
