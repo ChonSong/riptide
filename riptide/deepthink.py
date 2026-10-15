@@ -33,7 +33,7 @@ import structlog
 from riptide.state import StateStore
 from riptide.depth import ReviewDepth, classify_review_depth, select_skills  # noqa: F401 (re-exported for back-compat)
 from riptide.review_memory import get_memory_context
-from riptide.assemble_review import review_job_name
+from riptide.assemble_review import review_job_name, review_job_name_prefix
 from riptide.finding_status import refresh_review_status
 
 logging.basicConfig(
@@ -1013,7 +1013,6 @@ def _report_failed_review_jobs() -> int:
     # is the only builder) — we match by the longest known owner prefix so
     # hyphenated owners (e.g. ``Chon-Song``) parse correctly. ``parts.split('-')``
     # would silently misroute failure comments for hyphenated owners.
-    from riptide.assemble_review import review_job_name_prefix
     prefixes = sorted(
         (
             (review_job_name_prefix(owner), owner, repo)
