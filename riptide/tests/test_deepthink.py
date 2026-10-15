@@ -977,6 +977,8 @@ class TestReportFailedReviewJobs:
     re-spawn — manually-triggered reviews that die on LLM quota/crash leave
     the PR with 'triggered!' as its last word unless this catches them."""
 
+    WATCHED = ["ChonSong/riptide", "ChonSong/my-repo", "Chon-Song/some-repo"]
+
     def test_reports_failed_review_job(self):
         from riptide.deepthink import _report_failed_review_jobs
         import riptide.deepthink as dt
@@ -988,7 +990,8 @@ class TestReportFailedReviewJobs:
                 "last_run_at": "2026-10-08T23:34:40Z",
             }
         }
-        with patch.object(dt, "_cron_job_states", return_value=states), \
+        with patch.object(dt, "WATCHED_REPOS", self.WATCHED), \
+             patch.object(dt, "_cron_job_states", return_value=states), \
              patch.object(dt, "_post_failure_comment") as post:
             reported = _report_failed_review_jobs()
         assert reported == 1
@@ -1007,7 +1010,8 @@ class TestReportFailedReviewJobs:
                 "last_run_at": "2026-10-08T23:34:40Z",
             }
         }
-        with patch.object(dt, "_cron_job_states", return_value=states), \
+        with patch.object(dt, "WATCHED_REPOS", self.WATCHED), \
+             patch.object(dt, "_cron_job_states", return_value=states), \
              patch.object(dt, "_post_failure_comment") as post:
             reported = _report_failed_review_jobs()
         assert reported == 0
@@ -1024,7 +1028,8 @@ class TestReportFailedReviewJobs:
                 "last_run_at": "2026-10-08T23:34:40Z",
             }
         }
-        with patch.object(dt, "_cron_job_states", return_value=states), \
+        with patch.object(dt, "WATCHED_REPOS", self.WATCHED), \
+             patch.object(dt, "_cron_job_states", return_value=states), \
              patch.object(dt, "_post_failure_comment") as post:
             reported = _report_failed_review_jobs()
         assert reported == 0
@@ -1034,7 +1039,8 @@ class TestReportFailedReviewJobs:
         from riptide.deepthink import _report_failed_review_jobs
         import riptide.deepthink as dt
 
-        with patch.object(dt, "_cron_job_states", return_value=None), \
+        with patch.object(dt, "WATCHED_REPOS", self.WATCHED), \
+             patch.object(dt, "_cron_job_states", return_value=None), \
              patch.object(dt, "_post_failure_comment") as post:
             reported = _report_failed_review_jobs()
         assert reported == 0
@@ -1051,7 +1057,8 @@ class TestReportFailedReviewJobs:
                 "last_run_at": "2026-10-08T23:34:40Z",
             }
         }
-        with patch.object(dt, "_cron_job_states", return_value=states), \
+        with patch.object(dt, "WATCHED_REPOS", self.WATCHED), \
+             patch.object(dt, "_cron_job_states", return_value=states), \
              patch.object(dt, "_post_failure_comment") as post:
             reported = _report_failed_review_jobs()
         assert reported == 1
@@ -1077,7 +1084,8 @@ class TestReportFailedReviewJobs:
             {"id": "riptide-review-ChonSong-riptide-234-ea07173b832c-de4f1965f772",
              "pr_number": 234, "tier": "t1", "created_at": 1791505488.0}
         ]
-        with patch.object(dt, "_cron_job_states", return_value=states), \
+        with patch.object(dt, "WATCHED_REPOS", self.WATCHED), \
+             patch.object(dt, "_cron_job_states", return_value=states), \
              patch.object(dt, "_post_failure_comment"), \
              patch.object(dt, "_release_finished_reservations") as release, \
              patch("riptide.deepthink.StateStore", return_value=mock_store):
@@ -1086,3 +1094,46 @@ class TestReportFailedReviewJobs:
         release.assert_called_once()
         args = release.call_args.args
         assert args[1:] == ("riptide-review-ChonSong-riptide-234", "ChonSong", "riptide", 234)
+
+    def test_parses_owner_with_hyphens(self):
+        """A hyphenated owner must round-trip cleanly. The old `split('-')`
+        parser silently misrouted these to the wrong PR."""
+        from riptide.deepthink import _report_failed_review_jobs
+        import riptide.deepthink as dt
+
+        states = {
+            "riptide-review-Chon-Song-some-repo-99": {
+                "state": None, "last_status": "error",
+                "enabled": False, "run_at": None,
+                "last_run_at": "2026-10-08T23:34:40Z",
+            }
+        }
+        with patch.object(dt, "WATCHED_REPOS", self.WATCHED), \
+             patch.object(dt, "_cron_job_states", return_value=states), \
+             patch.object(dt, "_post_failure_comment") as post:
+            reported = _report_failed_review_jobs()
+        assert reported == 1
+        args = post.call_args.args
+        assert args[:4] == ("Chon-Song", "some-repo", 99, "riptide-review-Chon-Song-some-repo-99")
+
+    def test_skips_unknown_owner(self):
+        """A failed job whose (owner, repo) is not in WATCHED_REPOS must NOT
+        post — the parser cannot prove the trio without an authoritative
+        (owner, repo) pair, and posting to the wrong PR is worse than
+        missing the report. Logged as 'Could not parse'."""
+        from riptide.deepthink import _report_failed_review_jobs
+        import riptide.deepthink as dt
+
+        states = {
+            "riptide-review-Stranger-Project-7": {
+                "state": None, "last_status": "error",
+                "enabled": False, "run_at": None,
+                "last_run_at": "2026-10-08T23:34:40Z",
+            }
+        }
+        with patch.object(dt, "WATCHED_REPOS", self.WATCHED), \
+             patch.object(dt, "_cron_job_states", return_value=states), \
+             patch.object(dt, "_post_failure_comment") as post:
+            reported = _report_failed_review_jobs()
+        assert reported == 0
+        post.assert_not_called()
