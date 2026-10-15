@@ -577,6 +577,11 @@ def _spawn_deepthink(
             files=files_changed,
             model=DEEPTHINK_MODEL,
             provider=DEEPTHINK_PROVIDER,
+            # The pre-rendered Excalidraw URL computed above (grafiphy
+            # path, deterministic, no LLM). Threaded into ws-3-artisan and
+            # ws-5-scribe inputs so the Scribe can prefer it over the
+            # artisan's own render.
+            diagram_url=diagram_url,
         )
         log.info(
             "Conductor track created for %s/%s#%d: %s (phase=%s, workstreams=%d)",

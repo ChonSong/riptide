@@ -416,15 +416,23 @@ def create_pr_review_pipeline(
     pr_number: int,
     owner: str = "ChonSong",
     repo: str = "riptide",
+    diagram_url: str | None = None,
 ) -> dict:
     """Create a PR review pipeline for a given PR.
-    
+
     Returns the track with workstreams:
     1. probe → gather context
     2. judge → evaluate diff, produce findings
     3. artisan → generate excalidraw diagram
     4. engine → upload diagram
     5. scribe → post review + update state
+
+    ``diagram_url`` is the URL of a pre-rendered Excalidraw diagram computed
+    in Python (see ``riptide.deepthink._gather_review_data`` for the deepthink
+    path). When supplied, the artisan's pipeline keeps running unchanged
+    (its render path is independent) but the URL is carried as a side input
+    so downstream consumers (scribe, review_memory) can prefer it over the
+    artisan's own output when both are available.
     """
     track = get_track(track_id)
     if not track:
@@ -434,7 +442,7 @@ def create_pr_review_pipeline(
             phase="Review",
             repos={repo: {"owner": owner, "pr": pr_number}},
         )
-    
+
     create_workstream(
         track_id,
         "ws-1-probe",
@@ -456,7 +464,10 @@ def create_pr_review_pipeline(
     create_workstream(
         track_id,
         "ws-3-artisan",
-        inputs={"findings_path": _canonical_output_path(pr_number, "judge")},
+        inputs={
+            "findings_path": _canonical_output_path(pr_number, "judge"),
+            "diagram_url": diagram_url,
+        },
         acceptance={"diagram_created": True},
         role="artisan",
         pipeline=["excalidraw", "upload"],
@@ -471,7 +482,7 @@ def create_pr_review_pipeline(
         pipeline=["upload"],
     )
 
-    return track
+    return get_track(track_id)
 
 
 # ── Deepthink + Webhook entry points ─────────────────────────────────────────
@@ -484,11 +495,18 @@ def create_deepthink_review_pipeline(
     files: list[dict],
     model: str | None = None,
     provider: str | None = None,
+    diagram_url: str | None = None,
 ) -> dict:
     """Create a review pipeline for the deepthink cron path.
 
     Called from ``riptide.deepthink._spawn_deepthink()`` when the cron poller
     decides a PR needs a deep-think review.
+
+    ``diagram_url`` is the URL of a pre-rendered Excalidraw diagram computed
+    in Python (see ``riptide.deepthink._gather_review_data``). When supplied
+    it is threaded into ws-3-artisan and ws-5-scribe inputs; the artisan
+    keeps running its own render path independently, and the scribe prefers
+    the pre-rendered URL when both are available.
 
     Returns the created track dict with all workstreams staged.
     """
@@ -531,7 +549,10 @@ def create_deepthink_review_pipeline(
     create_workstream(
         track_id,
         "ws-3-artisan",
-        inputs={"findings_path": _canonical_output_path(pr_number, "judge")},
+        inputs={
+            "findings_path": _canonical_output_path(pr_number, "judge"),
+            "diagram_url": diagram_url,
+        },
         acceptance={"diagram_created": True},
         role="artisan",
         pipeline=["excalidraw", "upload"],
@@ -560,13 +581,17 @@ def create_deepthink_review_pipeline(
             # without this the sign-off falls back to the wrong model name.
             "model": model,
             "provider": provider,
+            # The pre-rendered diagram URL, when the cron path computed it in
+            # Python before the LLM session ran. The scribe prefers this over
+            # the artisan's own output when both are available.
+            "diagram_url": diagram_url,
         },
         acceptance={"posted": True},
         role="scribe",
         pipeline=["assemble_review", "post_comment"],
     )
 
-    return track
+    return get_track(track_id)
 
 
 def create_webhook_review_pipeline(
@@ -577,11 +602,18 @@ def create_webhook_review_pipeline(
     files: list[dict],
     model: str | None = None,
     provider: str | None = None,
+    diagram_url: str | None = None,
 ) -> dict:
     """Create a review pipeline for the on-demand webhook path.
 
     Called from ``riptide.webhook.handle_issue_comment()`` (Route 2) when a
     user comments ``@riptide-bot review`` on a PR.
+
+    ``diagram_url`` is the URL of a pre-rendered Excalidraw diagram. The
+    webhook path does not currently pre-render; the param is accepted for
+    symmetry with the deepthink path and so a future webhook-side pre-render
+    (or a caller that already has the URL) can plumb it through without
+    changing the signature.
 
     Returns the created track dict with all workstreams staged.
     """
@@ -622,7 +654,10 @@ def create_webhook_review_pipeline(
     create_workstream(
         track_id,
         "ws-3-artisan",
-        inputs={"findings_path": _canonical_output_path(pr_number, "judge")},
+        inputs={
+            "findings_path": _canonical_output_path(pr_number, "judge"),
+            "diagram_url": diagram_url,
+        },
         acceptance={"diagram_created": True},
         role="artisan",
         pipeline=["excalidraw", "upload"],
@@ -653,13 +688,17 @@ def create_webhook_review_pipeline(
             # The reviewed revision, so the sign-off's job handle and the
             # review_memory row both name the commit the verdict belongs to.
             "head_sha": pr_details.get("head", {}).get("sha", ""),
+            # Pre-rendered diagram URL (None for the webhook path today; the
+            # artisan's own render is the only available one). Carried for
+            # symmetry with the deepthink path.
+            "diagram_url": diagram_url,
         },
         acceptance={"posted": True},
         role="scribe",
         pipeline=["assemble_review", "post_comment"],
     )
 
-    return track
+    return get_track(track_id)
 
 
 def create_fix_pipeline(
@@ -797,7 +836,10 @@ def create_fix_pipeline(
         pipeline=["format_summary", "post_comment"],
     )
 
-    # Annotate (not mutate StateStore): _new_track() records carry no track_id
-    # key, but the spawner needs the handle for the prompt's mission statement.
-    track["track_id"] = track_id
+    # Annotate (not mutate StateStore): the stored record's id is in the
+    # `id` field; spawners that need the handle as a `track_id` key (used
+    # in the prompt's mission statement) get the annotation by re-reading.
+    track = get_track(track_id)
+    if track is not None:
+        track["track_id"] = track_id
     return track
