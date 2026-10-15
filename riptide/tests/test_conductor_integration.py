@@ -173,6 +173,43 @@ class TestCreateDeepthinkReviewPipeline:
         )
         assert track is not None
 
+    def test_diagram_url_default_is_none(self, pr_details, files):
+        """When the caller omits ``diagram_url``, the Scribe's input is
+        ``None`` (so its existing `brief.inputs.get("diagram_url")` lookup
+        falls through to whatever the artisan produced)."""
+        from riptide.pipeline import conductor
+
+        track = conductor.create_deepthink_review_pipeline(
+            owner="ChonSong",
+            repo="riptide",
+            pr_number=42,
+            pr_details=pr_details,
+            files=files,
+        )
+        scribe = track["workstreams"]["ws-5-scribe"]
+        assert scribe["inputs"].get("diagram_url") is None
+        artisan = track["workstreams"]["ws-3-artisan"]
+        assert artisan["inputs"].get("diagram_url") is None
+
+    def test_diagram_url_passed_to_artisan_and_scribe(self, pr_details, files):
+        """The pre-rendered URL is threaded into both ws-3-artisan and
+        ws-5-scribe inputs. The artisan keeps its own render pipeline; the
+        Scribe prefers the supplied URL when it is present."""
+        from riptide.pipeline import conductor
+
+        track = conductor.create_deepthink_review_pipeline(
+            owner="ChonSong",
+            repo="riptide",
+            pr_number=42,
+            pr_details=pr_details,
+            files=files,
+            diagram_url="https://example.com/review.excalidraw",
+        )
+        artisan = track["workstreams"]["ws-3-artisan"]
+        scribe = track["workstreams"]["ws-5-scribe"]
+        assert artisan["inputs"]["diagram_url"] == "https://example.com/review.excalidraw"
+        assert scribe["inputs"]["diagram_url"] == "https://example.com/review.excalidraw"
+
 
 # ── create_webhook_review_pipeline tests ──────────────────────────────────────
 
@@ -284,6 +321,24 @@ class TestCreateWebhookReviewPipeline:
         )
         probe = track["workstreams"]["ws-1-probe"]
         assert probe["inputs"]["files"] == files
+
+    def test_diagram_url_passed_when_provided(self, pr_details, files):
+        """The webhook path does not currently pre-render, but the
+        ``diagram_url`` parameter is accepted for symmetry with the deepthink
+        path so a future caller can plumb a pre-rendered URL through
+        without changing the signature."""
+        from riptide.pipeline import conductor
+
+        track = conductor.create_webhook_review_pipeline(
+            owner="ChonSong",
+            repo="riptide",
+            pr_number=42,
+            pr_details=pr_details,
+            files=files,
+            diagram_url="https://example.com/review.excalidraw",
+        )
+        scribe = track["workstreams"]["ws-5-scribe"]
+        assert scribe["inputs"]["diagram_url"] == "https://example.com/review.excalidraw"
 
 
 # ── Pipeline produces work-state.json tests ───────────────────────────────────
