@@ -205,6 +205,40 @@ class TestOneJobNameBuilder:
         assert deepthink.review_job_name is review_job_name
         assert conductor.review_job_name is review_job_name
 
+    def test_failed_sweep_parser_uses_canonical_prefix(self):
+        """``deepthink._parse_review_job_name`` must derive the owner prefix
+        from ``assemble_review.review_job_name_prefix`` so a future format
+        change touches the one canonical place, not two."""
+        import riptide.deepthink as deepthink
+        from riptide.assemble_review import review_job_name_prefix
+
+        prefixes = sorted(
+            (
+                (review_job_name_prefix(owner), owner, repo)
+                for owner, repo in (
+                    ("ChonSong", "riptide"),
+                    ("Chon-Song", "some-repo"),
+                )
+            ),
+            key=lambda t: len(t[0]),
+            reverse=True,
+        )
+        # Hyphenated owner: must round-trip cleanly.
+        owner, repo, pr = deepthink._parse_review_job_name(
+            "riptide-review-Chon-Song-some-repo-99", prefixes,
+        )
+        assert (owner, repo, pr) == ("Chon-Song", "some-repo", 99)
+        # Plain owner.
+        owner, repo, pr = deepthink._parse_review_job_name(
+            "riptide-review-ChonSong-riptide-234", prefixes,
+        )
+        assert (owner, repo, pr) == ("ChonSong", "riptide", 234)
+        # Unknown owner: skipped, not misparsed.
+        owner, repo, pr = deepthink._parse_review_job_name(
+            "riptide-review-Stranger-Project-7", prefixes,
+        )
+        assert owner is None and repo is None and pr == 0
+
     def test_no_module_but_the_builder_formats_the_name(self):
         import inspect
         import riptide.deepthink as deepthink

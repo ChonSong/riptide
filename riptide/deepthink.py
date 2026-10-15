@@ -1008,22 +1008,33 @@ def _report_failed_review_jobs() -> int:
     if states is None:
         return 0
 
+    # Build the (prefix, owner, repo) lookup once per call. The job name is
+    # ``riptide-review-{owner}-{repo}-{pr_number}`` (assemble_review.review_job_name
+    # is the only builder) — we match by the longest known owner prefix so
+    # hyphenated owners (e.g. ``Chon-Song``) parse correctly. ``parts.split('-')``
+    # would silently misroute failure comments for hyphenated owners.
+    from riptide.assemble_review import review_job_name_prefix
+    prefixes = sorted(
+        (
+            (review_job_name_prefix(owner), owner, repo)
+            for owner, repo in (
+                tuple(r.split("/", 1))
+                for r in WATCHED_REPOS
+                if "/" in r
+            )
+        ),
+        key=lambda t: len(t[0]),
+        reverse=True,
+    )
+
     reported = 0
     for name, info in states.items():
         if not name.startswith("riptide-review-"):
             continue
         if info.get("last_status") != "error":
             continue
-        # Parse owner/repo/pr_number from the deterministic job name.
-        parts = name.split("-")
-        # riptide-review-{owner}-{repo}-{pr_number}
-        if len(parts) < 5:
-            continue
-        try:
-            pr_number = int(parts[-1])
-            owner = parts[2]
-            repo = "-".join(parts[3:-1])
-        except (ValueError, IndexError):
+        owner, repo, pr_number = _parse_review_job_name(name, prefixes)
+        if owner is None:
             log.warning("  Could not parse review job name: %s", name)
             continue
         _post_failure_comment(owner, repo, pr_number, name, info)
@@ -1036,6 +1047,37 @@ def _report_failed_review_jobs() -> int:
     if reported:
         log.info("Reported %d failed review job(s) to their PRs", reported)
     return reported
+
+
+def _parse_review_job_name(
+    name: str,
+    prefixes: list[tuple[str, str, str]],
+) -> tuple[str | None, str | None, int]:
+    """Recover ``(owner, repo, pr_number)`` from a review job name.
+
+    Returns ``(None, None, 0)`` when the name does not start with any known
+    owner prefix or the trailing token is not an int. ``prefixes`` must be
+    sorted longest-first so the most specific owner matches before a shorter
+    one could swallow it.
+    """
+    for prefix, owner, repo in prefixes:
+        if not name.startswith(prefix):
+            continue
+        rest = name[len(prefix):]
+        # rest is ``{repo}-{pr_number}``; pr is the last ``-``-separated token.
+        if "-" not in rest:
+            return None, None, 0
+        parsed_repo, pr_str = rest.rsplit("-", 1)
+        try:
+            pr_number = int(pr_str)
+        except ValueError:
+            return None, None, 0
+        if parsed_repo != repo:
+            # The longest matching owner prefix took a bite that did not match
+            # the repo it implies — try the next-shortest owner.
+            continue
+        return owner, repo, pr_number
+    return None, None, 0
 
 
 def run():
