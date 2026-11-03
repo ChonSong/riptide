@@ -262,15 +262,17 @@ async def github_webhook(request: Request) -> Response:
     event = request.headers.get("x-github-event", "")
     delivery_id = request.headers.get("x-github-delivery", "unknown")
 
-    # Idempotency: drop duplicate deliveries before expensive processing
-    state = _get_state_store()
-    if not state.reserve_delivery(delivery_id):
-        log.info(f"[{delivery_id}] Duplicate delivery dropped")
-        return Response(status_code=200)
-
     if not verify_webhook_signature(body, signature, WEBHOOK_SECRET):
         # Graceful failure: log warning, return 200, let cron poller cover
         log.warning(f"[{delivery_id}] Invalid webhook signature from {request.client} — returning 200, cron poller will pick up PR")
+        return Response(status_code=200)
+
+    # Idempotency: drop duplicate deliveries before expensive processing.
+    # Only after the signature is verified: reserving first let an unsigned
+    # request burn a delivery id and drop the genuine delivery as a duplicate.
+    state = _get_state_store()
+    if not state.reserve_delivery(delivery_id):
+        log.info(f"[{delivery_id}] Duplicate delivery dropped")
         return Response(status_code=200)
 
     payload = json.loads(body)
