@@ -99,6 +99,14 @@ class TestFixerDefaults:
             assert riptide.fixer.FIX_MODEL == "custom:LongCat-2.0"
 
 
+
+@pytest.fixture(autouse=True)
+def _trust_test_user():
+    """Most tests here exercise the post-auth path as the fixture commenter
+    `test-user`; trust it explicitly (the auth gate is tested on its own below)."""
+    with patch("riptide.fixer.FIX_ALLOWLIST", frozenset({"test-user"})):
+        yield
+
 # ── Authorization gate ───────────────────────────────────────────────────────
 
 
@@ -113,15 +121,24 @@ class TestHandleFixCommandAuth:
                      "repo": {"full_name": head_repo}},
         }
 
-    def test_author_can_trigger(self):
+    def test_untrusted_author_cannot_trigger(self):
+        """Being the PR author is not enough: anyone can open a PR (no mocks on the gate)."""
         client = MagicMock()
         client.get_pr_details.return_value = self._pr_details(author="alice")
-        with patch("riptide.state.StateStore") as mock_store:
+        with patch("riptide.fixer._spawn_fix", return_value=True) as spawn:
+            result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "alice")
+        assert "Not authorized" in result
+        spawn.assert_not_called()
+
+    def test_allowlisted_maintainer_can_trigger(self):
+        client = MagicMock()
+        client.get_pr_details.return_value = self._pr_details(author="alice")
+        with patch("riptide.fixer.FIX_ALLOWLIST", frozenset({"alice"})), \
+             patch("riptide.state.StateStore") as mock_store:
             mock_store.return_value.has_running_fix.return_value = False
             mock_store.return_value.get_queue_length.return_value = 0
             with patch("riptide.fixer._spawn_fix", return_value=True):
-                result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "alice")
-                assert result is not None
+                result = handle_fix_command(client, 1, "ChonSong", "riptide", 42, "Alice")
                 assert "Fix triggered" in result
 
     def test_owner_can_trigger(self):

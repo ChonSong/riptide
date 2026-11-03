@@ -27,6 +27,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
+POLL_OWNER = os.environ.get("RIPTIDE_OUR_ORG", "ChonSong")
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -185,6 +187,9 @@ def _search_fix_comments(lookback_days: int = LOOKBACK_DAYS) -> list[dict]:
         "--order", "desc",
         "--limit", str(SEARCH_LIMIT),
         "--match", "comments",
+        # Scope to repos we own: an unscoped search matches every public PR on
+        # GitHub whose comments mention the phrase.
+        "--owner", POLL_OWNER,
         "--json", "number,title,repository",
         f'"@riptide-bot fix"',
     ]
@@ -207,6 +212,9 @@ def _search_fix_comments(lookback_days: int = LOOKBACK_DAYS) -> list[dict]:
         repo_name = repo.get("name", "")
         pr_number = item.get("number", 0)
         if not owner or not repo_name or not pr_number:
+            continue
+        if owner.lower() != POLL_OWNER.lower():
+            log.warning("Ignoring out-of-scope fix request on %s/%s#%s", owner, repo_name, pr_number)
             continue
 
         pr_key = f"{owner}/{repo_name}#{pr_number}"
