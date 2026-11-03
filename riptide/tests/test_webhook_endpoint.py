@@ -144,6 +144,35 @@ class TestPullRequestRunsCompanionFlow:
             },
         )
 
+    def test_unsigned_request_does_not_burn_the_delivery_id(
+        self, client, valid_signature, webhook_body
+    ):
+        """An invalid-signature request carrying a genuine delivery id must not
+        reserve it: the real, signed delivery that follows must still be handled."""
+        with patch("riptide.webhook.handle_pull_request") as mock_handler:
+            mock_handler.return_value = MagicMock(status_code=200)
+            forged = client.post(
+                "/webhook/github",
+                content=webhook_body,
+                headers={
+                    "X-Hub-Signature-256": "sha256=" + "0" * 64,
+                    "X-GitHub-Event": "pull_request",
+                    "X-GitHub-Delivery": "delivery-forged-first-1",
+                },
+            )
+            genuine = client.post(
+                "/webhook/github",
+                content=webhook_body,
+                headers={
+                    "X-Hub-Signature-256": valid_signature,
+                    "X-GitHub-Event": "pull_request",
+                    "X-GitHub-Delivery": "delivery-forged-first-1",
+                },
+            )
+            assert forged.status_code == 200
+            assert genuine.status_code == 200
+            assert mock_handler.call_count == 1
+
     def test_pr_event_invokes_companion_run_for_pr(self, client, webhook_secret, monkeypatch):
         """Default (no RIPTIDE_T0_FALLBACK): PR path calls companion.run_for_pr."""
         import time

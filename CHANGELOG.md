@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed (2026-11-03)
+
+- **An unsigned webhook could make GitHub's real delivery be dropped.**
+  `github_webhook` reserved `X-GitHub-Delivery` before verifying the signature,
+  so a request with a bad signature and a guessed/replayed delivery id burned the
+  id (300s TTL) and the genuine delivery was dropped as a duplicate. The
+  signature is now verified first.
+
 ### Fixed (2026-09-22)
 
 - **This repo no longer declares a foreign capture target.**
