@@ -49,6 +49,22 @@ FIX_RE = re.compile(r"@riptide-bot\s+fix\b(.*)", re.IGNORECASE | re.DOTALL)
 
 OUR_USERNAME = os.environ.get("RIPTIDE_OUR_USERNAME", "ChonSong")
 OUR_ORG = os.environ.get("RIPTIDE_OUR_ORG", "ChonSong")
+# Extra logins trusted to trigger fix sessions (comma-separated). A fix session
+# runs an agent with shell access on the host, so being the PR author is NOT
+# enough: anyone can open a PR.
+FIX_ALLOWLIST = frozenset(
+    u.strip().lower()
+    for u in os.environ.get("RIPTIDE_FIX_ALLOWLIST", "").split(",")
+    if u.strip()
+)
+
+
+def _is_trusted_actor(login: str, owner: str) -> bool:
+    """True when `login` may trigger a privileged fix session on owner's repo."""
+    login = (login or "").lower()
+    if not login:
+        return False
+    return login in {OUR_USERNAME.lower(), (owner or "").lower()} or login in FIX_ALLOWLIST
 # Pin the inference config on spawned cron jobs — the global config drifts,
 # and unpinned jobs are skipped to prevent unintended spend (Hermes #44585).
 # Mirrors deepthink.py's DEEPTHINK_MODEL/DEEPTHINK_PROVIDER.
@@ -143,21 +159,19 @@ def handle_fix_command(
     head_repo = (pr_details.get("head", {}).get("repo") or {}).get("full_name", "")
     is_fork = head_repo.lower() != f"{owner}/{repo}".lower() if head_repo else True
 
-    # Authorization gate: the COMMENTER must be the PR author, the repo owner,
-    # or OUR_USERNAME.
-    authorized = (
-        commenter == OUR_USERNAME
-        or commenter == author
-        or commenter == owner
-    )
+    # Authorization gate: the COMMENTER must be a trusted actor — the repo
+    # owner, OUR_USERNAME, or RIPTIDE_FIX_ALLOWLIST. Being the PR author is not
+    # sufficient: the poller discovers comments by search, and a fix session
+    # runs the PR's code (tests) on the host.
+    authorized = _is_trusted_actor(commenter, owner)
     if not authorized:
         log.warning(
             "Unauthorized fix attempt by %s on %s/%s#%d (author=%s, owner=%s)",
             commenter, owner, repo, pr_number, author, owner,
         )
         return (
-            f"🚫 **Not authorized.** Only the PR author (@{author}), the repo "
-            f"owner (@{owner}), or @{OUR_USERNAME} can trigger `@riptide-bot fix` "
+            f"🚫 **Not authorized.** Only the repo owner (@{owner}), "
+            f"@{OUR_USERNAME}, or an allowlisted maintainer can trigger `@riptide-bot fix` "
             f"on this PR. Your comment was logged."
         )
 
