@@ -94,6 +94,17 @@ pass() {
   exit 0
 }
 
+# Logins whose comments may count as Riptide reviews (space-separated).
+TRUSTED_REVIEW_AUTHORS="${RIPTIDE_REVIEW_AUTHORS:-ChonSong riptide-bot[bot]}"
+
+is_trusted_author() {
+  local a
+  for a in $TRUSTED_REVIEW_AUTHORS; do
+    [ "${1,,}" = "${a,,}" ] && return 0
+  done
+  return 1
+}
+
 die2() {
   printf '%s\n' "$*" >&2
   exit 2
@@ -120,12 +131,21 @@ while IFS= read -r line; do
       id="${rest%% *}"
       rest="${rest#* }"
       ts="${rest%% *}"
+      rest="${rest#* }"
+      author="${rest%% *}"
       body64="${rest#* }"
-      if [ "$body64" = "$rest" ] || [ -z "$ts" ] || [ -z "$id" ]; then
-        die2 "malformed review record (need: review <id> <created_at> <base64 body>): $line"
+      if [ "$body64" = "$rest" ] || [ -z "$ts" ] || [ -z "$id" ] || [ -z "$author" ]; then
+        die2 "malformed review record (need: review <id> <created_at> <author> <base64 body>): $line"
       fi
       body="$(printf '%s' "$body64" | base64 -d 2>/dev/null)" \
         || die2 "review $id has an undecodable body"
+      # Only the bot identity may post a review: anyone who can comment can
+      # paste a review-shaped body with the sign-off, and must not clear the gate.
+      if ! is_trusted_author "$author"; then
+        printf 'Ignoring review-shaped comment %s by untrusted author @%s.\n' "$id" "$author"
+        current_commit=""
+        continue
+      fi
       REVIEW_IDS+=("$id")
       REVIEW_TS+=("$ts")
       REVIEW_BODIES+=("$body")

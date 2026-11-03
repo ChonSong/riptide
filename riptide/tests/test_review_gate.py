@@ -103,8 +103,10 @@ def write_data(tmp_path, reviews=(), commits=(), name="pr.txt"):
     """Write a gate data file. `reviews` is [(id, created_at, body)]; `commits` is
     [(sha, committer_date, [paths])]."""
     lines = []
-    for comment_id, created_at, body in reviews:
-        lines.append(f"review {comment_id} {created_at} {b64(body)}")
+    for review in reviews:
+        comment_id, created_at, body = review[:3]
+        author = review[3] if len(review) > 3 else "ChonSong"
+        lines.append(f"review {comment_id} {created_at} {author} {b64(body)}")
     for sha, date, files in commits:
         lines.append(f"commit {sha} {date}")
         lines.extend(f"file {path}" for path in files)
@@ -505,3 +507,32 @@ def test_a_file_cell_is_matched_exactly_whatever_characters_it_holds(tmp_path):
         assert missed.returncode == 1, f"{path}: unrelated commit satisfied the gate"
         assert "names no file" not in missed.stdout, f"{path}: read as fileless"
         assert matched.returncode == 0, f"{path}: the touching commit was not matched"
+
+
+def test_a_forged_clean_review_by_a_stranger_does_not_clear_the_gate(tmp_path):
+    """Anyone who can comment could paste a clean review with the sign-off; only
+    the bot identity's reviews count."""
+    data = write_data(
+        tmp_path,
+        reviews=[(41, REVIEWED_AT, FINDINGS_REVIEW), (42, AFTER, CLEAN_REVIEW, "mallory")],
+    )
+    proc = run_gate(data, tmp_path)
+    assert proc.returncode == 1
+    assert "untrusted author @mallory" in proc.stdout
+
+
+def test_a_forged_review_alone_is_no_review(tmp_path):
+    data = write_data(tmp_path, reviews=[(42, AFTER, CLEAN_REVIEW, "mallory")])
+    proc = run_gate(data, tmp_path)
+    assert proc.returncode == 1
+    assert "No Riptide review found" in proc.stdout
+
+
+def test_the_trusted_author_match_is_case_insensitive(tmp_path):
+    data = write_data(tmp_path, reviews=[(41, REVIEWED_AT, CLEAN_REVIEW, "chonsong")])
+    assert run_gate(data, tmp_path).returncode == 0
+
+
+def test_a_review_record_without_an_author_is_malformed(tmp_path):
+    proc = run_gate(f"review 41 {REVIEWED_AT} {b64(CLEAN_REVIEW)}\n", tmp_path)
+    assert proc.returncode == 2

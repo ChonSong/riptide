@@ -44,13 +44,13 @@ jobs:
 
           # Comments and commits for scripts/check_riptide_review.sh, straight from
           # the API so no fetch-depth is needed:
-          #   review <id> <created_at> <base64 body>
+          #   review <id> <created_at> <author login> <base64 body>
           #   commit <sha> <committer-date>
           #   file   <path changed by that commit>
           data="$(mktemp)"
           shas="$(mktemp)"
           gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate \
-            --jq '.[] | "review \(.id) \(.created_at) \(.body | @base64)"' >"${data}"
+            --jq '.[] | "review \(.id) \(.created_at) \(.user.login) \(.body | @base64)"' >"${data}"
           gh api "repos/${REPO}/pulls/${PR_NUMBER}/commits" --paginate --jq '.[].sha' >"${shas}"
           while IFS= read -r sha; do
             [ -n "${sha}" ] || continue
