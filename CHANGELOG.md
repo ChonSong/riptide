@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed (2026-11-03)
+
+- **The Conductor judge silently dropped security findings.** `Judge._is_in_focus`
+  only kept findings whose message matched the dead-code / import / bare-except
+  keywords, so `diff_analyzer`'s `security` findings (hardcoded secrets, `eval`,
+  `shell=True`) never reached the review. Security and critical findings are now
+  always in focus and are ranked first before the three-finding cap.
+
 ### Fixed (2026-09-22)
 
 - **This repo no longer declares a foreign capture target.**
