@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed (2026-11-03)
+
+- **The CI verifier reported success for checks that never passed.**
+  `CIVerifier._classify_checks` only recognised success/failure/pending, so
+  `CANCELLED`, `TIMED_OUT`, `ERROR`, `ACTION_REQUIRED`, `STARTUP_FAILURE` and any
+  unknown state fell into no bucket and `poll()` returned `"success"`. Only
+  `SUCCESS`/`NEUTRAL`/`SKIPPED` now pass; known in-flight states are pending;
+  everything else is a failure.
+
 ### Fixed (2026-09-22)
 
 - **This repo no longer declares a foreign capture target.**

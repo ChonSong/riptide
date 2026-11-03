@@ -386,3 +386,38 @@ class TestConductorIntegration:
         # Verify the function has a docstring mentioning CI
         doc = create_fix_pipeline.__doc__ or ""
         assert "ci_verifier" in doc or "CI" in doc
+
+
+class TestNonSuccessStatesFailClosed:
+    """CANCELLED / TIMED_OUT / ERROR etc. used to fall into no bucket, so poll()
+    reported "success" for checks that never passed."""
+
+    @pytest.mark.parametrize("state", [
+        "CANCELLED", "TIMED_OUT", "ERROR", "ACTION_REQUIRED", "STARTUP_FAILURE",
+        "STALE", "cancelled", "something-new", "",
+    ])
+    def test_non_success_state_is_failed(self, state):
+        v = CIVerifier("ChonSong", "riptide", 1)
+        result = v._classify_checks([{"name": "pytest", "state": state}])
+        assert result["failed"] == [{"name": "pytest", "state": state}]
+        assert result["passed"] == []
+
+    def test_poll_reports_failure_for_cancelled_and_timed_out(self):
+        v = CIVerifier("ChonSong", "riptide", 1)
+        with patch.object(v, "_fetch_checks", return_value=[
+            {"name": "pytest", "state": "CANCELLED"},
+            {"name": "agentlint", "state": "TIMED_OUT"},
+        ]):
+            result = v.poll(timeout=3, interval=1)
+        assert result["status"] == "failure"
+        assert len(result["failed"]) == 2
+
+    @pytest.mark.parametrize("state", ["SUCCESS", "NEUTRAL", "SKIPPED"])
+    def test_passing_states(self, state):
+        v = CIVerifier("ChonSong", "riptide", 1)
+        assert len(v._classify_checks([{"name": "x", "state": state}])["passed"]) == 1
+
+    @pytest.mark.parametrize("state", ["PENDING", "IN_PROGRESS", "QUEUED", "WAITING"])
+    def test_pending_states(self, state):
+        v = CIVerifier("ChonSong", "riptide", 1)
+        assert len(v._classify_checks([{"name": "x", "state": state}])["pending"]) == 1
