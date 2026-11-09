@@ -836,6 +836,84 @@ class TestFailedJobReporting:
         assert released == 1
         post.assert_not_called()
 
+    # ── regression: a review from an earlier round must not release a newer
+    #    request's reservation (Nov 2026: a launch-stuck job was declared
+    #    failed beside the previous round's verdict comment and a duplicate
+    #    deep-think was spawned for the same PR/head) ─────────────────────────
+
+    def _store_with_dated_pending(self, created_at):
+        store = MagicMock(spec=StateStore)
+        store.list_pending_jobs.return_value = [
+            {"id": "job-245", "pr_number": 245, "created_at": created_at}
+        ]
+        return store
+
+    def _scheduled_states(self):
+        # 33bf424cbfba's exact shape while launch-stuck: never fired, enabled.
+        return {
+            "riptide-review-ChonSong-riptide-245": {
+                "state": "scheduled", "last_status": None,
+                "enabled": True, "run_at": "2026-11-09T21:25:45",
+                "last_run_at": None,
+            }
+        }
+
+    @staticmethod
+    def _gh_comments(comments):
+        def fake_run(cmd, **kwargs):
+            import json as _json
+            r = MagicMock()
+            r.returncode = 0
+            r.stderr = ""
+            r.stdout = _json.dumps(comments)
+            return r
+        return fake_run
+
+    def test_older_review_marker_does_not_release_reservation(self):
+        import json as _json
+        from riptide.deepthink import _release_finished_reservations
+        import riptide.deepthink as dt
+
+        pending_created = 1794219825.0  # Nov 9 21:23:45 AEDT — the reservation
+        store = self._store_with_dated_pending(pending_created)
+        # The PR's previous-round verdict (Nov 7) carries the sign-off marker,
+        # but predates the reservation: it is not this request's answer.
+        comments = [{
+            "body": "## Review: ✅ No findings\n\n…Riptide Review · model: `minimax-m3`",
+            "created_at": "2026-11-07T02:04:07Z",
+        }]
+        with patch.object(dt, "_cron_job_states", return_value=self._scheduled_states()), \
+             patch.object(dt.subprocess, "run", side_effect=self._gh_comments(comments)), \
+             patch.object(dt, "_post_failure_comment") as post:
+            released = _release_finished_reservations(
+                store, "riptide-review-ChonSong-riptide-245",
+                "ChonSong", "riptide", 245,
+            )
+        assert released == 0
+        store.mark_failed.assert_not_called()
+        post.assert_not_called()
+
+    def test_fresh_review_marker_releases_reservation(self):
+        from riptide.deepthink import _release_finished_reservations
+        import riptide.deepthink as dt
+
+        pending_created = 1794219825.0
+        store = self._store_with_dated_pending(pending_created)
+        comments = [{
+            "body": "## 🎯 Summary\n\n…Riptide Review · model: `minimax-m3`",
+            "created_at": "2026-11-09T12:30:00Z",  # after the reservation
+        }]
+        with patch.object(dt, "_cron_job_states", return_value=self._scheduled_states()), \
+             patch.object(dt.subprocess, "run", side_effect=self._gh_comments(comments)), \
+             patch.object(dt, "_post_failure_comment") as post:
+            released = _release_finished_reservations(
+                store, "riptide-review-ChonSong-riptide-245",
+                "ChonSong", "riptide", 245,
+            )
+        assert released == 1
+        store.mark_failed.assert_called_once_with("job-245")
+        post.assert_not_called()  # healthy completion path: no failure comment
+
     def test_failure_comment_names_job_and_is_deduped(self):
         """The posted body carries the job name + failed-run stamp (chaseable)
         and the dedup check gates the post: marker absent -> comment posted
