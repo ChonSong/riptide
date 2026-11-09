@@ -291,6 +291,47 @@ class TestOllamaCall:
         assert isinstance(result, str)
 
 
+# ── thinking contract ─────────────────────────────────────────────────────────
+# Regression: nemotron-3.5 spent the full num_predict budget on <think> tokens,
+# so enrichment calls returned empty responses and posted no visible answer.
+
+
+class TestOllamaThinkContract:
+    """Enrichment requests must disable thinking so tokens become visible output."""
+
+    def _captured_payload(self):
+        companion = make_companion()
+        with patch("requests.post") as mock:
+            mock.return_value.status_code = 200
+            mock.return_value.json.return_value = {"response": "It adds a helper."}
+            companion._ollama_call("test prompt")
+            assert mock.call_count == 1
+            return mock.call_args.kwargs["json"]
+
+    def test_payload_disables_thinking(self):
+        payload = self._captured_payload()
+        assert payload["think"] is False
+
+    def test_payload_pins_generation_options(self):
+        payload = self._captured_payload()
+        assert payload["options"] == {"num_predict": 256, "temperature": 0.3}
+        assert payload["stream"] is False
+
+    def test_tldr_and_eli5_route_through_think_false(self):
+        companion = make_companion()
+        files = [
+            {"filename": "src/utils/helper.py", "patch": "+def helper(): pass", "additions": 1, "deletions": 0, "status": "added"},
+        ]
+        with patch("requests.post") as mock:
+            mock.return_value.status_code = 200
+            mock.return_value.json.return_value = {"response": "ok"}
+            companion._generate_tldr("feat: add helper", "testuser", files, None)
+            companion._generate_eli5("feat: add helper", files)
+            assert mock.call_count == 2
+            for call in mock.call_args_list:
+                assert call.kwargs["json"]["think"] is False
+
+
 # ── _format_comment ──────────────────────────────────────────────────────────
 
 

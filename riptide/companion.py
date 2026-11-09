@@ -1096,7 +1096,9 @@ ELI5:"""
         try:
             resp = requests.post(
                 f"{self.ollama_base}/api/generate",
-                json={"model": self.model, "prompt": prompt, "stream": False, "options": {"num_predict": 256, "temperature": 0.3}},
+                # think=False: nemotron-3.5 emits <think> tokens; without this the
+                # entire num_predict budget goes to thinking and the response is empty.
+                json={"model": self.model, "prompt": prompt, "stream": False, "think": False, "options": {"num_predict": 256, "temperature": 0.3}},
                 timeout=120,
             )
             if resp.status_code == 200:
