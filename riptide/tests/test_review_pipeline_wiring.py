@@ -376,7 +376,7 @@ class TestReservationRelease:
         review is posted — the delivered review must still release the lock."""
         self._reserve(store)
         self._cron_store(monkeypatch, tmp_path, "scheduled")  # record lags reality
-        monkeypatch.setattr(deepthink, "_has_riptide_review", lambda o, r, p: True)
+        monkeypatch.setattr(deepthink, "_has_riptide_review", lambda o, r, p, since=None: True)
         released = deepthink._release_finished_reservations(
             store, self.NAME, "ChonSong", "riptide", 190
         )
@@ -386,7 +386,7 @@ class TestReservationRelease:
     def test_running_job_without_review_keeps_reservation(self, store, monkeypatch, tmp_path):
         self._reserve(store)
         self._cron_store(monkeypatch, tmp_path, "scheduled")
-        monkeypatch.setattr(deepthink, "_has_riptide_review", lambda o, r, p: False)
+        monkeypatch.setattr(deepthink, "_has_riptide_review", lambda o, r, p, since=None: False)
         assert deepthink._release_finished_reservations(
             store, self.NAME, "ChonSong", "riptide", 190
         ) == 0
@@ -510,8 +510,9 @@ class TestPollerReviewDetection:
         out = type("P", (), {
             "returncode": 0,
             "stdout": json.dumps([
-                "## Review: 3 warning(s).\n\n1. **X** ...\n\n<sub>Riptide Review · model: `deepseek-v4-flash`</sub>",
-                "nice work",
+                {"body": "## Review: 3 warning(s).\n\n1. **X** ...\n\n<sub>Riptide Review · model: `deepseek-v4-flash`</sub>",
+                 "created_at": "2026-10-01T00:00:00Z"},
+                {"body": "nice work", "created_at": "2026-10-01T00:01:00Z"},
             ]),
             "stderr": "",
         })()
@@ -523,9 +524,10 @@ class TestPollerReviewDetection:
         out = type("P", (), {
             "returncode": 0,
             "stdout": json.dumps([
-                "## Review: ✅ No findings\n\n**Riptide Review Complete — No findings**\n\n"
-                "Deterministic analysis found no issues with this PR.\n\n"
-                "**Depth:** standard | **Verdict:** pass",
+                {"body": "## Review: ✅ No findings\n\n**Riptide Review Complete — No findings**\n\n"
+                         "Deterministic analysis found no issues with this PR.\n\n"
+                         "**Depth:** standard | **Verdict:** pass",
+                 "created_at": "2026-10-01T00:00:00Z"},
             ]),
             "stderr": "",
         })()
@@ -535,7 +537,10 @@ class TestPollerReviewDetection:
     def test_no_review_marker_returns_false(self, monkeypatch):
         out = type("P", (), {
             "returncode": 0,
-            "stdout": json.dumps(["@riptide-bot review", "LGTM"]),
+            "stdout": json.dumps([
+                {"body": "@riptide-bot review", "created_at": "2026-10-01T00:00:00Z"},
+                {"body": "LGTM", "created_at": "2026-10-01T00:01:00Z"},
+            ]),
             "stderr": "",
         })()
         monkeypatch.setattr(deepthink.subprocess, "run", lambda *a, **k: out)
