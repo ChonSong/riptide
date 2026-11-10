@@ -661,7 +661,13 @@ def _spawn_deepthink(
     cmd.extend([
         "--model", DEEPTHINK_MODEL,
         "--provider", DEEPTHINK_PROVIDER,
-        "--deliver", "origin",
+        # deliver=local: the session posts its GitHub artifacts itself; the
+        # cron-run report only needs to land in the local output store.
+        # origin delivery resolves the gateway's home-chat target before the
+        # session launches, and that resolution path has twice wedged or
+        # delayed deep-think fires (Nov 2026: claimed-not-launched for 40+ min,
+        # then duplicate-spawned by the reservation-expiry re-spawn).
+        "--deliver", "local",
     ])
 
     scheduled = False
