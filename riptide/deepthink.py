@@ -267,7 +267,13 @@ def _post_failure_comment(
             ],
             capture_output=True, text=True, timeout=60,
         )
-        already = proc.returncode == 0 and proc.stdout.strip().lower() == "true"
+        # The jq filter yields one boolean PER PAGE, so a multi-page response
+        # prints several lines ("true"/"false"). Comparing the whole stdout to
+        # "true" then never matches, and the same failure gets reported twice.
+        # Any page reporting the marker is enough.
+        already = proc.returncode == 0 and any(
+            str(v).strip().lower() == "true" for v in _parse_gh_pages(proc.stdout)
+        )
     except Exception as e:
         log.warning("  #%d failure-comment dedup check error: %s", pr_number, e)
         already = True  # fail closed: skip posting rather than risk spam
@@ -296,6 +302,41 @@ def _post_failure_comment(
             "  #%d failure comment post failed: %s",
             pr_number, (proc.stderr or "").strip()[:160],
         )
+
+
+def _parse_gh_pages(stdout: str) -> list:
+    """Parse `gh api --paginate` stdout into one flat list of items.
+
+    ``gh`` prints one JSON document per page when the response is paginated,
+    and with ``--jq`` it prints the filter's output for EACH page separately.
+    So a two-page response is two JSON documents on stdout, not one array —
+    ``json.loads`` over the whole stdout raises ``Extra data: line 2 column 1``
+    and the caller sees an empty/garbled result.
+
+    Without ``--jq`` gh merges the pages into a single array, so this helper
+    accepts both shapes: a single document, or several documents separated by
+    newlines. Each document that is itself an array is unwrapped and
+    concatenated, which is what both call sites want.
+    """
+    text = (stdout or "").strip()
+    if not text:
+        return []
+    try:
+        # Single merged document (the shape gh emits without --jq).
+        merged = json.loads(text)
+        return list(merged) if isinstance(merged, list) else [merged]
+    except ValueError:
+        pass
+    # One document per page (the shape gh emits with --jq). Each page is a
+    # complete JSON document on its own line.
+    items: list = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        page = json.loads(line)
+        items.extend(page if isinstance(page, list) else [page])
+    return items
 
 
 def _has_riptide_review(owner: str, repo: str, pr_number: int, since: float | None = None) -> bool:
@@ -337,7 +378,7 @@ def _has_riptide_review(owner: str, repo: str, pr_number: int, since: float | No
         return True
 
     try:
-        comments = json.loads(proc.stdout or "[]")
+        comments = _parse_gh_pages(proc.stdout)
     except Exception as e:
         log.warning("  #%d review-exists parse error: %s", pr_number, e)
         return True

@@ -1049,6 +1049,39 @@ class TestFailedJobReporting:
         ]
         assert not posted, "a second failure comment was posted for the same failure"
 
+    def test_failure_comment_deduped_on_a_paginated_response(self):
+        """The dedup check must survive a multi-page comment list.
+
+        The jq filter yields one boolean PER PAGE, so a PR with more than 100
+        comments produced "true\\nfalse\\n..." — comparing the whole stdout to
+        "true" never matched, and the same failure was reported again.
+        """
+        from riptide.deepthink import _post_failure_comment
+        import riptide.deepthink as dt
+
+        def fake_run(cmd, **kwargs):
+            r = MagicMock()
+            r.returncode = 0
+            if any("contains" in a for a in cmd):
+                # The marker sits on a later page.
+                r.stdout = "false\nfalse\ntrue\n"
+            else:
+                r.stdout = ""
+            r.stderr = ""
+            return r
+
+        with patch.object(dt.subprocess, "run", side_effect=fake_run) as run:
+            _post_failure_comment(
+                "ChonSong", "riptide", 214,
+                "riptide-review-ChonSong-riptide-214",
+                {"last_run_at": "2026-10-05T23:18:22Z"},
+            )
+        posted = [
+            c for c in run.call_args_list
+            if len(c.args) > 0 and "pr" in c.args[0] and "comment" in c.args[0]
+        ]
+        assert not posted, "a second failure comment was posted for the same failure"
+
 
 class TestReportFailedReviewJobs:
     """The poller sweep must report failed review jobs that have no upcoming
