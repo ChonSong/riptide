@@ -16,6 +16,7 @@ reviews:
 
 import json
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -376,7 +377,7 @@ class TestReservationRelease:
         review is posted — the delivered review must still release the lock."""
         self._reserve(store)
         self._cron_store(monkeypatch, tmp_path, "scheduled")  # record lags reality
-        monkeypatch.setattr(deepthink, "_has_riptide_review", lambda o, r, p: True)
+        monkeypatch.setattr(deepthink, "_has_riptide_review", lambda o, r, p, since=None: True)
         released = deepthink._release_finished_reservations(
             store, self.NAME, "ChonSong", "riptide", 190
         )
@@ -386,7 +387,7 @@ class TestReservationRelease:
     def test_running_job_without_review_keeps_reservation(self, store, monkeypatch, tmp_path):
         self._reserve(store)
         self._cron_store(monkeypatch, tmp_path, "scheduled")
-        monkeypatch.setattr(deepthink, "_has_riptide_review", lambda o, r, p: False)
+        monkeypatch.setattr(deepthink, "_has_riptide_review", lambda o, r, p, since=None: False)
         assert deepthink._release_finished_reservations(
             store, self.NAME, "ChonSong", "riptide", 190
         ) == 0
@@ -510,22 +511,98 @@ class TestPollerReviewDetection:
         out = type("P", (), {
             "returncode": 0,
             "stdout": json.dumps([
-                "## Review: 3 warning(s).\n\n1. **X** ...\n\n<sub>Riptide Review · model: `deepseek-v4-flash`</sub>",
-                "nice work",
+                {"body": "## Review: 3 warning(s).\n\n1. **X** ...\n\n<sub>Riptide Review · model: `deepseek-v4-flash`</sub>",
+                 "created_at": "2026-10-01T00:00:00Z"},
+                {"body": "nice work", "created_at": "2026-10-01T00:01:00Z"},
             ]),
             "stderr": "",
         })()
         monkeypatch.setattr(deepthink.subprocess, "run", lambda *a, **k: out)
         assert deepthink._has_riptide_review("ChonSong", "riptide", 190) is True
 
+    def test_paginated_pages_are_parsed_as_one_list(self, monkeypatch):
+        """`gh api --paginate` prints one JSON document PER PAGE.
+
+        The old code ran a single `json.loads` over the whole stdout, which
+        raises "Extra data" on a multi-page response — the parse fell into the
+        except branch and returned True, so every PR with >100 comments read
+        as "already reviewed".
+        """
+        page1 = json.dumps([{"body": "first page", "created_at": "2026-10-01T00:00:00Z"}])
+        page2 = json.dumps([{"body": "second page", "created_at": "2026-10-01T00:01:00Z"}])
+        out = type("P", (), {
+            "returncode": 0,
+            "stdout": page1 + "\n" + page2,
+            "stderr": "",
+        })()
+        monkeypatch.setattr(deepthink.subprocess, "run", lambda *a, **k: out)
+        # No review marker on either page -> not a review.
+        assert deepthink._has_riptide_review("ChonSong", "riptide", 190) is False
+
+    def test_paginated_pages_do_not_hide_a_review_marker(self, monkeypatch):
+        """A review marker on the SECOND page must still be found."""
+        page1 = json.dumps([{"body": "unrelated", "created_at": "2026-10-01T00:00:00Z"}])
+        page2 = json.dumps([
+            {"body": "## Review: 1 warning(s).\n\n<sub>Riptide Review · model: `m`</sub>",
+             "created_at": "2026-10-01T00:01:00Z"},
+        ])
+        out = type("P", (), {
+            "returncode": 0,
+            "stdout": page1 + "\n" + page2,
+            "stderr": "",
+        })()
+        monkeypatch.setattr(deepthink.subprocess, "run", lambda *a, **k: out)
+        assert deepthink._has_riptide_review("ChonSong", "riptide", 190) is True
+
+    def test_paginated_pages_keep_the_since_filter_correct(self, monkeypatch):
+        """The regression this PR exists to fix.
+
+        A PR whose comments span several pages used to fail the parse, and the
+        except branch answered "yes, a review exists" — so a review from an
+        EARLIER round released a newer request's reservation.
+        """
+        # Only a pre-reservation review, sitting on the first page.
+        page1 = json.dumps([
+            {"body": "## Review: ✅ No findings\n\n<sub>Riptide Review · model: `m`</sub>",
+             "created_at": "2026-10-01T00:00:00Z"},
+        ])
+        page2 = json.dumps([{"body": "unrelated chatter", "created_at": "2026-10-02T00:00:00Z"}])
+        out = type("P", (), {
+            "returncode": 0,
+            "stdout": page1 + "\n" + page2,
+            "stderr": "",
+        })()
+        monkeypatch.setattr(deepthink.subprocess, "run", lambda *a, **k: out)
+        since = datetime(2026, 10, 15, tzinfo=timezone.utc).timestamp()
+        # The review predates the reservation: it is not this request's answer.
+        assert deepthink._has_riptide_review("ChonSong", "riptide", 190, since=since) is False
+
+    def test_parse_gh_pages_accepts_both_shapes(self):
+        """gh merges pages into one array without --jq, and prints one document
+        per page with --jq. The helper accepts both."""
+        merged = json.dumps([{"id": 1}, {"id": 2}])
+        assert deepthink._parse_gh_pages(merged) == [{"id": 1}, {"id": 2}]
+
+        per_page = json.dumps([{"id": 1}]) + "\n" + json.dumps([{"id": 2}])
+        assert deepthink._parse_gh_pages(per_page) == [{"id": 1}, {"id": 2}]
+
+        assert deepthink._parse_gh_pages("") == []
+        assert deepthink._parse_gh_pages("   \n  ") == []
+
+    def test_parse_gh_pages_keeps_scalars(self):
+        """A --jq filter yielding one boolean per page must stay booleans."""
+        assert deepthink._parse_gh_pages("true\nfalse\ntrue") == [True, False, True]
+        assert deepthink._parse_gh_pages("true") == [True]
+
     def test_companion_pass_confirmation_is_not_a_review(self, monkeypatch):
         """The pass confirmation used to count, which kept unreviewed PRs skipped."""
         out = type("P", (), {
             "returncode": 0,
             "stdout": json.dumps([
-                "## Review: ✅ No findings\n\n**Riptide Review Complete — No findings**\n\n"
-                "Deterministic analysis found no issues with this PR.\n\n"
-                "**Depth:** standard | **Verdict:** pass",
+                {"body": "## Review: ✅ No findings\n\n**Riptide Review Complete — No findings**\n\n"
+                         "Deterministic analysis found no issues with this PR.\n\n"
+                         "**Depth:** standard | **Verdict:** pass",
+                 "created_at": "2026-10-01T00:00:00Z"},
             ]),
             "stderr": "",
         })()
@@ -535,7 +612,10 @@ class TestPollerReviewDetection:
     def test_no_review_marker_returns_false(self, monkeypatch):
         out = type("P", (), {
             "returncode": 0,
-            "stdout": json.dumps(["@riptide-bot review", "LGTM"]),
+            "stdout": json.dumps([
+                {"body": "@riptide-bot review", "created_at": "2026-10-01T00:00:00Z"},
+                {"body": "LGTM", "created_at": "2026-10-01T00:01:00Z"},
+            ]),
             "stderr": "",
         })()
         monkeypatch.setattr(deepthink.subprocess, "run", lambda *a, **k: out)
