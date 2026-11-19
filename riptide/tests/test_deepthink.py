@@ -85,7 +85,11 @@ class TestSpawnDeepthink:
 
         # Verify --deliver and --name
         assert "--deliver" in cmd
-        assert "origin" in cmd
+        # local: the session posts its GitHub artifacts itself; origin delivery
+        # resolves the gateway home-chat target before launch, which has wedged
+        # or delayed deep-think fires (Nov 2026 incident).
+        deliver_idx = cmd.index("--deliver")
+        assert cmd[deliver_idx + 1] == "local"
         assert "--name" in cmd
         name_idx = cmd.index("--name")
         assert cmd[name_idx + 1] == "riptide-review-ChonSong-riptide-42"
