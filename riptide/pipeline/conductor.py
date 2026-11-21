@@ -188,6 +188,9 @@ class Conductor:
                 isinstance(output, dict)
                 and not output.get("error")
                 and output.get("posted", True) is not False
+                # Engine reports a shell result: a non-zero exit (e.g. 127 for a
+                # command that does not exist) is a failure, not "done".
+                and output.get("success", True) is not False
             )
         
         if passed:

@@ -109,3 +109,26 @@ class TestWorkStateThreadSafety:
             t.join()
 
         assert not errors, f"Concurrent write errors: {errors}"
+
+
+class TestEngineFailureIsNotDone:
+    """An engine command that fails (exit 127: command not found) used to be
+    recorded as `done` because only `error`/`posted` were checked."""
+
+    def _run(self, output):
+        from unittest.mock import patch
+        create_track("engine-track", name="T", phase="Review", repos={})
+        ws = create_workstream("engine-track", "ws-4-engine",
+                               inputs={"command": "upload_diagram x"}, role="engine")
+        conductor = Conductor("engine-track")
+        with patch.object(Conductor, "_dispatch", return_value=output):
+            return conductor._run_workstream("ws-4-engine", ws)
+
+    def test_nonzero_exit_marks_failed(self):
+        result = self._run({"exit_code": 127, "stdout": "", "stderr": "not found", "success": False})
+        assert result["status"] == "failed"
+        assert read_state()["tracks"]["engine-track"]["workstreams"]["ws-4-engine"]["status"] == "failed"
+
+    def test_zero_exit_marks_done(self):
+        result = self._run({"exit_code": 0, "stdout": "ok", "stderr": "", "success": True})
+        assert result["status"] == "done"

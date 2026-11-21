@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed (2026-11-03)
+
+- **A failed engine command was recorded as `done`.** `_run_workstream` judged
+  in-band roles only by `error`/`posted`, so an `Engine` result with
+  `success: False` (e.g. exit 127 for the unresolvable `upload_diagram`
+  command) marked `ws-4-engine` done. A `success: False` output now marks the
+  workstream `failed`.
+
 ### Fixed (2026-09-22)
 
 - **This repo no longer declares a foreign capture target.**
