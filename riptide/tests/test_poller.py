@@ -499,3 +499,25 @@ def _search_subprocess_return(items):
     result.stdout = json.dumps(items)
     result.stderr = ""
     return result
+
+
+class TestSearchFixScope:
+    """The fix search must be scoped to our own repos (an unscoped search let any
+    public PR on GitHub drive a host fix session)."""
+
+    def test_search_is_scoped_to_our_owner(self, poller_mod):
+        with patch("riptide.poller.subprocess.run") as mock_run, \
+             patch("riptide.poller._get_pr_comments", return_value=[]):
+            mock_run.return_value = _search_subprocess_return([])
+            poller_mod._search_fix_comments()
+        cmd = mock_run.call_args.args[0]
+        assert cmd[cmd.index("--owner") + 1] == poller_mod.POLL_OWNER
+
+    def test_out_of_scope_results_are_dropped(self, poller_mod):
+        item = {"number": 7, "title": "t",
+                "repository": {"name": "evil", "owner": {"login": "stranger"}}}
+        with patch("riptide.poller.subprocess.run") as mock_run, \
+             patch("riptide.poller._get_pr_comments") as get_comments:
+            mock_run.return_value = _search_subprocess_return([item])
+            assert poller_mod._search_fix_comments() == []
+        get_comments.assert_not_called()

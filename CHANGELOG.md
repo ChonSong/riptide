@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Security (2026-11-03)
+
+- **`@riptide-bot fix` is restricted to trusted actors and our own repos.** The
+  poller's `gh search prs` was unscoped, so any public PR whose comments said
+  `@riptide-bot fix` was discovered, and the fixer let the PR's own author
+  authorise a host fix session. The search now passes `--owner $RIPTIDE_OUR_ORG`
+  and drops out-of-scope results; the fixer accepts only the repo owner,
+  `RIPTIDE_OUR_USERNAME`, or logins in the new `RIPTIDE_FIX_ALLOWLIST`.
+
 ### Fixed (2026-09-22)
 
 - **This repo no longer declares a foreign capture target.**
