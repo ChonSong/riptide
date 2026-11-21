@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Security (2026-11-03)
+
+- **The `riptide-review-required` gate only counts comments by the bot identity.**
+  Any user who could comment could paste a clean `## Review:` body with the
+  `Riptide Review ·` sign-off and turn the gate green. The workflow now emits each
+  comment's `user.login`, and `scripts/check_riptide_review.sh` ignores
+  review-shaped comments whose author is not in `RIPTIDE_REVIEW_AUTHORS`
+  (default `ChonSong riptide-bot[bot]`, case-insensitive).
+
 ### Fixed (2026-09-22)
 
 - **This repo no longer declares a foreign capture target.**

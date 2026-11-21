@@ -47,7 +47,7 @@ COMPANION_PASS = "## Riptide Pass: ✅ No findings\n\n**Verdict:** pass\n"
 
 def _record(body: str, created: str, cid: int) -> str:
     encoded = base64.b64encode(body.encode("utf-8")).decode("ascii")
-    return f"review {cid} {created} {encoded}"
+    return f"review {cid} {created} ChonSong {encoded}"
 
 
 def _judge(tmp_path, records: list[str]) -> str:
