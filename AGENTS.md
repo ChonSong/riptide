@@ -55,7 +55,8 @@ riptide/
 │   ├── proofshotter.py    # Bot 3: Cron-polled proofshot visual verification
 │   ├── webhook.py         # FastAPI server (companion trigger, installation sync)
 │   ├── assemble_review.py # Structures findings into the posted review body
-│   ├── state.py           # SQLite state: dedup, jobs, reservations, heuristics
+│   ├── state.py           # SQLite state: dedup, jobs, reservations, heuristics, diagram_assets
+│   ├── bundles.py         # Context-bundle file format for the multi-session architecture
 │   ├── diff_analyzer.py   # Deterministic complexity/defect scan
 │   ├── pipeline/          # Conductor review pipeline (one module per role)
 │   │   ├── conductor.py   #   orchestrates workstreams, canonical output paths
@@ -71,6 +72,8 @@ riptide/
 ├── scripts/deploy.sh      # Auto-deploy (invoked by webhook on merge)
 ├── docs/REVIEW-CONTRACT.md # Review markers, gate, reservations, attribution
 ├── docs/DATA-AND-PROMPTS.md # Findings dict, cron-store projection, real prompt texts, API shapes, linked specimens
+├── docs/DIAGRAM-SPEC.md   # Review diagram spec (PR #216)
+├── PLAN-multi-session-architecture.md # Approved multi-session architecture plan (Wave 1+)
 ├── docs/archive/          # Superseded planning docs (historical, not current)
 ├── requirements.txt       # fastapi, uvicorn, pydantic, cryptography, requests, graphifyy
 ├── Dockerfile
@@ -222,6 +225,53 @@ The load-bearing rules:
 ### Dependencies
 - Adding a new pip dependency needs clear justification
 - Prefer transitive deps that already exist
+
+### `diagram_assets` table (multi-session architecture)
+- The `riptide/state.py:diagram_assets` table (added in v10) stores raw
+  Excalidraw element arrays (gzipped) and rendered PNG bytes (gzipped)
+  keyed by `(pr_id, base_sha, render_kind)`. The UNIQUE index means
+  re-renders for the same head replace the prior row instead of
+  appending duplicates.
+- Methods: `save_diagram_asset`, `fetch_latest_diagram`,
+  `fetch_diagram_for_sha`, `list_diagram_assets`. The pure-Python
+  `compute_diagram_diff` (staticmethod) shapes the structural delta
+  between a prior scene and a new context — Wave 3 wires an LLM to
+  mcp-excalidraw to apply the diff via `update_element` /
+  `add_element` / `delete_element`.
+- Wave 1 ships this as a data-layer addition: no production code path
+  reads it yet. The schema is reversible (drop the table) and additive
+  (no existing column changes). Wave 2 wires the Conductor to write
+  bundles, Wave 3 wires the spawned session to read them.
+
+### Context-bundle protocol
+- The orchestrator writes a JSON context bundle to disk before spawning
+  a hermes session for Stage 3 (Deep Review) or Stage 4 (Diagram).
+  The bundle lives at `RIPTIDE_BUNDLE_DIR/riptide-bundle-{job_id}.json`
+  (default `/tmp`). The agent reads the bundle via the same
+  "Read the prompt from /tmp/riptide-... and execute it. After
+  execution, delete the file." mechanism that `deepthink.py` already
+  uses for its deepthink prompt.
+- Module: `riptide/bundles.py`. Functions: `write_bundle`, `read_bundle`,
+  `cleanup_bundle`, `encode_gzip_b64`, `decode_gzip_b64`. Binary data
+  (PNG bytes, gzipped JSON) is base64-encoded in transit so the bundle
+  stays a plain JSON object.
+- Schema: see `riptide/bundles.py` docstring or the approved
+  `PLAN-multi-session-architecture.md` §3 for the full field list.
+  `schema_version` is the contract — bump it when the shape changes
+  in a way the receiving agent needs to know.
+
+### Model configuration (no hardcoded models)
+- The `DEEPTHINK_MODEL` / `DEEPTHINK_PROVIDER` constants in
+  `riptide/deepthink.py` are resolved from `RIPTIDE_DEEPTHINK_MODEL` /
+  `RIPTIDE_DEEPTHINK_PROVIDER` with documented `LongCat-2.0` /
+  `longcat` fallbacks for the dev/CI path. Production sets the env in
+  `/home/sc/workspace/riptide-prod/.env` (and the test env relies on
+  the fallback). New code paths must read the env and either error
+  loud or use a non-model-specific placeholder; do **not** introduce
+  a new hardcoded model default.
+- `RIPTIDE_BUNDLE_DIR` follows the same pattern: a code constant
+  with an env override for hermetic tests, no hardcoded production
+  path.
 
 ## Docs
 

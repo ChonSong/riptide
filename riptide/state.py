@@ -67,7 +67,7 @@ FIX_TTL_SECONDS = 7200  # 2 hours
 class StateStore:
     """SQLite-backed state for tracking jobs, deliveries, and processed comments."""
 
-    SCHEMA_VERSION = 9
+    SCHEMA_VERSION = 10
 
     def __init__(self, db_path: str = DEFAULT_DB_PATH):
         self.db_path = db_path
@@ -210,6 +210,39 @@ class StateStore:
             except sqlite3.OperationalError as e:
                 if "duplicate column name" not in str(e):
                     raise
+
+        # v10: diagram_assets — multi-session architecture (see PLAN-multi-session-architecture.md).
+        # The diagram stage persists the raw .excalidraw JSON (gzipped) plus the
+        # rendered PNG (gzipped) so a subsequent push can apply a delta patch
+        # instead of re-rendering from scratch. The (pr_id, base_sha, render_kind)
+        # UNIQUE means re-renders overwrite; the delta_of FK gives the prior
+        # scene by chain. No behaviour change for existing code paths — the
+        # Conductor and Scribe do not read this table until Wave 2/3 land.
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS diagram_assets (
+                id              TEXT PRIMARY KEY,
+                pr_id           TEXT NOT NULL,
+                base_sha        TEXT NOT NULL,
+                parent_sha      TEXT,
+                element_count   INTEGER NOT NULL,
+                render_kind     TEXT NOT NULL,
+                scene_json      BLOB NOT NULL,
+                rendered_png    BLOB,
+                renderer_meta   TEXT,
+                created_at      TEXT NOT NULL,
+                created_by      TEXT,
+                delta_of        TEXT,
+                FOREIGN KEY (delta_of) REFERENCES diagram_assets(id)
+            )"""
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_diagram_assets_pr_head "
+            "ON diagram_assets (pr_id, base_sha)"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_diagram_assets_unique "
+            "ON diagram_assets (pr_id, base_sha, render_kind)"
+        )
 
         if version < self.SCHEMA_VERSION:
             conn.execute("DELETE FROM schema_version")
@@ -987,6 +1020,334 @@ class StateStore:
             "Focus on catching issues that have been common in the past."
         )
         return "\n".join(lines)
+
+    # ── Diagram assets (multi-session architecture, v10) ──────────────────
+    #
+    # The Diagram stage persists the raw .excalidraw JSON (gzipped) plus the
+    # rendered PNG (gzipped) so a subsequent push can apply a delta patch
+    # against the prior asset instead of re-rendering from scratch. See
+    # PLAN-multi-session-architecture.md §3 for the full schema rationale.
+    # The methods below are pure data-layer operations; the rendering and
+    # diff-application logic lives in Wave 3 (mcp-excalidraw integration).
+
+    @retry_db_fast
+    def save_diagram_asset(
+        self,
+        pr_id: str,
+        base_sha: str,
+        render_kind: str,
+        scene_json: bytes,
+        rendered_png: bytes | None,
+        element_count: int,
+        parent_sha: str | None = None,
+        delta_of: str | None = None,
+        created_by: str | None = None,
+        renderer_meta: str | None = None,
+    ) -> str:
+        """Insert a diagram asset, or overwrite the existing one for the same
+        (pr_id, base_sha, render_kind) triple. The diagram_assets UNIQUE
+        index makes this idempotent: re-renders for the same head replace
+        the prior row instead of appending duplicates.
+
+        Returns the new asset id (uuid4 hex).
+        """
+        import uuid
+
+        asset_id = uuid.uuid4().hex
+        conn = self._get_conn()
+        self._acquire_lock()
+        try:
+            conn.execute(
+                """INSERT OR REPLACE INTO diagram_assets
+                    (id, pr_id, base_sha, parent_sha, element_count, render_kind,
+                     scene_json, rendered_png, renderer_meta, created_at, created_by,
+                     delta_of)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    asset_id,
+                    pr_id,
+                    base_sha,
+                    parent_sha,
+                    element_count,
+                    render_kind,
+                    scene_json,
+                    rendered_png,
+                    renderer_meta,
+                    datetime.now(timezone.utc).isoformat(),
+                    created_by,
+                    delta_of,
+                ),
+            )
+            conn.commit()
+        finally:
+            self._release_lock()
+        return asset_id
+
+    @retry_db_fast
+    def fetch_latest_diagram(
+        self,
+        pr_id: str,
+        render_kind: str,
+        before_base_sha: str | None = None,
+    ) -> Optional[dict]:
+        """Fetch the most recent diagram asset for a PR.
+
+        When ``before_base_sha`` is set, returns the most recent asset
+        strictly before that commit — this is the "prior scene" the
+        delta-patch protocol needs. The unique index on
+        (pr_id, base_sha, render_kind) means there is at most one row per
+        head, so "most recent before" is unambiguous.
+        """
+        conn = self._get_conn()
+        if before_base_sha is not None:
+            row = conn.execute(
+                """SELECT id, pr_id, base_sha, parent_sha, element_count,
+                          render_kind, scene_json, rendered_png, renderer_meta,
+                          created_at, created_by, delta_of
+                   FROM diagram_assets
+                   WHERE pr_id = ? AND render_kind = ? AND base_sha < ?
+                   ORDER BY base_sha DESC, created_at DESC
+                   LIMIT 1""",
+                (pr_id, render_kind, before_base_sha),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """SELECT id, pr_id, base_sha, parent_sha, element_count,
+                          render_kind, scene_json, rendered_png, renderer_meta,
+                          created_at, created_by, delta_of
+                   FROM diagram_assets
+                   WHERE pr_id = ? AND render_kind = ?
+                   ORDER BY base_sha DESC, created_at DESC
+                   LIMIT 1""",
+                (pr_id, render_kind),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_diagram_asset(row)
+
+    @retry_db_fast
+    def fetch_diagram_for_sha(
+        self,
+        pr_id: str,
+        base_sha: str,
+        render_kind: str,
+    ) -> Optional[dict]:
+        """Fetch the diagram asset for an exact (pr_id, base_sha, render_kind)."""
+        conn = self._get_conn()
+        row = conn.execute(
+            """SELECT id, pr_id, base_sha, parent_sha, element_count,
+                      render_kind, scene_json, rendered_png, renderer_meta,
+                      created_at, created_by, delta_of
+               FROM diagram_assets
+               WHERE pr_id = ? AND base_sha = ? AND render_kind = ?
+               LIMIT 1""",
+            (pr_id, base_sha, render_kind),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_diagram_asset(row)
+
+    @retry_db_fast
+    def list_diagram_assets(
+        self,
+        pr_id: str,
+        render_kind: str | None = None,
+    ) -> list[dict]:
+        """List all diagram assets for a PR, newest head first.
+
+        When ``render_kind`` is set, only assets of that kind (e.g. 'review')
+        are returned. Used by the Scribe to show "diagram history" alongside
+        the current review comment.
+        """
+        conn = self._get_conn()
+        if render_kind is not None:
+            rows = conn.execute(
+                """SELECT id, pr_id, base_sha, parent_sha, element_count,
+                          render_kind, scene_json, rendered_png, renderer_meta,
+                          created_at, created_by, delta_of
+                   FROM diagram_assets
+                   WHERE pr_id = ? AND render_kind = ?
+                   ORDER BY base_sha DESC, created_at DESC""",
+                (pr_id, render_kind),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT id, pr_id, base_sha, parent_sha, element_count,
+                          render_kind, scene_json, rendered_png, renderer_meta,
+                          created_at, created_by, delta_of
+                   FROM diagram_assets
+                   WHERE pr_id = ?
+                   ORDER BY base_sha DESC, created_at DESC""",
+                (pr_id,),
+            ).fetchall()
+        return [self._row_to_diagram_asset(r) for r in rows]
+
+    def _row_to_diagram_asset(self, row) -> dict:
+        """Decode a ``diagram_assets`` row into a plain dict.
+
+        The blob columns are returned as raw bytes — the caller is responsible
+        for decompressing (gzip) and parsing (JSON) the scene, and decoding
+        the PNG header. Keeping the data layer byte-clean lets the rendering
+        path control its own compression/decompression policy.
+        """
+        return {
+            "id": row[0],
+            "pr_id": row[1],
+            "base_sha": row[2],
+            "parent_sha": row[3],
+            "element_count": row[4],
+            "render_kind": row[5],
+            "scene_json": row[6],  # gzipped .excalidraw (Element[] array)
+            "rendered_png": row[7],  # gzipped PNG bytes (None until render_png ran)
+            "renderer_meta": row[8],
+            "created_at": row[9],
+            "created_by": row[10],
+            "delta_of": row[11],
+        }
+
+    @staticmethod
+    def compute_diagram_diff(
+        prior_scene_json: bytes | None,
+        new_context: dict,
+    ) -> dict:
+        """Compute the structural delta between a prior diagram asset and a
+        new review context. Pure-Python data shaping — does not touch
+        mcp-excalidraw. The LLM in Wave 3 will use this diff to drive
+        ``update_element`` / ``add_element`` / ``delete_element`` calls.
+
+        ``prior_scene_json`` is the raw gzipped ``.excalidraw`` Element[]
+        array as stored in the prior asset's ``scene_json`` blob, or
+        ``None`` if no prior scene exists (the first push of the PR).
+
+        ``new_context`` is the new context bundle, expected to have
+        keys ``scan`` (with ``pr_details``, ``files``) and ``review`` (with
+        ``findings``). The graph key is accepted but not used in this
+        first cut — the diagram stage's diff is over file changes and
+        review findings, not graphify output. Wave 3 will extend this
+        when the LLM starts to consume the graph.
+
+        Returns a dict with these keys:
+            has_prior:    bool, True iff a prior scene was provided.
+            prior_element_count: int (0 if no prior), useful as a baseline.
+            added_files, removed_files, modified_files: list[str] (paths).
+            added_findings, removed_findings, modified_findings: list[dict]
+                (the affected finding objects, by file:line; a finding
+                is "modified" if it disappeared from one file:line and
+                reappeared at another, otherwise added/removed by exact
+                file:line match).
+            unchanged_findings: list[dict] (findings present in both).
+
+        The diff is intentionally a *list of structural changes*, not a
+        full patch. The LLM decides how to map each change to Excalidraw
+        elements (e.g. which new element to add, which old element to
+        update or remove). Wave 3 wires the LLM to mcp-excalidraw.
+        """
+        import gzip
+        import json as _json
+
+        def _decode_scene(blob: bytes | None) -> list[dict]:
+            if blob is None:
+                return []
+            try:
+                raw = gzip.decompress(blob).decode("utf-8")
+            except (OSError, UnicodeDecodeError):
+                # Stored scene was not gzip-compressed (legacy or corrupted
+                # asset). Fall back to raw decode so the diff still runs.
+                raw = blob.decode("utf-8", errors="replace")
+            try:
+                elements = _json.loads(raw)
+            except _json.JSONDecodeError:
+                return []
+            # Excalidraw Element[] is the canonical shape; tolerate the
+            # older wrapper shape ({elements: [...], ...}) too.
+            if isinstance(elements, dict) and "elements" in elements:
+                elements = elements["elements"]
+            return elements if isinstance(elements, list) else []
+
+        prior_elements = _decode_scene(prior_scene_json)
+        diff: dict = {
+            "has_prior": bool(prior_scene_json),
+            "prior_element_count": len(prior_elements),
+            "added_files": [],
+            "removed_files": [],
+            "modified_files": [],
+            "added_findings": [],
+            "removed_findings": [],
+            "modified_findings": [],
+            "unchanged_findings": [],
+        }
+
+        scan = new_context.get("scan") or {}
+        new_files = {
+            (f.get("filename") or ""): f
+            for f in (scan.get("files") or [])
+            if f.get("filename")
+        }
+
+        # Files: we don't have the prior files list in the asset (the
+        # asset stores rendered Excalidraw, not the scan). Use the
+        # prior_scene_json's element labels as a proxy: any element
+        # referencing a file path that no longer appears in new_files
+        # is a candidate for removal. The agent will validate.
+        prior_files: set[str] = set()
+        for el in prior_elements:
+            for key in ("file", "path", "sourceFile", "containerId"):
+                value = el.get(key) if isinstance(el, dict) else None
+                if isinstance(value, str) and value:
+                    prior_files.add(value)
+        new_file_set = set(new_files.keys())
+        # Intersection / differences — treat as candidate signal only.
+        diff["added_files"] = sorted(new_file_set - prior_files)
+        diff["removed_files"] = sorted(prior_files - new_file_set)
+
+        # Findings: exact-match by (file, line, title). Modified = same title,
+        # different file:line.
+        review = new_context.get("review") or {}
+        new_findings = list(review.get("findings") or [])
+        new_by_key: dict[tuple, dict] = {}
+        new_by_title: dict[str, dict] = {}
+        for f in new_findings:
+            key = (
+                f.get("file") or "",
+                f.get("line") or 0,
+                f.get("title") or "",
+            )
+            new_by_key[key] = f
+            new_by_title[f.get("title") or ""] = f
+
+        # We don't have prior findings as a list — the prior scene is the
+        # only source. Pull finding-shaped elements from the scene: the
+        # diagram's "Findings with Severity" section uses ``kind: "text"``
+        # elements whose ``text`` string starts with the severity emoji
+        # (🔴/🟡/🟢). This is a heuristic, not a parse — the LLM
+        # refines the diff with the actual findings in Wave 3.
+        prior_findings: list[dict] = []
+        for el in prior_elements:
+            if not isinstance(el, dict):
+                continue
+            text = el.get("text") or ""
+            if any(text.startswith(prefix) for prefix in ("🔴", "🟡", "🟢")):
+                prior_findings.append({"title": text, "raw": el})
+
+        prior_titles = {f.get("title") or "" for f in prior_findings}
+        new_titles = set(new_by_title.keys())
+
+        for f in new_findings:
+            title = f.get("title") or ""
+            if title in prior_titles:
+                diff["unchanged_findings"].append(f)
+            else:
+                diff["added_findings"].append(f)
+        for f in prior_findings:
+            title = f.get("title") or ""
+            if title and title not in new_titles:
+                # Truncate long prior titles (which include severity emoji +
+                # line breaks + body text) to a comparable key.
+                diff["removed_findings"].append(
+                    {"title": title.split("\n", 1)[0], "raw": f.get("raw")}
+                )
+
+        return diff
 
 
 # Module-level convenience
