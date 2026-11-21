@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import Optional
 
 
+_SEVERITY_RANK = {"critical": 0, "warning": 1, "suggestion": 2, "info": 3}
+
+
 class Judge:
     """Takes Probe's output and produces structured findings.
     
@@ -49,10 +52,17 @@ class Judge:
         dead_code = self._check_dead_code()
         findings.extend(dead_code)
         
-        return {"findings": findings[:3]}  # Max 3
+        # Max 3 — but rank first so a security/critical finding is never the
+        # one cut off by the cap.
+        findings.sort(key=lambda f: _SEVERITY_RANK.get(f.get("severity", "info"), 9))
+        return {"findings": findings[:3]}
     
     def _is_in_focus(self, finding: dict) -> bool:
         """Check if finding matches focus areas."""
+        # Security findings and anything critical are always in focus: the
+        # focus areas narrow style feedback, they must never silence these.
+        if finding.get("category") == "security" or finding.get("severity") == "critical":
+            return True
         msg = finding.get("message", "").lower()
         if "redundant" in msg or "import" in msg:
             return "redundant_imports" in self.focus_areas
