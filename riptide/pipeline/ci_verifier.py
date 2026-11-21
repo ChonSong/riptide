@@ -127,13 +127,25 @@ class CIVerifier:
         except (subprocess.TimeoutExpired, json.JSONDecodeError):
             return None
 
+    # Check states that mean "not finished yet" and "finished without a problem".
+    # Anything else — FAILURE, CANCELLED, TIMED_OUT, ERROR, ACTION_REQUIRED,
+    # STARTUP_FAILURE, STALE, or a state we have never seen — is a failure:
+    # a check that did not pass must never read as success.
+    _PENDING_STATES = frozenset({"pending", "in_progress", "queued", "waiting", "requested", "expected"})
+    _PASSED_STATES = frozenset({"success", "neutral", "skipped"})
+
     def _classify_checks(self, checks: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-        """Classify checks into passed/failed/pending (case-insensitive)."""
-        return {
-            "passed": [c for c in checks if (c.get("state") or "").lower() == "success"],
-            "failed": [c for c in checks if (c.get("state") or "").lower() == "failure"],
-            "pending": [c for c in checks if (c.get("state") or "").lower() in ("pending", "in_progress", "queued")],
-        }
+        """Classify checks into passed/failed/pending (case-insensitive, fail-closed)."""
+        result: dict[str, list[dict[str, Any]]] = {"passed": [], "failed": [], "pending": []}
+        for c in checks:
+            state = (c.get("state") or "").lower()
+            if state in self._PASSED_STATES:
+                result["passed"].append(c)
+            elif state in self._PENDING_STATES:
+                result["pending"].append(c)
+            else:
+                result["failed"].append(c)
+        return result
 
     def _build_result(
         self,
